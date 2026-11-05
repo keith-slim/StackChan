@@ -24,5 +24,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.local")
     message(STATUS "StackChan: detected sdkconfig.defaults.local, applying overlay")
 endif()
 
+# Preserve managed-component file contents so Git line-ending conversion does
+# not invalidate ESP-IDF's component hashes on Windows.
+set(ENV{GIT_CONFIG_COUNT} "1")
+set(ENV{GIT_CONFIG_KEY_0} "core.autocrlf")
+set(ENV{GIT_CONFIG_VALUE_0} "false")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(stack-chan)
