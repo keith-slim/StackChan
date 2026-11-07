@@ -706,8 +706,13 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
-        // Stop review playback for live audio but keep unread segments.
-        PauseSubtitleReview();
+        // A new response must not inherit unread subtitles from an older
+        // response (especially after a user interruption).
+        if (!subtitle_queue_.empty() || subtitle_reviewing_) {
+            ESP_LOGI(TAG, "[SUBTITLE] discard stale captions on new speech (%u parts)",
+                     static_cast<unsigned>(subtitle_queue_.size()));
+        }
+        ResetSubtitleQueue();
         subtitle_speaking_ = true;
         if (speaking_modifier_id_ < 0) {
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
