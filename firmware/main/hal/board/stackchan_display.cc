@@ -588,7 +588,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         ESP_LOGE(TAG, "Avatar is invalid");
         return;
     }
-lv_obj_set_style_anim_duration(_text->get(),
+
     auto& avatar = stackchan.avatar();
     auto& motion = stackchan.motion();
 
