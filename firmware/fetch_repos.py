@@ -40,6 +40,9 @@ def clone_or_update_repo(
     if not os.path.exists(path):
         subprocess.run(["git", "clone", repo_url, path], check=True)
     else:
+        # Reuse an existing dependency directory even when its origin changed
+        # from the upstream repository to our working fork.
+        subprocess.run(["git", "-C", path, "remote", "set-url", "origin", repo_url], check=True)
         subprocess.run(["git", "-C", path, "fetch"], check=True)
 
     if ref:

@@ -84,6 +84,7 @@ public:
     void clearSpeech() override;
     void setVisible(bool visible) override;
     void setTextFont(void* font) override;
+    std::vector<std::string> splitSubtitle(std::string_view text) const override;
     uint32_t getDisplayDurationMs() const override
     {
         return _display_duration_ms;

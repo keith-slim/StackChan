@@ -29,8 +29,20 @@ private:
     lv_timer_t* subtitle_timer_ = nullptr;
     uint32_t subtitle_until_ms_ = 0;
     bool subtitle_displaying_ = false;
+    bool subtitle_speaking_ = false;
+    bool subtitle_preview_shown_ = false;
+    bool subtitle_reviewing_ = false;
+    uint32_t subtitle_review_wait_until_ms_ = 0;
+    uint32_t subtitle_next_playback_ms_ = 0;
+    uint32_t subtitle_latest_playback_ms_ = 0;
+    bool subtitle_pcm_started_ = false;
+    bool subtitle_playback_started_ = false;
+    bool subtitle_playback_synced_ = false;
 
     void AdvanceSubtitle();
+    void AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary);
+    void BeginSubtitleReview();
+    void PauseSubtitleReview();
     void ResetSubtitleQueue();
 
     lv_obj_t* preview_image_                         = nullptr;

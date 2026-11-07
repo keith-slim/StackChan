@@ -8,6 +8,7 @@
 #include <string_view>
 #include <string>
 #include <cstdint>
+#include <vector>
 
 namespace stackchan::avatar {
 
@@ -30,6 +31,11 @@ public:
     virtual void setTextFont(void* font)
     {
     }
+    virtual std::vector<std::string> splitSubtitle(std::string_view text) const
+    {
+        return {std::string(text)};
+    }
+
     virtual uint32_t getDisplayDurationMs() const
     {
         return 1700;
