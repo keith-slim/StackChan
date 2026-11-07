@@ -389,6 +389,7 @@ void StackChanAvatarDisplay::ResetSubtitleQueue()
     subtitle_queue_.clear();
     subtitle_displaying_ = false;
     subtitle_reviewing_ = false;
+    subtitle_preview_shown_ = false;
     subtitle_until_ms_ = 0;
     subtitle_review_wait_until_ms_ = 0;
     if (subtitle_timer_ != nullptr) {
@@ -521,11 +522,12 @@ void StackChanAvatarDisplay::SetChatMessage(
             if (!segment.empty()) subtitle_queue_.push_back(segment);
         }
 
-        // During audio playback there is no reading-time delay: show an
-        // immediately updated one-line preview and replace it on arrival.
-        if (!segments.empty()) {
+        // While the assistant speaks, keep the FIRST one-line preview
+        // unchanged. All later segments are saved for full review afterward.
+        if (!subtitle_preview_shown_ && !segments.empty()) {
             stackchan.avatar().setSpeech(segments.front().c_str());
-            ESP_LOGI(TAG, "[SUBTITLE] live: %s", segments.front().c_str());
+            subtitle_preview_shown_ = true;
+            ESP_LOGI(TAG, "[SUBTITLE] preview: %s", segments.front().c_str());
         }
 
     }
@@ -540,10 +542,15 @@ void StackChanAvatarDisplay::ClearChatMessages()
 
     DisplayLockGuard lock(this);
 
-    // 字幕キューとタイマーをリセット
-    ResetSubtitleQueue();
+    // The network may disconnect while the user is still reading the
+    // post-speech subtitle review. Keep the timer and unread text alive.
+    if (subtitle_reviewing_ && (subtitle_displaying_ || !subtitle_queue_.empty())) {
+        ESP_LOGI(TAG, "[SUBTITLE] keep review on chat clear (%u parts remaining)",
+                 static_cast<unsigned>(subtitle_queue_.size()));
+        return;
+    }
 
-    // 吹き出しの文字を消去
+    ResetSubtitleQueue();
     stackchan.avatar().clearSpeech();
 
     ESP_LOGI(TAG, "Chat messages cleared");
@@ -633,6 +640,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         if (subtitle_speaking_) {
             subtitle_speaking_ = false;
+            subtitle_preview_shown_ = false;
             BeginSubtitleReview();
         }
         if (speaking_modifier_id_ >= 0) {
@@ -647,6 +655,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         if (subtitle_speaking_) {
             subtitle_speaking_ = false;
+            subtitle_preview_shown_ = false;
             BeginSubtitleReview();
         }
         _is_xiaozhi_ready = true;

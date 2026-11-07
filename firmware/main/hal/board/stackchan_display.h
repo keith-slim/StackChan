@@ -30,6 +30,7 @@ private:
     uint32_t subtitle_until_ms_ = 0;
     bool subtitle_displaying_ = false;
     bool subtitle_speaking_ = false;
+    bool subtitle_preview_shown_ = false;
     bool subtitle_reviewing_ = false;
     uint32_t subtitle_review_wait_until_ms_ = 0;
 
