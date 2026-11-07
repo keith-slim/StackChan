@@ -26,6 +26,8 @@ private:
 
     // 字幕キュー
     std::deque<std::string> subtitle_queue_;
+    // Complete response retained for the post-speech subtitle review.
+    std::deque<std::string> subtitle_history_;
     lv_timer_t* subtitle_timer_ = nullptr;
     uint32_t subtitle_until_ms_ = 0;
     bool subtitle_displaying_ = false;
