@@ -477,8 +477,18 @@ void StackChanAvatarDisplay::SetChatMessage(
             return;
         }
 
-        // 受信した字幕をキューへ保存
-        subtitle_queue_.emplace_back(content);
+        // BudouXで自然な文節が2つに収まる場合だけ分割。
+        // 元の文字列を欠落させず、表示時間が増える分割は採用しない。
+        std::string incoming(content);
+        std::replace(incoming.begin(), incoming.end(), '\n', ' ');
+        std::replace(incoming.begin(), incoming.end(), '\r', ' ');
+        const auto& bubble = stackchan.avatar().getKeyElements().speechBubble;
+        const auto segments = bubble
+            ? bubble->splitSubtitle(incoming)
+            : std::vector<std::string>{incoming};
+        for (const auto& segment : segments) {
+            subtitle_queue_.push_back(segment);
+        }
 
         if (subtitle_timer_ == nullptr) {
             subtitle_timer_ = lv_timer_create(
