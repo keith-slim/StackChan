@@ -394,6 +394,8 @@ void StackChanAvatarDisplay::ResetSubtitleQueue()
     subtitle_playback_started_ = false;
     subtitle_playback_synced_ = false;
     subtitle_next_playback_ms_ = 0;
+    subtitle_latest_playback_ms_ = 0;
+    subtitle_pcm_started_ = false;
     subtitle_until_ms_ = 0;
     subtitle_review_wait_until_ms_ = 0;
     if (subtitle_timer_ != nullptr) {
@@ -483,6 +485,47 @@ void StackChanAvatarDisplay::AdvanceSubtitle()
              static_cast<unsigned>(subtitle_queue_.size()));
 }
 
+void StackChanAvatarDisplay::AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary)
+{
+    if (!subtitle_speaking_ || subtitle_queue_.empty()) return;
+    if (subtitle_playback_started_) {
+        const uint32_t target = subtitle_next_playback_ms_ +
+            (at_phrase_boundary ? 0u : 300u);
+        if (static_cast<int32_t>(played_ms - target) < 0) return;
+    }
+
+    std::string text = std::move(subtitle_queue_.front());
+    subtitle_queue_.pop_front();
+    GetStackChan().avatar().setSpeech(text.c_str());
+
+    const bool first = !subtitle_playback_started_;
+    subtitle_playback_started_ = true;
+    subtitle_playback_synced_ = true;
+    subtitle_preview_shown_ = true;
+
+    uint32_t duration = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 60u : 175u;
+    }
+    duration = std::clamp<uint32_t>(duration, 700u, 7500u);
+
+    // Anchor the first phrase to PCM time zero, not the late-arriving
+    // subtitle. Advance subsequent deadlines on this same audio timeline.
+    // Otherwise every display delay is added to all later subtitles.
+    if (first) {
+        subtitle_next_playback_ms_ = duration;
+    } else {
+        subtitle_next_playback_ms_ += duration;
+    }
+    ESP_LOGI(TAG,
+             "[SUBTITLE] playback=%lu ms, next=%lu ms, via=%s%s, remaining=%u: %s",
+             static_cast<unsigned long>(played_ms),
+             static_cast<unsigned long>(subtitle_next_playback_ms_),
+             first ? "first" : (at_phrase_boundary ? "pause" : "clock"),
+             first && played_ms > 0 ? "(pcm-anchored)" : "",
+             static_cast<unsigned>(subtitle_queue_.size()), text.c_str());
+}
+
 void StackChanAvatarDisplay::SetChatMessage(
     const char* role, const char* content)
 {
@@ -510,44 +553,17 @@ void StackChanAvatarDisplay::SetChatMessage(
 
     } else if (strcmp(role, "assistant_tick") == 0 ||
                strcmp(role, "assistant_pause") == 0) {
-        // Use output PCM as the clock. A detected pause is a preferred
-        // *candidate* for the next caption, not an exact word timestamp.
-        if (!subtitle_speaking_ || subtitle_queue_.empty()) return;
+        if (!subtitle_speaking_) return;
         const bool at_phrase_boundary = strcmp(role, "assistant_pause") == 0;
         char* end = nullptr;
         const auto played = std::strtoul(content, &end, 10);
         if (end == content || *end != '\0') return;
         const uint32_t played_ms = static_cast<uint32_t>(played);
-        if (subtitle_playback_started_) {
-            // Prefer the next voiced region after the estimated phrase time.
-            // If there is no suitable pause, fall back 300 ms later.
-            const uint32_t target = subtitle_next_playback_ms_ +
-                (at_phrase_boundary ? 0u : 300u);
-            if (static_cast<int32_t>(played_ms - target) < 0) return;
-        }
-
-        std::string text = std::move(subtitle_queue_.front());
-        subtitle_queue_.pop_front();
-        stackchan.avatar().setSpeech(text.c_str());
-        subtitle_playback_started_ = true;
-        subtitle_playback_synced_ = true;
-        subtitle_preview_shown_ = true;
-
-        // Best-effort sentence pacing: actual playback clock, estimated
-        // per-character duration. Exact word alignment requires server marks.
-        uint32_t duration = 0;
-        for (unsigned char c : text) {
-            if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 60u : 175u;
-        }
-        // Measured live captions ran ~7 seconds ahead of a ~32-second reply
-        // using 140 ms per Japanese character. Pace a little more slowly.
-        duration = std::clamp<uint32_t>(duration, 700u, 7500u);
-        subtitle_next_playback_ms_ = played_ms + duration;
-        ESP_LOGI(TAG, "[SUBTITLE] playback=%lu ms, next=%lu ms, via=%s, remaining=%u: %s",
-                 static_cast<unsigned long>(played_ms),
-                 static_cast<unsigned long>(subtitle_next_playback_ms_),
-                 at_phrase_boundary ? "pause" : "clock",
-                 static_cast<unsigned>(subtitle_queue_.size()), text.c_str());
+        // Remember PCM progress even if the first subtitle has not arrived yet.
+        // The next assistant message can then display its first phrase immediately.
+        subtitle_pcm_started_ = true;
+        subtitle_latest_playback_ms_ = played_ms;
+        AdvanceLiveSubtitle(played_ms, at_phrase_boundary);
 
     } else if (strcmp(role, "assistant") == 0) {
         if (content[0] == '\0') return;
@@ -570,8 +586,11 @@ void StackChanAvatarDisplay::SetChatMessage(
             if (!segment.empty()) subtitle_queue_.push_back(segment);
         }
 
-        // Text is queued until real PCM playback progresses. A sentence_start
-        // is not evidence that the speaker has started this text.
+        // If PCM is already playing, display the first queued phrase now,
+        // instead of waiting for the next 180-ms progress notification.
+        if (subtitle_speaking_ && subtitle_pcm_started_ && !subtitle_playback_started_) {
+            AdvanceLiveSubtitle(subtitle_latest_playback_ms_, false);
+        }
 
     }
 }
