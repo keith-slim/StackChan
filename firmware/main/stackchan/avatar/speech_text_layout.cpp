@@ -288,6 +288,12 @@ bool SplitPhraseLines(const char *text, size_t bytes, int max_width,
             ch.value >= 0x4e00 && ch.value <= 0x9fff) {
             candidate = false;
         }
+        // Latin words separated by spaces often form a person's full name,
+        // e.g. Marvin Gaye / Stevie Wonder / What's Going On.
+        if ((previous == ' ' || previous == '\t') &&
+            ascii_word(before_previous) && ascii_word(ch.value)) {
+            candidate = false;
+        }
         if (candidate) boundaries.push_back(cursor);
         before_previous = previous;
         previous = ch.value;

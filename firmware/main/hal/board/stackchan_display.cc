@@ -417,6 +417,22 @@ void StackChanAvatarDisplay::BeginSubtitleReview()
              static_cast<unsigned>(subtitle_queue_.size()));
 }
 
+void StackChanAvatarDisplay::PauseSubtitleReview()
+{
+    if (!subtitle_reviewing_) return;
+    subtitle_reviewing_ = false;
+    subtitle_displaying_ = false;
+    subtitle_until_ms_ = 0;
+    if (subtitle_timer_ != nullptr) {
+        lv_timer_delete(subtitle_timer_);
+        subtitle_timer_ = nullptr;
+    }
+    // The remaining segments belong to an earlier response and will be
+    // reviewed after the current audio finishes. Never discard them here.
+    ESP_LOGI(TAG, "[SUBTITLE] review paused (%u parts retained)",
+             static_cast<unsigned>(subtitle_queue_.size()));
+}
+
 void StackChanAvatarDisplay::AdvanceSubtitle()
 {
     if (!subtitle_reviewing_) return;
@@ -483,13 +499,9 @@ void StackChanAvatarDisplay::SetChatMessage(
     } else if (strcmp(role, "assistant") == 0) {
         if (content[0] == '\0') return;
 
-        // A new response supersedes a previous post-speech review. Do not
-        // clear late packets arriving in the 450-ms completion grace period.
-        const uint32_t now = lv_tick_get();
-        if (subtitle_reviewing_ &&
-            static_cast<int32_t>(now - subtitle_review_wait_until_ms_) >= 0) {
-            ResetSubtitleQueue();
-        }
+        // Do not lose unread text when the next response arrives.
+        // Pause the old review; append the new response after its remainder.
+        PauseSubtitleReview();
 
         std::string incoming(content);
         std::replace(incoming.begin(), incoming.end(), '\n', ' ');
@@ -647,22 +659,8 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
-        // Audio started. An active review belongs to the previous response.
-        // A very short pause just after speaking is treated as continuation.
-        if (subtitle_reviewing_) {
-            const bool continuing =
-                static_cast<int32_t>(lv_tick_get() - subtitle_review_wait_until_ms_) < 0;
-            if (continuing) {
-                subtitle_reviewing_ = false;
-                subtitle_displaying_ = false;
-                if (subtitle_timer_ != nullptr) {
-                    lv_timer_delete(subtitle_timer_);
-                    subtitle_timer_ = nullptr;
-                }
-            } else {
-                ResetSubtitleQueue();
-            }
-        }
+        // Stop review playback for live audio but keep unread segments.
+        PauseSubtitleReview();
         subtitle_speaking_ = true;
         if (speaking_modifier_id_ < 0) {
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));

@@ -35,6 +35,7 @@ private:
 
     void AdvanceSubtitle();
     void BeginSubtitleReview();
+    void PauseSubtitleReview();
     void ResetSubtitleQueue();
 
     lv_obj_t* preview_image_                         = nullptr;
