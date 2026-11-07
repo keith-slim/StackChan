@@ -388,7 +388,6 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 void StackChanAvatarDisplay::ResetSubtitleQueue()
 {
     subtitle_queue_.clear();
-    subtitle_history_.clear();
     subtitle_displaying_ = false;
     subtitle_reviewing_ = false;
     subtitle_preview_shown_ = false;
@@ -405,10 +404,9 @@ void StackChanAvatarDisplay::ResetSubtitleQueue()
 
 void StackChanAvatarDisplay::BeginSubtitleReview()
 {
-    // Replay the whole answer, including captions already shown live.
-    // Otherwise a fully-consumed live queue leaves nothing to scroll after TTS.
-    if (subtitle_history_.empty()) return;
-    subtitle_queue_ = subtitle_history_;
+    // Only display captions that did not fit into live speech playback.
+    // Replaying the entire history duplicates the spoken answer on screen.
+    if (subtitle_queue_.empty()) return;
     subtitle_reviewing_ = true;
     subtitle_displaying_ = false;
     // Give late network frames a short chance to arrive after audio ends.
@@ -566,12 +564,10 @@ void StackChanAvatarDisplay::SetChatMessage(
             ? bubble->splitSubtitle(incoming)
             : std::vector<std::string>{incoming};
 
-        // Keep live playback and post-speech review in separate queues.
+        // Live playback consumes this queue; post-speech review shows only
+        // any unread remainder, never the complete answer a second time.
         for (const auto& segment : segments) {
-            if (!segment.empty()) {
-                subtitle_queue_.push_back(segment);
-                subtitle_history_.push_back(segment);
-            }
+            if (!segment.empty()) subtitle_queue_.push_back(segment);
         }
 
         // Text is queued until real PCM playback progresses. A sentence_start
