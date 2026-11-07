@@ -84,12 +84,17 @@ public:
     void clearSpeech() override;
     void setVisible(bool visible) override;
     void setTextFont(void* font) override;
+    uint32_t getDisplayDurationMs() const override
+    {
+        return _display_duration_ms;
+    }
 
 private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _container;
     std::unique_ptr<uitk::lvgl_cpp::Image> _arrow;
     std::unique_ptr<uitk::lvgl_cpp::Container> _bubble;
     std::unique_ptr<uitk::lvgl_cpp::Label> _text;
+    uint32_t _display_duration_ms = 1700;
 };
 
 }  // namespace stackchan::avatar

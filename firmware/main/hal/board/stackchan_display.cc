@@ -17,6 +17,7 @@
 #include <stackchan/stackchan.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
+#include <algorithm>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -318,12 +319,12 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
     }
 }
 
-void StackChanAvatarDisplay::SetEmotion(const char* emotion)
+bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 {
     auto& stackchan = GetStackChan();
 
     if (!stackchan.hasAvatar() || !emotion) {
-        return;
+        return false;
     }
 
     DisplayLockGuard lock(this);
@@ -331,6 +332,7 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
     auto& avatar = stackchan.avatar();
+    bool accepted = true;
 
     // Map emotion string to stackchan::Emotion
     if (strcmp(emotion, "neutral") == 0) {
@@ -369,6 +371,7 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
     } else {
         ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
         avatar.setEmotion(Emotion::Neutral);
+        accepted = false;
     }
 
     // Resync blink modifier base eye weights
@@ -376,12 +379,85 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
     if (blink_modifier) {
         blink_modifier->resyncEyeWeights();
     }
+
+    return accepted;
 }
 
-void StackChanAvatarDisplay::SetChatMessage(const char* role, const char* content)
+void StackChanAvatarDisplay::ResetSubtitleQueue()
+{
+    subtitle_queue_.clear();
+    subtitle_displaying_ = false;
+    subtitle_until_ms_ = 0;
+
+    if (subtitle_timer_ != nullptr) {
+        lv_timer_delete(subtitle_timer_);
+        subtitle_timer_ = nullptr;
+    }
+}
+
+void StackChanAvatarDisplay::AdvanceSubtitle()
+{
+    const uint32_t now = lv_tick_get();
+
+    // 表示時間が残っている場合は切り替えない
+    if (subtitle_displaying_ &&
+        static_cast<int32_t>(now - subtitle_until_ms_) < 0) {
+        return;
+    }
+
+    if (subtitle_queue_.empty()) {
+        subtitle_displaying_ = false;
+
+        if (subtitle_timer_ != nullptr) {
+            lv_timer_delete(subtitle_timer_);
+            subtitle_timer_ = nullptr;
+        }
+        return;
+    }
+
+    std::string text = std::move(subtitle_queue_.front());
+    // 1行横スクロール用に改行だけ空白へ変換
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    std::replace(text.begin(), text.end(), '\r', ' ');
+    subtitle_queue_.pop_front();
+
+    auto& stackchan = GetStackChan();
+    if (stackchan.hasAvatar()) {
+        stackchan.avatar().setSpeech(text.c_str());
+    }
+
+    // UTF-8のバイト数ではなく文字数を数える
+    // 吹き出し側で計算した表示時間を取得
+    uint32_t duration = 1700;
+
+    if (stackchan.hasAvatar()) {
+        const auto& bubble =
+            stackchan.avatar().getKeyElements().speechBubble;
+
+        if (bubble) {
+            duration = bubble->getDisplayDurationMs();
+        }
+    }
+
+    subtitle_until_ms_ = now + duration;
+    subtitle_displaying_ = true;
+
+    ESP_LOGI(TAG, "[SUBTITLE] showing: %s (%lu ms)",
+             text.c_str(),
+             static_cast<unsigned long>(duration));
+}
+
+
+void StackChanAvatarDisplay::SetChatMessage(
+    const char* role, const char* content)
 {
     if (!setup_ui_called_) {
-        ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
+        ESP_LOGW(TAG, "SetChatMessage called before SetupUI()");
+        return;
+    }
+
+    if (role == nullptr || content == nullptr) {
+        return;
     }
 
     auto& stackchan = GetStackChan();
@@ -389,14 +465,36 @@ void StackChanAvatarDisplay::SetChatMessage(const char* role, const char* conten
         return;
     }
 
-    // ESP_LOGE(TAG, "SetChatMessage: role=%s, content=%s", role ? role : "null", content ? content : "null");
-
     DisplayLockGuard lock(this);
 
     if (strcmp(role, "system") == 0) {
+        // システム表示は従来どおり優先
+        ResetSubtitleQueue();
         stackchan.avatar().setSpeech(content);
+
     } else if (strcmp(role, "assistant") == 0) {
-        stackchan.avatar().setSpeech(content);
+        if (content[0] == '\0') {
+            return;
+        }
+
+        // 受信した字幕をキューへ保存
+        subtitle_queue_.emplace_back(content);
+
+        if (subtitle_timer_ == nullptr) {
+            subtitle_timer_ = lv_timer_create(
+                [](lv_timer_t* timer) {
+                    auto* self =
+                        static_cast<StackChanAvatarDisplay*>(
+                            lv_timer_get_user_data(timer));
+                    self->AdvanceSubtitle();
+                },
+                100,
+                this
+            );
+        }
+
+        // 最初の字幕はすぐ表示
+        AdvanceSubtitle();
     }
 }
 
@@ -409,6 +507,10 @@ void StackChanAvatarDisplay::ClearChatMessages()
 
     DisplayLockGuard lock(this);
 
+    // 字幕キューとタイマーをリセット
+    ResetSubtitleQueue();
+
+    // 吹き出しの文字を消去
     stackchan.avatar().clearSpeech();
 
     ESP_LOGI(TAG, "Chat messages cleared");
@@ -497,6 +599,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         if (speaking_modifier_id_ >= 0) {
+            // 音声回答が終了したら、未表示の字幕をリセット
+            ResetSubtitleQueue();
+
             // Start speaking
             stackchan.removeModifier(speaking_modifier_id_);
             avatar.mouth().setWeight(0);

@@ -9,6 +9,9 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_timer.h>
 #include <memory>
+#include <deque>
+#include <string>
+#include <cstdint>
 
 class StackChanAvatarDisplay : public LvglDisplay {
 private:
@@ -20,6 +23,15 @@ private:
     int blink_modifier_id_              = -1;
     bool is_sleeping_                   = false;
     uint8_t idle_motion_level_          = 2;
+
+    // 字幕キュー
+    std::deque<std::string> subtitle_queue_;
+    lv_timer_t* subtitle_timer_ = nullptr;
+    uint32_t subtitle_until_ms_ = 0;
+    bool subtitle_displaying_ = false;
+
+    void AdvanceSubtitle();
+    void ResetSubtitleQueue();
 
     lv_obj_t* preview_image_                         = nullptr;
     esp_timer_handle_t preview_timer_                = nullptr;
@@ -39,7 +51,7 @@ public:
     void InitializeLcdThemes();
 
     // Override Display methods to control Robot
-    virtual void SetEmotion(const char* emotion) override;
+    virtual bool SetEmotion(const char* emotion) override;
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;

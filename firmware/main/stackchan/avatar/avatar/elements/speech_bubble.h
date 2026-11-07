@@ -7,6 +7,7 @@
 #include "element.h"
 #include <string_view>
 #include <string>
+#include <cstdint>
 
 namespace stackchan::avatar {
 
@@ -28,6 +29,10 @@ public:
 
     virtual void setTextFont(void* font)
     {
+    }
+    virtual uint32_t getDisplayDurationMs() const
+    {
+        return 1700;
     }
 };
 
