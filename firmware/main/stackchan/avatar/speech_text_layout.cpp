@@ -282,6 +282,12 @@ bool SplitPhraseLines(const char *text, size_t bytes, int max_width,
              before_previous == 0x3042 || before_previous == 0x3069)) {
             candidate = false;
         }
+        // Keep common modifiers with the noun that follows:
+        // 透き通る声 / きれいな声 / 高い山.
+        if ((previous == 0x308b || previous == 0x306a || previous == 0x3044) &&
+            ch.value >= 0x4e00 && ch.value <= 0x9fff) {
+            candidate = false;
+        }
         if (candidate) boundaries.push_back(cursor);
         before_previous = previous;
         previous = ch.value;
