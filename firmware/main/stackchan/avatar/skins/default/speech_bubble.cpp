@@ -91,16 +91,115 @@ std::vector<std::string> DefaultSpeechBubble::splitSubtitle(std::string_view tex
     if (text.empty()) return {};
     const auto* font = _text->getTextFont();
     const int viewport_width = _bubble_max_width - _text_mx * 2 - 4;
+    void* font_context = const_cast<lv_font_t*>(font);
 
+    // Split at sentence punctuation first. A comma is only a preferred
+    // boundary when a sentence does not fit in the bubble. Keep punctuation
+    // in the preceding fragment and never split a UTF-8 codepoint.
+    const std::string source(text);
     std::vector<std::string> segments;
-    if (!speech_layout::SplitPhraseLines(text.data(), text.size(), viewport_width,
-                                         subtitle_glyph_width,
-                                         const_cast<lv_font_t*>(font), segments) ||
-        segments.empty()) {
-        // Unsupported/invalid input: preserve the original text unchanged.
-        return {std::string(text)};
+
+    auto append_fitted = [&](const std::string& piece) -> bool {
+        if (piece.empty()) return true;
+        const int width = speech_layout::MeasureWidth(
+            piece.data(), piece.size(), subtitle_glyph_width, font_context);
+        if (width < 0) return false;
+        if (width <= viewport_width) {
+            segments.push_back(piece);
+            return true;
+        }
+        std::vector<std::string> wrapped;
+        if (!speech_layout::SplitPhraseLines(
+                piece.data(), piece.size(), viewport_width,
+                subtitle_glyph_width, font_context, wrapped) || wrapped.empty()) {
+            return false;
+        }
+        for (auto& fragment : wrapped) {
+            if (!fragment.empty()) segments.push_back(std::move(fragment));
+        }
+        return true;
+    };
+
+    auto append_sentence = [&](const std::string& sentence) -> bool {
+        if (sentence.empty()) return true;
+        const int width = speech_layout::MeasureWidth(
+            sentence.data(), sentence.size(), subtitle_glyph_width, font_context);
+        if (width < 0) return false;
+        if (width <= viewport_width) {
+            segments.push_back(sentence);
+            return true;
+        }
+
+        std::string pending;
+        size_t begin = 0;
+        for (size_t i = 0; i < sentence.size();) {
+            size_t delimiter_size = 0;
+            if (sentence.compare(i, 3, "、") == 0) delimiter_size = 3;
+            else if (sentence[i] == ',') delimiter_size = 1;
+            if (!delimiter_size) {
+                ++i;
+                continue;
+            }
+
+            const std::string clause = sentence.substr(begin, i + delimiter_size - begin);
+            const std::string merged = pending + clause;
+            const int merged_width = speech_layout::MeasureWidth(
+                merged.data(), merged.size(), subtitle_glyph_width, font_context);
+            if (merged_width < 0) return false;
+            if (!pending.empty() && merged_width > viewport_width) {
+                if (!append_fitted(pending)) return false;
+                pending = clause;
+            } else {
+                pending = merged;
+            }
+            i += delimiter_size;
+            begin = i;
+        }
+
+        const std::string tail = sentence.substr(begin);
+        const std::string merged = pending + tail;
+        const int merged_width = speech_layout::MeasureWidth(
+            merged.data(), merged.size(), subtitle_glyph_width, font_context);
+        if (merged_width < 0) return false;
+        if (!pending.empty() && !tail.empty() && merged_width > viewport_width) {
+            if (!append_fitted(pending)) return false;
+            return append_fitted(tail);
+        }
+        return append_fitted(merged);
+    };
+
+    size_t begin = 0;
+    for (size_t i = 0; i < source.size();) {
+        size_t delimiter_size = 0;
+        if (source.compare(i, 3, "。") == 0 ||
+            source.compare(i, 3, "！") == 0 ||
+            source.compare(i, 3, "？") == 0) {
+            delimiter_size = 3;
+        } else if (source[i] == '!' || source[i] == '?') {
+            delimiter_size = 1;
+        }
+        if (!delimiter_size) {
+            ++i;
+            continue;
+        }
+        i += delimiter_size;
+        // Keep consecutive !/? and closing quotation marks with the sentence.
+        while (i < source.size()) {
+            if (source[i] == '!' || source[i] == '?') {
+                ++i;
+            } else if (source.compare(i, 3, "」") == 0 ||
+                       source.compare(i, 3, "』") == 0 ||
+                       source.compare(i, 3, "）") == 0) {
+                i += 3;
+            } else {
+                break;
+            }
+        }
+        if (!append_sentence(source.substr(begin, i - begin))) return {source};
+        begin = i;
     }
-    return segments;
+    if (begin < source.size() && !append_sentence(source.substr(begin))) return {source};
+    return segments.empty() ? std::vector<std::string>{source} : segments;
 }
 
 void DefaultSpeechBubble::setSpeech(std::string_view text)
