@@ -36,6 +36,9 @@ private:
     uint32_t subtitle_next_playback_ms_ = 0;
     uint32_t subtitle_latest_playback_ms_ = 0;
     bool subtitle_pcm_started_ = false;
+    // Assistant text received before speaking belongs to the upcoming response,
+    // not to the completed response's unread review queue.
+    bool subtitle_prestart_queued_ = false;
     bool subtitle_playback_started_ = false;
     bool subtitle_playback_synced_ = false;
 
