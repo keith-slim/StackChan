@@ -396,6 +396,7 @@ void StackChanAvatarDisplay::ResetSubtitleQueue()
     subtitle_next_playback_ms_ = 0;
     subtitle_latest_playback_ms_ = 0;
     subtitle_pcm_started_ = false;
+    subtitle_prestart_queued_ = false;
     subtitle_until_ms_ = 0;
     subtitle_review_wait_until_ms_ = 0;
     if (subtitle_timer_ != nullptr) {
@@ -568,9 +569,16 @@ void StackChanAvatarDisplay::SetChatMessage(
     } else if (strcmp(role, "assistant") == 0) {
         if (content[0] == '\0') return;
 
-        // Do not lose unread text when the next response arrives.
-        // Pause the old review; append the new response after its remainder.
-        PauseSubtitleReview();
+        if (!subtitle_speaking_ && !subtitle_prestart_queued_) {
+            // The first text packet of the upcoming response may arrive while
+            // we are still LISTENING. Discard only the old response's review,
+            // then retain all pre-start packets until SPEAKING begins.
+            ESP_LOGI(TAG,
+                     "[SUBTITLE] new response text before speaking; old review=%u parts",
+                     static_cast<unsigned>(subtitle_queue_.size()));
+            ResetSubtitleQueue();
+            subtitle_prestart_queued_ = true;
+        }
 
         std::string incoming(content);
         std::replace(incoming.begin(), incoming.end(), '\n', ' ');
@@ -735,13 +743,24 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
-        // A new response must not inherit unread subtitles from an older
-        // response (especially after a user interruption).
-        if (!subtitle_queue_.empty() || subtitle_reviewing_) {
-            ESP_LOGI(TAG, "[SUBTITLE] discard stale captions on new speech (%u parts)",
+        if (subtitle_prestart_queued_) {
+            // The new response has already delivered text before SPEAKING.
+            // Reset PCM timing but keep those new captions for the first tick.
+            auto pending = std::move(subtitle_queue_);
+            ResetSubtitleQueue();
+            subtitle_queue_ = std::move(pending);
+            ESP_LOGI(TAG, "[SUBTITLE] preserved %u pre-start parts",
                      static_cast<unsigned>(subtitle_queue_.size()));
+        } else {
+            // No new pre-start text: only the old response's unread captions
+            // can be present, so discard them on the new speech boundary.
+            if (!subtitle_queue_.empty() || subtitle_reviewing_) {
+                ESP_LOGI(TAG,
+                         "[SUBTITLE] discard stale captions on new speech (%u parts)",
+                         static_cast<unsigned>(subtitle_queue_.size()));
+            }
+            ResetSubtitleQueue();
         }
-        ResetSubtitleQueue();
         subtitle_speaking_ = true;
         if (speaking_modifier_id_ < 0) {
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
