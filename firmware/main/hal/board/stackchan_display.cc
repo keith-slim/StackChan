@@ -528,9 +528,12 @@ void StackChanAvatarDisplay::SetChatMessage(
         // per-character duration. Exact word alignment requires server marks.
         uint32_t duration = 0;
         for (unsigned char c : text) {
-            if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 65u : 195u;
+            if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 50u : 140u;
         }
-        duration = std::clamp<uint32_t>(duration, 900u, 9000u);
+        // The earlier 195 ms/Japanese character estimate accumulated enough
+        // delay to leave several captions for after the audio finished.
+        // Keep pacing tied to speaker output while avoiding that backlog.
+        duration = std::clamp<uint32_t>(duration, 700u, 6500u);
         subtitle_next_playback_ms_ = played_ms + duration;
         ESP_LOGI(TAG, "[SUBTITLE] playback=%lu ms, next=%lu ms, remaining=%u: %s",
                  static_cast<unsigned long>(played_ms),
