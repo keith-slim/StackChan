@@ -464,6 +464,11 @@ void StackChanAvatarDisplay::AdvanceSubtitle()
     const auto& bubble = stackchan.avatar().getKeyElements().speechBubble;
     if (bubble) duration = bubble->getDisplayDurationMs();
 
+    // The live preview changes immediately. Only post-speech review needs
+    // enough time for the user to read each complete phrase.
+    // 1.7 s -> 2.55 s, 2.6 s -> 3.9 s, 5.5 s -> 8.0 s maximum.
+    duration = std::min<uint32_t>((duration * 3u) / 2u, 8000u);
+
     subtitle_until_ms_ = now + duration;
     subtitle_displaying_ = true;
     ESP_LOGI(TAG, "[SUBTITLE] review: %s (%lu ms; remaining %u)",
