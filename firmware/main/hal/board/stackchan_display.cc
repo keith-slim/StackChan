@@ -388,6 +388,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 void StackChanAvatarDisplay::ResetSubtitleQueue()
 {
     subtitle_queue_.clear();
+    subtitle_history_.clear();
     subtitle_displaying_ = false;
     subtitle_reviewing_ = false;
     subtitle_preview_shown_ = false;
@@ -404,7 +405,10 @@ void StackChanAvatarDisplay::ResetSubtitleQueue()
 
 void StackChanAvatarDisplay::BeginSubtitleReview()
 {
-    if (subtitle_queue_.empty()) return;
+    // Replay the whole answer, including captions already shown live.
+    // Otherwise a fully-consumed live queue leaves nothing to scroll after TTS.
+    if (subtitle_history_.empty()) return;
+    subtitle_queue_ = subtitle_history_;
     subtitle_reviewing_ = true;
     subtitle_displaying_ = false;
     // Give late network frames a short chance to arrive after audio ends.
@@ -528,12 +532,11 @@ void StackChanAvatarDisplay::SetChatMessage(
         // per-character duration. Exact word alignment requires server marks.
         uint32_t duration = 0;
         for (unsigned char c : text) {
-            if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 50u : 140u;
+            if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 60u : 175u;
         }
-        // The earlier 195 ms/Japanese character estimate accumulated enough
-        // delay to leave several captions for after the audio finished.
-        // Keep pacing tied to speaker output while avoiding that backlog.
-        duration = std::clamp<uint32_t>(duration, 700u, 6500u);
+        // Measured live captions ran ~7 seconds ahead of a ~32-second reply
+        // using 140 ms per Japanese character. Pace a little more slowly.
+        duration = std::clamp<uint32_t>(duration, 850u, 7500u);
         subtitle_next_playback_ms_ = played_ms + duration;
         ESP_LOGI(TAG, "[SUBTITLE] playback=%lu ms, next=%lu ms, remaining=%u: %s",
                  static_cast<unsigned long>(played_ms),
@@ -555,9 +558,12 @@ void StackChanAvatarDisplay::SetChatMessage(
             ? bubble->splitSubtitle(incoming)
             : std::vector<std::string>{incoming};
 
-        // Preserve ALL received text for the review after audio finishes.
+        // Keep live playback and post-speech review in separate queues.
         for (const auto& segment : segments) {
-            if (!segment.empty()) subtitle_queue_.push_back(segment);
+            if (!segment.empty()) {
+                subtitle_queue_.push_back(segment);
+                subtitle_history_.push_back(segment);
+            }
         }
 
         // Text is queued until real PCM playback progresses. A sentence_start
