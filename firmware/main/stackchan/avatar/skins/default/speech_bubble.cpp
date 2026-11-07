@@ -59,7 +59,7 @@ DefaultSpeechBubble::DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryCol
     _text->setPos(0, 0);
     _text->setWidth(320 - _text_mx * 2);
     // スクロールの時間を15秒に設定
-    lv_obj_set_style_anim_duration(_text->get(), 15000, LV_PART_MAIN);
+    lv_obj_set_style_anim_duration(_text->get(), 12000, LV_PART_MAIN);
     _text->setLongMode(LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
 
     clearSpeech();
@@ -96,21 +96,6 @@ void DefaultSpeechBubble::setSpeech(std::string_view text)
         LV_TEXT_FLAG_NONE
     );
 
-    const int32_t viewport_width =
-        lv_obj_get_width(_text->get());
-
-    // 必要な表示時間を計算
-    if (text_size.x > viewport_width) {
-        _display_duration_ms = 16000;
-    } else {
-        const uint32_t ms =
-            800u + static_cast<uint32_t>(
-                std::max<int32_t>(0, text_size.x)) * 7u;
-
-        _display_duration_ms =
-            std::clamp<uint32_t>(ms, 1700u, 4000u);
-    }
-
     // 元の可変幅の吹き出し
     int bubble_width =
         min(text_size.x + _text_mx * 2, _bubble_max_width);
@@ -130,8 +115,25 @@ void DefaultSpeechBubble::setSpeech(std::string_view text)
     _bubble->setWidth(bubble_width);
     _bubble->setX(bubble_offset_x);
 
-    // 吹き出しの位置を決めてから、
-    // 新しい文章のスクロールを先頭から開始
+    // 文字の表示領域を吹き出しの内幅に合わせる
+    const int32_t viewport_width =
+        bubble_width - _text_mx * 2;
+
+    _text->setWidth(viewport_width);
+
+    // 実際の表示領域を基準に表示時間を計算
+    if (text_size.x > viewport_width) {
+        _display_duration_ms = 13000;
+    } else {
+        const uint32_t ms =
+            800u + static_cast<uint32_t>(
+                std::max<int32_t>(0, text_size.x)) * 7u;
+
+        _display_duration_ms =
+            std::clamp<uint32_t>(ms, 1700u, 4000u);
+    }
+
+    // 前のスクロール位置をリセット
     _text->setLongMode(
         LV_LABEL_LONG_MODE_SCROLL_CIRCULAR
     );
