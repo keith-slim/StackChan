@@ -510,16 +510,23 @@ void StackChanAvatarDisplay::SetChatMessage(
         stackchan.avatar().setSpeech(content);
 
 
-    } else if (strcmp(role, "assistant_tick") == 0) {
-        // A TTS tick represents PCM delivered to the audio codec, not a
-        // sentence_start message received ahead of the speech.
+    } else if (strcmp(role, "assistant_tick") == 0 ||
+               strcmp(role, "assistant_pause") == 0) {
+        // Use output PCM as the clock. A detected pause is a preferred
+        // *candidate* for the next caption, not an exact word timestamp.
         if (!subtitle_speaking_ || subtitle_queue_.empty()) return;
+        const bool at_phrase_boundary = strcmp(role, "assistant_pause") == 0;
         char* end = nullptr;
         const auto played = std::strtoul(content, &end, 10);
         if (end == content || *end != '\0') return;
         const uint32_t played_ms = static_cast<uint32_t>(played);
-        if (subtitle_playback_started_ &&
-            static_cast<int32_t>(played_ms - subtitle_next_playback_ms_) < 0) return;
+        if (subtitle_playback_started_) {
+            // Prefer the next voiced region after the estimated phrase time.
+            // If there is no suitable pause, fall back 850 ms later.
+            const uint32_t target = subtitle_next_playback_ms_ +
+                (at_phrase_boundary ? 0u : 850u);
+            if (static_cast<int32_t>(played_ms - target) < 0) return;
+        }
 
         std::string text = std::move(subtitle_queue_.front());
         subtitle_queue_.pop_front();
@@ -538,9 +545,10 @@ void StackChanAvatarDisplay::SetChatMessage(
         // using 140 ms per Japanese character. Pace a little more slowly.
         duration = std::clamp<uint32_t>(duration, 850u, 7500u);
         subtitle_next_playback_ms_ = played_ms + duration;
-        ESP_LOGI(TAG, "[SUBTITLE] playback=%lu ms, next=%lu ms, remaining=%u: %s",
+        ESP_LOGI(TAG, "[SUBTITLE] playback=%lu ms, next=%lu ms, via=%s, remaining=%u: %s",
                  static_cast<unsigned long>(played_ms),
                  static_cast<unsigned long>(subtitle_next_playback_ms_),
+                 at_phrase_boundary ? "pause" : "clock",
                  static_cast<unsigned>(subtitle_queue_.size()), text.c_str());
 
     } else if (strcmp(role, "assistant") == 0) {
