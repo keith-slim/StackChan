@@ -520,9 +520,9 @@ void StackChanAvatarDisplay::SetChatMessage(
         const uint32_t played_ms = static_cast<uint32_t>(played);
         if (subtitle_playback_started_) {
             // Prefer the next voiced region after the estimated phrase time.
-            // If there is no suitable pause, fall back 850 ms later.
+            // If there is no suitable pause, fall back 300 ms later.
             const uint32_t target = subtitle_next_playback_ms_ +
-                (at_phrase_boundary ? 0u : 850u);
+                (at_phrase_boundary ? 0u : 300u);
             if (static_cast<int32_t>(played_ms - target) < 0) return;
         }
 
@@ -541,7 +541,7 @@ void StackChanAvatarDisplay::SetChatMessage(
         }
         // Measured live captions ran ~7 seconds ahead of a ~32-second reply
         // using 140 ms per Japanese character. Pace a little more slowly.
-        duration = std::clamp<uint32_t>(duration, 850u, 7500u);
+        duration = std::clamp<uint32_t>(duration, 700u, 7500u);
         subtitle_next_playback_ms_ = played_ms + duration;
         ESP_LOGI(TAG, "[SUBTITLE] playback=%lu ms, next=%lu ms, via=%s, remaining=%u: %s",
                  static_cast<unsigned long>(played_ms),
