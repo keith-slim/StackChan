@@ -88,32 +88,19 @@ int subtitle_glyph_width(uint32_t ch, uint32_t next, void* context)
 
 std::vector<std::string> DefaultSpeechBubble::splitSubtitle(std::string_view text) const
 {
-    auto unsplit = [&]() {
-        return std::vector<std::string>{std::string(text)};
-    };
-    if (text.empty() || text.size() > speech_layout::MAX_TEXT_BYTES) return unsplit();
-
+    if (text.empty()) return {};
     const auto* font = _text->getTextFont();
-    const int max_width = _bubble_max_width - _text_mx * 2;
-    const size_t pos = speech_layout::FindTwoLinePhraseSplit(
-        text.data(), text.size(), max_width, subtitle_glyph_width,
-        const_cast<lv_font_t*>(font));
-    if (pos == 0 || pos >= text.size()) return unsplit();
+    const int viewport_width = _bubble_max_width - _text_mx * 2 - 4;
 
-    const int left_width = speech_layout::MeasureWidth(
-        text.data(), pos, subtitle_glyph_width, const_cast<lv_font_t*>(font));
-    const int right_width = speech_layout::MeasureWidth(
-        text.data() + pos, text.size() - pos, subtitle_glyph_width,
-        const_cast<lv_font_t*>(font));
-    if (left_width <= 0 || right_width <= 0) return unsplit();
-
-    auto read_ms = [](int width) -> uint32_t {
-        const uint32_t ms = 800u + static_cast<uint32_t>(width) * 7u;
-        return std::clamp<uint32_t>(ms, 1700u, 4000u);
-    };
-    if (read_ms(left_width) + read_ms(right_width) > 5500u) return unsplit();
-
-    return {std::string(text.substr(0, pos)), std::string(text.substr(pos))};
+    std::vector<std::string> segments;
+    if (!speech_layout::SplitPhraseLines(text.data(), text.size(), viewport_width,
+                                         subtitle_glyph_width,
+                                         const_cast<lv_font_t*>(font), segments) ||
+        segments.empty()) {
+        // Unsupported/invalid input: preserve the original text unchanged.
+        return {std::string(text)};
+    }
+    return segments;
 }
 
 void DefaultSpeechBubble::setSpeech(std::string_view text)

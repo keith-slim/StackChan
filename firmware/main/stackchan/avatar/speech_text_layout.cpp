@@ -250,6 +250,66 @@ Result Wrap(const char *text, size_t bytes, char *output, size_t capacity,
     return result;
 }
 
+
+bool SplitPhraseLines(const char *text, size_t bytes, int max_width,
+                      GlyphWidth width, void *context,
+                      std::vector<std::string> &segments)
+{
+    segments.clear();
+    if (!text || !width || max_width <= 0 || bytes > MAX_TEXT_BYTES) return false;
+    if (bytes == 0) return true;
+    if (MeasureWidth(text, bytes, width, context) < 0) return false;
+
+    // Keep every byte of the original text. The boundaries are UTF-8 offsets,
+    // and only natural BudouX positions and whitespace are eligible.
+    std::vector<size_t> boundaries;
+    boundaries.reserve(bytes / 3 + 2);
+    boundaries.push_back(0);
+    size_t cursor = 0;
+    uint32_t previous = 0;
+    uint32_t before_previous = 0;
+    while (cursor < bytes) {
+        const auto ch = decode(text, bytes, cursor);
+        if (!ch.valid || ch.value == '\n' || ch.value == '\r') return false;
+        bool candidate = cursor > 0 && allowed(previous, ch.value) &&
+            (previous == ' ' || previous == '\t' ||
+             (!(ascii_word(previous) && ascii_word(ch.value)) &&
+              phrase_break(text, bytes, cursor)));
+
+        // Do not separate demonstratives such as この辺 / その曲 / あの声.
+        if (previous == 0x306e &&
+            (before_previous == 0x3053 || before_previous == 0x305d ||
+             before_previous == 0x3042 || before_previous == 0x3069)) {
+            candidate = false;
+        }
+        if (candidate) boundaries.push_back(cursor);
+        before_previous = previous;
+        previous = ch.value;
+        cursor = ch.next;
+    }
+    boundaries.push_back(bytes);
+
+    // Greedily fill each line up to the real font width. If one phrase is
+    // wider than a line, preserve the whole phrase and let LVGL scroll it.
+    size_t begin = 0;
+    while (begin + 1 < boundaries.size()) {
+        size_t end = begin + 1;
+        for (size_t index = begin + 1; index < boundaries.size(); ++index) {
+            const int pixels = text_width(text, bytes, boundaries[begin],
+                                          boundaries[index], width, context);
+            if (pixels < 0) {
+                segments.clear();
+                return false;
+            }
+            if (pixels <= max_width) end = index;
+            else break;
+        }
+        segments.emplace_back(text + boundaries[begin], boundaries[end] - boundaries[begin]);
+        begin = end;
+    }
+    return true;
+}
+
 size_t FindTwoLinePhraseSplit(const char *text, size_t bytes, int max_width,
                               GlyphWidth width, void *context)
 {

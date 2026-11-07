@@ -1,6 +1,8 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
+#include <vector>
 
 namespace speech_layout {
 constexpr size_t MAX_TEXT_BYTES = 512;
@@ -21,6 +23,13 @@ int MeasureWidth(const char *text, size_t bytes, GlyphWidth width, void *context
 // 原文・音声合成用の文章は変更せず、表示用の改行だけを追加する。
 Result Wrap(const char *text, size_t bytes, char *output, size_t capacity,
             int max_width, GlyphWidth width, void *context);
+// Packs unmodified UTF-8 text into one-line phrase segments.
+// Never splits inside a UTF-8 character or a BudouX phrase; an oversized
+// phrase is kept intact for horizontal scrolling. Returns false on bad input.
+bool SplitPhraseLines(const char *text, size_t bytes, int max_width,
+                      GlyphWidth width, void *context,
+                      std::vector<std::string> &segments);
+
 // Returns a byte offset at a natural BudouX phrase boundary, or 0.
 size_t FindTwoLinePhraseSplit(const char *text, size_t bytes, int max_width,
                               GlyphWidth width, void *context);
