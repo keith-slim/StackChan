@@ -18,6 +18,7 @@
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 #include <algorithm>
+#include <cstdlib>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -390,6 +391,9 @@ void StackChanAvatarDisplay::ResetSubtitleQueue()
     subtitle_displaying_ = false;
     subtitle_reviewing_ = false;
     subtitle_preview_shown_ = false;
+    subtitle_playback_started_ = false;
+    subtitle_playback_synced_ = false;
+    subtitle_next_playback_ms_ = 0;
     subtitle_until_ms_ = 0;
     subtitle_review_wait_until_ms_ = 0;
     if (subtitle_timer_ != nullptr) {
@@ -502,6 +506,37 @@ void StackChanAvatarDisplay::SetChatMessage(
         stackchan.avatar().setSpeech(content);
 
 
+    } else if (strcmp(role, "assistant_tick") == 0) {
+        // A TTS tick represents PCM delivered to the audio codec, not a
+        // sentence_start message received ahead of the speech.
+        if (!subtitle_speaking_ || subtitle_queue_.empty()) return;
+        char* end = nullptr;
+        const auto played = std::strtoul(content, &end, 10);
+        if (end == content || *end != '\0') return;
+        const uint32_t played_ms = static_cast<uint32_t>(played);
+        if (subtitle_playback_started_ &&
+            static_cast<int32_t>(played_ms - subtitle_next_playback_ms_) < 0) return;
+
+        std::string text = std::move(subtitle_queue_.front());
+        subtitle_queue_.pop_front();
+        stackchan.avatar().setSpeech(text.c_str());
+        subtitle_playback_started_ = true;
+        subtitle_playback_synced_ = true;
+        subtitle_preview_shown_ = true;
+
+        // Best-effort sentence pacing: actual playback clock, estimated
+        // per-character duration. Exact word alignment requires server marks.
+        uint32_t duration = 0;
+        for (unsigned char c : text) {
+            if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 65u : 195u;
+        }
+        duration = std::clamp<uint32_t>(duration, 900u, 9000u);
+        subtitle_next_playback_ms_ = played_ms + duration;
+        ESP_LOGI(TAG, "[SUBTITLE] playback=%lu ms, next=%lu ms, remaining=%u: %s",
+                 static_cast<unsigned long>(played_ms),
+                 static_cast<unsigned long>(subtitle_next_playback_ms_),
+                 static_cast<unsigned>(subtitle_queue_.size()), text.c_str());
+
     } else if (strcmp(role, "assistant") == 0) {
         if (content[0] == '\0') return;
 
@@ -522,13 +557,8 @@ void StackChanAvatarDisplay::SetChatMessage(
             if (!segment.empty()) subtitle_queue_.push_back(segment);
         }
 
-        // While the assistant speaks, keep the FIRST one-line preview
-        // unchanged. All later segments are saved for full review afterward.
-        if (!subtitle_preview_shown_ && !segments.empty()) {
-            stackchan.avatar().setSpeech(segments.front().c_str());
-            subtitle_preview_shown_ = true;
-            ESP_LOGI(TAG, "[SUBTITLE] preview: %s", segments.front().c_str());
-        }
+        // Text is queued until real PCM playback progresses. A sentence_start
+        // is not evidence that the speaker has started this text.
 
     }
 }
