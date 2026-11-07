@@ -33,6 +33,9 @@ private:
     bool subtitle_preview_shown_ = false;
     bool subtitle_reviewing_ = false;
     uint32_t subtitle_review_wait_until_ms_ = 0;
+    uint32_t subtitle_next_playback_ms_ = 0;
+    bool subtitle_playback_started_ = false;
+    bool subtitle_playback_synced_ = false;
 
     void AdvanceSubtitle();
     void BeginSubtitleReview();
