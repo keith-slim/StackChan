@@ -59,7 +59,7 @@ DefaultSpeechBubble::DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryCol
     _text->setPos(0, 0);
     _text->setWidth(320 - _text_mx * 2);
     // スクロールの時間を15秒に設定
-    lv_obj_set_style_anim_duration(_text->get(), 9000, LV_PART_MAIN);
+    lv_obj_set_style_anim_duration(_text->get(), 4500, LV_PART_MAIN);
     _text->setLongMode(LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
 
     clearSpeech();
@@ -123,7 +123,7 @@ void DefaultSpeechBubble::setSpeech(std::string_view text)
 
     // 実際の表示領域を基準に表示時間を計算
     if (text_size.x > viewport_width) {
-        _display_duration_ms = 10000;
+        _display_duration_ms = 5500;
     } else {
         const uint32_t ms =
             800u + static_cast<uint32_t>(
