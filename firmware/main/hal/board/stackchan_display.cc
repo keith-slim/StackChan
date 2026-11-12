@@ -18,6 +18,7 @@
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 #include <algorithm>
+#include <cstdlib>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -383,70 +384,148 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     return accepted;
 }
 
+
 void StackChanAvatarDisplay::ResetSubtitleQueue()
 {
     subtitle_queue_.clear();
     subtitle_displaying_ = false;
+    subtitle_reviewing_ = false;
+    subtitle_preview_shown_ = false;
+    subtitle_playback_started_ = false;
+    subtitle_playback_synced_ = false;
+    subtitle_next_playback_ms_ = 0;
+    subtitle_latest_playback_ms_ = 0;
+    subtitle_pcm_started_ = false;
+    subtitle_prestart_queued_ = false;
     subtitle_until_ms_ = 0;
-
+    subtitle_review_wait_until_ms_ = 0;
     if (subtitle_timer_ != nullptr) {
         lv_timer_delete(subtitle_timer_);
         subtitle_timer_ = nullptr;
     }
 }
 
+void StackChanAvatarDisplay::BeginSubtitleReview()
+{
+    // Only display captions that did not fit into live speech playback.
+    // Replaying the entire history duplicates the spoken answer on screen.
+    if (subtitle_queue_.empty()) return;
+    subtitle_reviewing_ = true;
+    subtitle_displaying_ = false;
+    // Give late network frames a short chance to arrive after audio ends.
+    subtitle_review_wait_until_ms_ = lv_tick_get() + 450;
+    subtitle_until_ms_ = 0;
+    if (subtitle_timer_ == nullptr) {
+        subtitle_timer_ = lv_timer_create(
+            [](lv_timer_t* timer) {
+                auto* self = static_cast<StackChanAvatarDisplay*>(
+                    lv_timer_get_user_data(timer));
+                self->AdvanceSubtitle();
+            }, 100, this);
+    }
+    ESP_LOGI(TAG, "[SUBTITLE] audio finished; review queued (%u parts)",
+             static_cast<unsigned>(subtitle_queue_.size()));
+}
+
+void StackChanAvatarDisplay::PauseSubtitleReview()
+{
+    if (!subtitle_reviewing_) return;
+    subtitle_reviewing_ = false;
+    subtitle_displaying_ = false;
+    subtitle_until_ms_ = 0;
+    if (subtitle_timer_ != nullptr) {
+        lv_timer_delete(subtitle_timer_);
+        subtitle_timer_ = nullptr;
+    }
+    // The remaining segments belong to an earlier response and will be
+    // reviewed after the current audio finishes. Never discard them here.
+    ESP_LOGI(TAG, "[SUBTITLE] review paused (%u parts retained)",
+             static_cast<unsigned>(subtitle_queue_.size()));
+}
+
 void StackChanAvatarDisplay::AdvanceSubtitle()
 {
+    if (!subtitle_reviewing_) return;
     const uint32_t now = lv_tick_get();
-
-    // 表示時間が残っている場合は切り替えない
-    if (subtitle_displaying_ &&
-        static_cast<int32_t>(now - subtitle_until_ms_) < 0) {
-        return;
-    }
+    if (static_cast<int32_t>(now - subtitle_review_wait_until_ms_) < 0) return;
+    if (subtitle_displaying_ && static_cast<int32_t>(now - subtitle_until_ms_) < 0) return;
 
     if (subtitle_queue_.empty()) {
+        subtitle_reviewing_ = false;
         subtitle_displaying_ = false;
-
         if (subtitle_timer_ != nullptr) {
             lv_timer_delete(subtitle_timer_);
             subtitle_timer_ = nullptr;
         }
+        ESP_LOGI(TAG, "[SUBTITLE] review completed");
         return;
     }
 
     std::string text = std::move(subtitle_queue_.front());
-    // 1行横スクロール用に改行だけ空白へ変換
-    std::replace(text.begin(), text.end(), '\n', ' ');
-    std::replace(text.begin(), text.end(), '\r', ' ');
     subtitle_queue_.pop_front();
-
     auto& stackchan = GetStackChan();
-    if (stackchan.hasAvatar()) {
-        stackchan.avatar().setSpeech(text.c_str());
+    if (!stackchan.hasAvatar()) {
+        ResetSubtitleQueue();
+        return;
     }
+    stackchan.avatar().setSpeech(text.c_str());
 
-    // UTF-8のバイト数ではなく文字数を数える
-    // 吹き出し側で計算した表示時間を取得
     uint32_t duration = 1700;
+    const auto& bubble = stackchan.avatar().getKeyElements().speechBubble;
+    if (bubble) duration = bubble->getDisplayDurationMs();
 
-    if (stackchan.hasAvatar()) {
-        const auto& bubble =
-            stackchan.avatar().getKeyElements().speechBubble;
-
-        if (bubble) {
-            duration = bubble->getDisplayDurationMs();
-        }
-    }
+    // The live preview changes immediately. Only post-speech review needs
+    // enough time for the user to read each complete phrase.
+    // 1.7 s -> 2.55 s, 2.6 s -> 3.9 s, 5.5 s -> 8.0 s maximum.
+    duration = std::min<uint32_t>((duration * 3u) / 2u, 8000u);
 
     subtitle_until_ms_ = now + duration;
     subtitle_displaying_ = true;
-
-    ESP_LOGI(TAG, "[SUBTITLE] showing: %s (%lu ms)",
-             text.c_str(),
-             static_cast<unsigned long>(duration));
+    ESP_LOGI(TAG, "[SUBTITLE] review: %s (%lu ms; remaining %u)",
+             text.c_str(), static_cast<unsigned long>(duration),
+             static_cast<unsigned>(subtitle_queue_.size()));
 }
 
+void StackChanAvatarDisplay::AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary)
+{
+    if (!subtitle_speaking_ || subtitle_queue_.empty()) return;
+    if (subtitle_playback_started_) {
+        const uint32_t target = subtitle_next_playback_ms_ +
+            (at_phrase_boundary ? 0u : 300u);
+        if (static_cast<int32_t>(played_ms - target) < 0) return;
+    }
+
+    std::string text = std::move(subtitle_queue_.front());
+    subtitle_queue_.pop_front();
+    GetStackChan().avatar().setSpeech(text.c_str());
+
+    const bool first = !subtitle_playback_started_;
+    subtitle_playback_started_ = true;
+    subtitle_playback_synced_ = true;
+    subtitle_preview_shown_ = true;
+
+    uint32_t duration = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 60u : 175u;
+    }
+    duration = std::clamp<uint32_t>(duration, 700u, 7500u);
+
+    // Anchor the first phrase to PCM time zero, not the late-arriving
+    // subtitle. Advance subsequent deadlines on this same audio timeline.
+    // Otherwise every display delay is added to all later subtitles.
+    if (first) {
+        subtitle_next_playback_ms_ = duration;
+    } else {
+        subtitle_next_playback_ms_ += duration;
+    }
+    ESP_LOGI(TAG,
+             "[SUBTITLE] playback=%lu ms, next=%lu ms, via=%s%s, remaining=%u: %s",
+             static_cast<unsigned long>(played_ms),
+             static_cast<unsigned long>(subtitle_next_playback_ms_),
+             first ? "first" : (at_phrase_boundary ? "pause" : "clock"),
+             first && played_ms > 0 ? "(pcm-anchored)" : "",
+             static_cast<unsigned>(subtitle_queue_.size()), text.c_str());
+}
 
 void StackChanAvatarDisplay::SetChatMessage(
     const char* role, const char* content)
@@ -472,29 +551,55 @@ void StackChanAvatarDisplay::SetChatMessage(
         ResetSubtitleQueue();
         stackchan.avatar().setSpeech(content);
 
+
+    } else if (strcmp(role, "assistant_tick") == 0 ||
+               strcmp(role, "assistant_pause") == 0) {
+        if (!subtitle_speaking_) return;
+        const bool at_phrase_boundary = strcmp(role, "assistant_pause") == 0;
+        char* end = nullptr;
+        const auto played = std::strtoul(content, &end, 10);
+        if (end == content || *end != '\0') return;
+        const uint32_t played_ms = static_cast<uint32_t>(played);
+        // Remember PCM progress even if the first subtitle has not arrived yet.
+        // The next assistant message can then display its first phrase immediately.
+        subtitle_pcm_started_ = true;
+        subtitle_latest_playback_ms_ = played_ms;
+        AdvanceLiveSubtitle(played_ms, at_phrase_boundary);
+
     } else if (strcmp(role, "assistant") == 0) {
-        if (content[0] == '\0') {
-            return;
+        if (content[0] == '\0') return;
+
+        if (!subtitle_speaking_ && !subtitle_prestart_queued_) {
+            // The first text packet of the upcoming response may arrive while
+            // we are still LISTENING. Discard only the old response's review,
+            // then retain all pre-start packets until SPEAKING begins.
+            ESP_LOGI(TAG,
+                     "[SUBTITLE] new response text before speaking; old review=%u parts",
+                     static_cast<unsigned>(subtitle_queue_.size()));
+            ResetSubtitleQueue();
+            subtitle_prestart_queued_ = true;
         }
 
-        // 受信した字幕をキューへ保存
-        subtitle_queue_.emplace_back(content);
+        std::string incoming(content);
+        std::replace(incoming.begin(), incoming.end(), '\n', ' ');
+        std::replace(incoming.begin(), incoming.end(), '\r', ' ');
+        const auto& bubble = stackchan.avatar().getKeyElements().speechBubble;
+        const auto segments = bubble
+            ? bubble->splitSubtitle(incoming)
+            : std::vector<std::string>{incoming};
 
-        if (subtitle_timer_ == nullptr) {
-            subtitle_timer_ = lv_timer_create(
-                [](lv_timer_t* timer) {
-                    auto* self =
-                        static_cast<StackChanAvatarDisplay*>(
-                            lv_timer_get_user_data(timer));
-                    self->AdvanceSubtitle();
-                },
-                100,
-                this
-            );
+        // Live playback consumes this queue; post-speech review shows only
+        // any unread remainder, never the complete answer a second time.
+        for (const auto& segment : segments) {
+            if (!segment.empty()) subtitle_queue_.push_back(segment);
         }
 
-        // 最初の字幕はすぐ表示
-        AdvanceSubtitle();
+        // If PCM is already playing, display the first queued phrase now,
+        // instead of waiting for the next 180-ms progress notification.
+        if (subtitle_speaking_ && subtitle_pcm_started_ && !subtitle_playback_started_) {
+            AdvanceLiveSubtitle(subtitle_latest_playback_ms_, false);
+        }
+
     }
 }
 
@@ -507,10 +612,15 @@ void StackChanAvatarDisplay::ClearChatMessages()
 
     DisplayLockGuard lock(this);
 
-    // 字幕キューとタイマーをリセット
-    ResetSubtitleQueue();
+    // The network may disconnect while the user is still reading the
+    // post-speech subtitle review. Keep the timer and unread text alive.
+    if (subtitle_reviewing_ && (subtitle_displaying_ || !subtitle_queue_.empty())) {
+        ESP_LOGI(TAG, "[SUBTITLE] keep review on chat clear (%u parts remaining)",
+                 static_cast<unsigned>(subtitle_queue_.size()));
+        return;
+    }
 
-    // 吹き出しの文字を消去
+    ResetSubtitleQueue();
     stackchan.avatar().clearSpeech();
 
     ESP_LOGI(TAG, "Chat messages cleared");
@@ -598,6 +708,11 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     bool is_listening = false;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+        if (subtitle_speaking_) {
+            subtitle_speaking_ = false;
+            subtitle_preview_shown_ = false;
+            BeginSubtitleReview();
+        }
         if (speaking_modifier_id_ >= 0) {
             stackchan.removeModifier(speaking_modifier_id_);
             avatar.mouth().setWeight(0);
@@ -608,6 +723,11 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
+        if (subtitle_speaking_) {
+            subtitle_speaking_ = false;
+            subtitle_preview_shown_ = false;
+            BeginSubtitleReview();
+        }
         _is_xiaozhi_ready = true;
 
         if (speaking_modifier_id_ >= 0) {
@@ -623,6 +743,25 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
+        if (subtitle_prestart_queued_) {
+            // The new response has already delivered text before SPEAKING.
+            // Reset PCM timing but keep those new captions for the first tick.
+            auto pending = std::move(subtitle_queue_);
+            ResetSubtitleQueue();
+            subtitle_queue_ = std::move(pending);
+            ESP_LOGI(TAG, "[SUBTITLE] preserved %u pre-start parts",
+                     static_cast<unsigned>(subtitle_queue_.size()));
+        } else {
+            // No new pre-start text: only the old response's unread captions
+            // can be present, so discard them on the new speech boundary.
+            if (!subtitle_queue_.empty() || subtitle_reviewing_) {
+                ESP_LOGI(TAG,
+                         "[SUBTITLE] discard stale captions on new speech (%u parts)",
+                         static_cast<unsigned>(subtitle_queue_.size()));
+            }
+            ResetSubtitleQueue();
+        }
+        subtitle_speaking_ = true;
         if (speaking_modifier_id_ < 0) {
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
         }
