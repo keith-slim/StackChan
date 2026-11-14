@@ -8,6 +8,7 @@
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
+#include <ctime>
 
 using namespace stackchan;
 
@@ -23,6 +24,37 @@ void Hal::xiaozhi_mcp_init()
     // System Prompt：
     // You can control the robot's head. Use get_yaw and get_pitch to sense current position. Use set_yaw for horizontal
     // movement and set_pitch for vertical movement. All angles are in degrees.
+
+    mclog::tagInfo(_tag, "add system.get_local_time tool");
+    mcp_server.AddTool(
+        "self.system.get_local_time",
+        "Returns the current date, time, and weekday from this device using its configured timezone. "
+        "You MUST call this tool whenever the user asks for the current time, date, weekday, or a relative date. "
+        "Do not infer the answer from server time.",
+        std::vector<Property>{}, [this](const PropertyList& properties) -> ReturnValue {
+            std::time_t now = std::time(nullptr);
+            if (now < 1577836800) {
+                return std::string(R"({"synchronized":false,"error":"Device clock is not synchronized yet."})");
+            }
+
+            struct tm local_time = {};
+            if (localtime_r(&now, &local_time) == nullptr) {
+                return std::string(R"({"synchronized":false,"error":"Failed to read device local time."})");
+            }
+
+            char date_time[32] = {};
+            char weekday[16]   = {};
+            if (std::strftime(date_time, sizeof(date_time), "%Y-%m-%d %H:%M:%S", &local_time) == 0 ||
+                std::strftime(weekday, sizeof(weekday), "%A", &local_time) == 0) {
+                return std::string(R"({"synchronized":false,"error":"Failed to format device local time."})");
+            }
+
+            auto result = fmt::format(
+                R"({{"synchronized":true,"local_datetime":"{}","weekday":"{}","timezone":"{}","unix_time":{}}})",
+                date_time, weekday, getTimezone(), static_cast<long long>(now));
+            mclog::tagInfo(_tag, "get_local_time: {}", result);
+            return result;
+        });
 
     mclog::tagInfo(_tag, "add robot.get_head_angles tool");
     mcp_server.AddTool("self.robot.get_head_angles",
