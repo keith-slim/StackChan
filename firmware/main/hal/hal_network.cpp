@@ -33,9 +33,9 @@ void Hal::startSntp()
     } else {
         esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
 
-        esp_sntp_setservername(0, "pool.ntp.org");
+        esp_sntp_setservername(0, "ntp.nict.jp");
         esp_sntp_setservername(1, "time.google.com");
-        esp_sntp_setservername(2, "cn.pool.ntp.org");
+        esp_sntp_setservername(2, "time.asia.apple.com");
 
         sntp_set_time_sync_notification_cb(time_sync_notification_cb);
 

@@ -151,20 +151,20 @@ TimezoneWorker::TimezoneWorker()
 
     // Set current selection
     std::string current_tz = GetHAL().getTimezone();
-    int utc0_index         = -1;
+    int default_index      = -1;
     for (size_t i = 0; i < _timezone_list.size(); ++i) {
         if (current_tz == _timezone_list[i].tz_posix) {
             _roller->setSelected(i, LV_ANIM_OFF);
-            utc0_index = -1;
+            default_index = -1;
             break;
-        } else if (_timezone_list[i].tz_posix == "GMT0") {
-            utc0_index = i;
+        } else if (_timezone_list[i].tz_posix == "JST-9") {
+            default_index = i;
         }
     }
 
-    if (utc0_index >= 0) {
-        // Default to UTC+0
-        _roller->setSelected(utc0_index, LV_ANIM_OFF);
+    if (default_index >= 0) {
+        // Fall back to Japan Standard Time for an unknown saved value.
+        _roller->setSelected(default_index, LV_ANIM_OFF);
     }
 
     _btn_confirm = std::make_unique<uitk::lvgl_cpp::Button>(_panel->get());
