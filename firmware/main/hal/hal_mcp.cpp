@@ -8,6 +8,7 @@
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
+#include <cstdlib>
 #include <ctime>
 
 using namespace stackchan;
@@ -32,6 +33,12 @@ void Hal::xiaozhi_mcp_init()
         "You MUST call this tool whenever the user asks for the current time, date, weekday, or a relative date. "
         "Do not infer the answer from server time.",
         std::vector<Property>{}, [this](const PropertyList& properties) -> ReturnValue {
+            // Reapply the saved POSIX timezone here so this tool does not depend on
+            // initialization order or on another component changing the process TZ.
+            std::string timezone = getTimezone();
+            setenv("TZ", timezone.c_str(), 1);
+            tzset();
+
             std::time_t now = std::time(nullptr);
             if (now < 1577836800) {
                 return std::string(R"({"synchronized":false,"error":"Device clock is not synchronized yet."})");
@@ -44,14 +51,28 @@ void Hal::xiaozhi_mcp_init()
 
             char date_time[32] = {};
             char weekday[16]   = {};
+            char zone_name[16] = {};
+            char offset_raw[8] = {};
             if (std::strftime(date_time, sizeof(date_time), "%Y-%m-%d %H:%M:%S", &local_time) == 0 ||
-                std::strftime(weekday, sizeof(weekday), "%A", &local_time) == 0) {
+                std::strftime(weekday, sizeof(weekday), "%A", &local_time) == 0 ||
+                std::strftime(zone_name, sizeof(zone_name), "%Z", &local_time) == 0) {
                 return std::string(R"({"synchronized":false,"error":"Failed to format device local time."})");
+            }
+            std::strftime(offset_raw, sizeof(offset_raw), "%z", &local_time);
+
+            std::string utc_offset = offset_raw;
+            if (utc_offset.size() == 5) {
+                utc_offset.insert(3, ":");
+            }
+            if (timezone == "JST-9") {
+                // POSIX reverses the offset sign in "JST-9". Return the familiar
+                // notation as well so the language model cannot mistake it for UTC-9.
+                utc_offset = "+09:00";
             }
 
             auto result = fmt::format(
-                R"({{"synchronized":true,"local_datetime":"{}","weekday":"{}","timezone":"{}","unix_time":{}}})",
-                date_time, weekday, getTimezone(), static_cast<long long>(now));
+                R"({{"synchronized":true,"local_datetime":"{}","weekday":"{}","timezone_abbreviation":"{}","utc_offset":"{}","timezone_posix":"{}","unix_time":{},"instruction":"Use local_datetime exactly as the device local time. It is already converted from UTC; do not convert it again or answer with UTC."}})",
+                date_time, weekday, zone_name, utc_offset, timezone, static_cast<long long>(now));
             mclog::tagInfo(_tag, "get_local_time: {}", result);
             return result;
         });
