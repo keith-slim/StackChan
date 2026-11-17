@@ -587,6 +587,20 @@ void StackChanAvatarDisplay::SetChatMessage(
 
     DisplayLockGuard lock(this);
 
+    // Boot fallback is a local hint, not an audio-synchronised TTS subtitle.
+    // Never park it in the normal assistant queue waiting for SPEAKING.
+    if (strcmp(role, "startup_hint") == 0) {
+        ResetSubtitleQueue();
+        stackchan::stage1::NotifyExternalSpeech();
+        startup_hint_text_ = content;
+        stackchan.avatar().setSpeech(content);
+        return;
+    }
+    if (strcmp(role, "assistant") == 0 || strcmp(role, "user") == 0 ||
+        strcmp(role, "system") == 0) {
+        startup_hint_text_.clear();
+    }
+
     // During touch wake, the WebSocket CONNECTING transition sends an empty
     // system message. Keep the pending subtitle/display state intact until
     // the first standalone subtitle arrives.
@@ -682,6 +696,18 @@ void StackChanAvatarDisplay::SetChatMessage(
     }
 }
 
+void StackChanAvatarDisplay::RemoveChatMessage(const char* role, const char* content)
+{
+    if (!role || !content || strcmp(role, "startup_hint") != 0) return;
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) return;
+    DisplayLockGuard lock(this);
+    if (!startup_hint_text_.empty() && startup_hint_text_ == content) {
+        startup_hint_text_.clear();
+        stackchan.avatar().clearSpeech();
+    }
+}
+
 void StackChanAvatarDisplay::ClearChatMessages()
 {
     auto& stackchan = GetStackChan();
@@ -699,6 +725,7 @@ void StackChanAvatarDisplay::ClearChatMessages()
         return;
     }
 
+    startup_hint_text_.clear();
     ResetSubtitleQueue();
     stackchan::stage1::NotifyExternalSpeech();
     stackchan.avatar().clearSpeech();
@@ -793,15 +820,22 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // of the existing audio connection/microphone processing.
     const bool may_be_word = strcmp(status, Lang::Strings::CONNECTING) == 0 ||
                              strcmp(status, Lang::Strings::LISTENING) == 0;
-    const bool wake_handoff = may_be_word && stackchan::stage1::RequestWakeWord();
+    const bool startup_speech = Application::GetInstance().IsStartupAnnouncementActive();
+    const bool wake_handoff = may_be_word && !startup_speech &&
+                              stackchan::stage1::RequestWakeWord();
     const bool wake_visual = wake_handoff || stackchan::stage1::IsWakeSequenceActive();
     // CONNECTING is only a transport state for touch-wake speech: do not
     // display a "connecting" bubble before audio-synced subtitles arrive.
     const bool preserve_touch_caption =
         strcmp(status, Lang::Strings::CONNECTING) == 0 &&
         Application::GetInstance().IsAnnouncementActive() && wake_visual;
-    if (strcmp(status, Lang::Strings::STANDBY) != 0 && !wake_visual)
+    // The boot notice must not be interpreted as a wake-word event, nor
+    // reset an active night/nap scene just because its speech socket opens.
+    if (strcmp(status, Lang::Strings::STANDBY) != 0 && !wake_visual &&
+        !startup_speech)
         stackchan::stage1::CancelForExternalChange(stackchan);
+    if (strcmp(status, Lang::Strings::STANDBY) != 0)
+        startup_hint_text_.clear();
 
     // A spoken emotion belongs to one reply, not to subsequent listening
     // or idle periods. Restore its preceding expression at reply boundaries
@@ -883,7 +917,8 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
         GetHAL().setRgbColor(0, 0, 0, 50);
         GetHAL().refreshRgb();
-    } else if (!preserve_touch_caption) {
+    } else if (!preserve_touch_caption &&
+               !(startup_speech && strcmp(status, Lang::Strings::CONNECTING) == 0)) {
         avatar.setSpeech(status);
     }
 

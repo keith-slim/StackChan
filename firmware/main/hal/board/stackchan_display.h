@@ -23,6 +23,9 @@ private:
     int idle_expression_modifier_id_    = -1;
     int blink_modifier_id_              = -1;
     bool is_sleeping_                   = false;
+    // Only the local fallback hint is tracked, so its five-second timeout
+    // cannot remove a newer live subtitle.
+    std::string startup_hint_text_;
     uint8_t idle_motion_level_          = 2;
 
     // 字幕キュー
@@ -76,6 +79,8 @@ public:
     // Override Display methods to control Robot
     virtual bool SetEmotion(const char* emotion) override;
     virtual void SetChatMessage(const char* role, const char* content) override;
+    virtual void RemoveChatMessage(const char* role, const char* content) override;
+    bool SupportsStartupSpeech() const override { return true; }
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void UpdateStatusBar(bool update_all = false) override;
