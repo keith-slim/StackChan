@@ -244,6 +244,7 @@ esp_err_t ReadConfig(httpd_req_t* req) {
 }
 // Voice text settings are deliberately separate from the small 512-byte
 // scheduler request. Temporary objects live in PSRAM to protect internal RAM.
+bool Uint(const cJSON* root, const char* key, int min, int max, int step, int& value);
 esp_err_t ReadVoice(httpd_req_t* req) {
     cJSON* json = cJSON_CreateObject();
     if (!json) { Reply(req, "503 Service Unavailable", "{\"error\":\"low memory\"}"); return ESP_OK; }
@@ -307,7 +308,7 @@ esp_err_t WriteVoice(httpd_req_t* req) {
     while (got < req->content_len) {
         const int n = httpd_req_recv(req, buf + got, req->content_len - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (n <= 0) { draft->~Settings(); heap_caps_free(memory); heap_caps_free(buf); return ESP_FAIL; }
+        if (n <= 0) { heap_caps_free(memory); heap_caps_free(buf); return ESP_FAIL; }
         got += n;
     }
     buf[got] = 0;
@@ -335,7 +336,6 @@ esp_err_t WriteVoice(httpd_req_t* req) {
         saved=voice::Save(*draft);
     }
     cJSON_Delete(root);
-    draft->~Settings();
     heap_caps_free(memory);
     Reply(req, !valid?"400 Bad Request":!saved?"500 Internal Server Error":"200 OK",
         !valid?"{\"error\":\"invalid voice settings\"}":
