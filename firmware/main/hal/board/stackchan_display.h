@@ -47,6 +47,7 @@ private:
     // Japanese-text fallback; restore the preceding face after the reply.
     bool speech_emotion_explicit_ = false;
     bool speech_emotion_active_ = false;
+    bool speech_conversation_running_ = false; // LISTENING/SPEAKING, not actual sleep.
     stackchan::avatar::Emotion speech_emotion_before_ = stackchan::avatar::Emotion::Neutral;
 
     void AdvanceSubtitle();
