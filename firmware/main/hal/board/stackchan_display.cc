@@ -613,7 +613,7 @@ void StackChanAvatarDisplay::SetChatMessage(
         // The existing protocol can stream TTS sentence text without an
         // llm.emotion packet. Match S3's conservative speech heuristics,
         // but never override a model-specified emotion in this reply.
-        if (!speech_emotion_explicit_) {
+        if (!speech_emotion_explicit_ && !stackchan::stage1::IsWakeSequenceActive()) {
             avatar::Emotion inferred;
             if (stackchan::stage1::SpeechEmotionFromText(content, inferred) &&
                 stackchan.avatar().getEmotion() != inferred) {
