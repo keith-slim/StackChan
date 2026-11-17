@@ -136,6 +136,12 @@ struct Runtime {
     Cue cue = Cue::Nod;
     uint32_t cue_at = 0;
     bool cue_second = false;
+    // Restore the visibility of the existing avatar features after the
+    // S3 Startled overlay, without modifying their expression or geometry.
+    bool startled_face_active = false;
+    bool startled_left_visible = true;
+    bool startled_right_visible = true;
+    bool startled_mouth_visible = true;
     // Theatre/actions keep their final position; sleep retains prior behaviour.
     bool restore_neck_on_release = false;
     uint32_t theatre_motion_protect_until = 0;
@@ -169,6 +175,12 @@ struct Runtime {
     }
     void Release(StackChan& sc, bool restore) {
         ClearVisuals();
+        if (startled_face_active) {
+            sc.avatar().leftEye().setVisible(startled_left_visible);
+            sc.avatar().rightEye().setVisible(startled_right_visible);
+            sc.avatar().mouth().setVisible(startled_mouth_visible);
+            startled_face_active = false;
+        }
         if (own_face && restore) sc.avatar().setEmotion(saved_emotion);
         if (theatre_face_saved && restore) {
             saved_left.Restore(sc.avatar().leftEye());
@@ -358,7 +370,22 @@ struct Runtime {
         case Cue::ShakeHead: preset(-110,0,180,avatar::Emotion::Doubt,50,50,60); break;
         case Cue::TiltHead: preset(120,0,150,avatar::Emotion::Doubt,75,65,35); break;
         case Cue::Happy: preset(-90,55,180,avatar::Emotion::Happy,110,30,65); break;
-        case Cue::Surprise: preset(0,100,200,avatar::Emotion::Doubt,100,100,100); break;
+        case Cue::Surprise:
+            preset(0,100,200,avatar::Emotion::Neutral,100,100,100);
+            if (own_face) {
+                // S3 AvatarRestPose::Startled: crossed eyes, sweat and
+                // dedicated mouth. Hide the normal face underneath it.
+                startled_left_visible = sc.avatar().leftEye().getVisible();
+                startled_right_visible = sc.avatar().rightEye().getVisible();
+                startled_mouth_visible = sc.avatar().mouth().getVisible();
+                sc.avatar().leftEye().setVisible(false);
+                sc.avatar().rightEye().setVisible(false);
+                sc.avatar().mouth().setVisible(false);
+                startled_face_active = true;
+                rest = std::make_unique<AvatarRestFace>(lv_screen_active());
+                rest->Render(AvatarRestPose::Startled, false, 0, 0);
+            }
+            break;
         case Cue::Shy: preset(110,-30,140,avatar::Emotion::Happy,90,35,55); break;
         default: break;
         }
