@@ -551,7 +551,12 @@ void StackChanAvatarDisplay::SetChatMessage(
 
     DisplayLockGuard lock(this);
 
-    if (strcmp(role, "system") == 0) {
+    if (strcmp(role, "user") == 0) {
+        // S3 listening-complete animation: show a short visual nod, then
+        // the thinking face. The ASR text/audio path is unchanged.
+        if (content[0] != '\0')
+            stackchan::stage1::BeginListeningComplete(stackchan);
+    } else if (strcmp(role, "system") == 0) {
         // システム表示は従来どおり優先
         ResetSubtitleQueue();
         stackchan.avatar().setSpeech(content);
@@ -712,6 +717,12 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // Clear automatic face/LED/neck ownership before existing status handling.
     if (strcmp(status, Lang::Strings::STANDBY) != 0)
         stackchan::stage1::CancelForExternalChange(stackchan);
+    // Bridge the existing Xiaozhi state transitions to the S3 avatar only.
+    // No new speech transport, microphone task or swipe gesture handler.
+    if (strcmp(status, Lang::Strings::LISTENING) == 0)
+        stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::Listening);
+    else if (strcmp(status, Lang::Strings::STANDBY) == 0)
+        stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::None);
 
     bool is_idle      = false;
     bool is_listening = false;
