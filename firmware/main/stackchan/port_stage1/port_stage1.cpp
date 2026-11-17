@@ -31,6 +31,7 @@ struct Runtime {
     Phase phase = Phase::Boot;
     Kind kind = Kind::None;
     uint32_t phase_at = 0;
+    uint32_t last_draw_at = 0;
     bool motion_held = false;
     bool led_held = false;
     bool own_face = false;
@@ -54,6 +55,7 @@ struct Runtime {
                p == Phase::NightYawn || p == Phase::NightSleep || p == Phase::MorningWake;
     }
     void ClearVisuals() {
+        last_draw_at = 0;
         dream.reset();
         rest.reset();
         avatar_dream::End();
@@ -256,7 +258,12 @@ void Update(StackChan& sc) {
     const auto minute = static_cast<uint16_t>(valid ? local.tm_hour * 60 + local.tm_min : 0);
     State state = r.schedule.Step({now,minute,valid,idle.load(),event,esp_random()});
     r.Begin(sc, state.phase, state.kind, now);
-    if (r.own_face) r.Draw(state);
+    // Limit scene redraws: the app update loop may run faster than animations
+    // need, while each render mutates multiple LVGL objects.
+    if (r.own_face && (r.last_draw_at == 0 || now - r.last_draw_at >= 100)) {
+        r.Draw(state);
+        r.last_draw_at = now;
+    }
 }
 
 } // namespace stackchan::stage1
