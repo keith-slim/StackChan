@@ -464,6 +464,52 @@ esp_err_t TriggerAction(httpd_req_t* req) {
     return ESP_OK;
 }
 
+esp_err_t TriggerVoiceTest(httpd_req_t* req) {
+    char type[64]{};
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", type, sizeof(type)) != ESP_OK ||
+        std::strncmp(type, "application/json", 16) != 0) {
+        Reply(req, "415 Unsupported Media Type", "{\"error\":\"JSON required\"}");
+        return ESP_OK;
+    }
+    if (req->content_len < 1 || req->content_len > 2048) {
+        Reply(req, "413 Payload Too Large", "{\"error\":\"invalid test size\"}");
+        return ESP_OK;
+    }
+    char* body = static_cast<char*>(heap_caps_malloc(
+        req->content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!body) {
+        Reply(req, "503 Service Unavailable", "{\"error\":\"PSRAM unavailable\"}");
+        return ESP_OK;
+    }
+    int received = 0;
+    while (received < req->content_len) {
+        const int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) { heap_caps_free(body); return ESP_FAIL; }
+        received += n;
+    }
+    body[received] = '\0';
+    cJSON* root = cJSON_ParseWithLength(body, received);
+    const cJSON* item = root ? cJSON_GetObjectItemCaseSensitive(root, "text") : nullptr;
+    const char* content = cJSON_IsString(item) ? item->valuestring : nullptr;
+    const size_t len = content ? std::strlen(content) : 0;
+    const bool valid = content && len >= 1 && len <= 512;
+    bool accepted = false;
+    if (valid) {
+        LvglLockGuard lock;
+        const auto* config = voice::Current();
+        if (config) accepted = voice::Request(*config, "test", content);
+    }
+    cJSON_Delete(root);
+    heap_caps_free(body);
+    Reply(req, !valid ? "400 Bad Request" :
+          accepted ? "202 Accepted" : "409 Conflict",
+          !valid ? "{\"error\":\"text must be 1 to 512 bytes\"}" :
+          accepted ? "{\"queued\":true}" :
+          "{\"error\":\"speech busy or unavailable\"}");
+    return ESP_OK;
+}
+
 void Start() {
     // Never start during boot/audio initialization. Called once from the
     // already-running StackChan update task, only after Xiaozhi is idle.
@@ -499,12 +545,15 @@ void Start() {
     voice_read.uri = "/api/stage1/voice"; voice_read.method = HTTP_GET; voice_read.handler = ReadVoice;
     httpd_uri_t voice_write{};
     voice_write.uri = "/api/stage1/voice"; voice_write.method = HTTP_POST; voice_write.handler = WriteVoice;
+    httpd_uri_t voice_test{};
+    voice_test.uri = "/api/stage1/voice/test"; voice_test.method = HTTP_POST; voice_test.handler = TriggerVoiceTest;
     if (httpd_register_uri_handler(server, &page) != ESP_OK ||
         httpd_register_uri_handler(server, &read) != ESP_OK ||
         httpd_register_uri_handler(server, &write) != ESP_OK ||
         httpd_register_uri_handler(server, &action) != ESP_OK ||
         httpd_register_uri_handler(server, &voice_read) != ESP_OK ||
-        httpd_register_uri_handler(server, &voice_write) != ESP_OK) {
+        httpd_register_uri_handler(server, &voice_write) != ESP_OK ||
+        httpd_register_uri_handler(server, &voice_test) != ESP_OK) {
         ESP_LOGE(TAG, "URI registration failed");
         httpd_stop(server);
         server = nullptr;
