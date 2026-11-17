@@ -7,6 +7,7 @@
 #include "thinking_face.h"
 #include "listening_nod.h"
 #include "avatar_config.h"
+#include "voice_settings.h"
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
 #include <lvgl.h>
@@ -666,6 +667,7 @@ Runtime r;
 
 void Start() {
     // Start after the StackChanAvatarDisplay has attached its avatar.
+    voice::Init();
     r = Runtime{};
     const Config config = LoadConfig();
     if (!r.schedule.SetConfig(config)) {
@@ -688,6 +690,7 @@ void Start() {
 }
 void Stop() {
     enabled.store(false);
+    voice::Stop();
     r.ClearVisuals();
     r = Runtime{};
     queued_cue.store(-1);
