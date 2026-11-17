@@ -136,13 +136,23 @@ struct Runtime {
     Cue cue = Cue::Nod;
     uint32_t cue_at = 0;
     bool cue_second = false;
-    // Explicit gestures may temporarily move a manually positioned neck.
-    bool cue_restore_neck = false;
+    // Theatre/actions keep their final position; sleep retains prior behaviour.
+    bool restore_neck_on_release = false;
+    uint32_t theatre_motion_protect_until = 0;
     uitk::Vector2i saved_angles{0, 0};
     stackchan::avatar::Emotion saved_emotion = stackchan::avatar::Emotion::Neutral;
     std::unique_ptr<AvatarRestFace> rest;
     std::unique_ptr<AvatarDreamFace> dream;
 
+    static void MoveRelative(stackchan::motion::Motion& motion,
+                             const uitk::Vector2i& origin,
+                             int yaw_delta, int pitch_delta, int speed) {
+        const auto yaw_limit = motion.yawServo().getAngleLimit();
+        const auto pitch_limit = motion.pitchServo().getAngleLimit();
+        motion.moveWithSpeed(uitk::clamp(origin.x + yaw_delta, yaw_limit.x, yaw_limit.y),
+                             uitk::clamp(origin.y + pitch_delta, pitch_limit.x, pitch_limit.y),
+                             speed);
+    }
     static bool Sleeping(Phase p) {
         return p == Phase::NapSleep || p == Phase::NightSleep;
     }
@@ -170,11 +180,13 @@ struct Runtime {
             sc.leftNeonLight().setColor(0,0,0);
             sc.rightNeonLight().setColor(0,0,0);
         }
-        // Only return an automatic posture when no external command took over.
-        if (own_neck && restore && (!motion_held || cue_restore_neck))
+        // Theatre and explicit gestures finish at their final servo position.
+        // Restore only the existing sleep/wake sequence when not overridden.
+        if (own_neck && restore && restore_neck_on_release && !motion_held)
             sc.motion().moveWithSpeed(saved_angles.x, saved_angles.y, 120);
         own_face = own_led = own_neck = false;
-        cue_restore_neck = false;
+        restore_neck_on_release = false;
+        motion_held = false; // Manual override belongs to a scene, not permanently.
         owns_auto.store(false);
     }
     void Begin(StackChan& sc, Phase next, Kind next_kind, uint32_t now) {
@@ -196,6 +208,8 @@ struct Runtime {
         }
         own_face = true;
         owns_auto.store(true);
+        restore_neck_on_release = next != Phase::Theatre;
+        if (next == Phase::Theatre) theatre_motion_protect_until = now + 3000;
         auto& av = sc.avatar();
         auto& motion = sc.motion();
         // Autonomous motion never overrides a retained explicit neck position.
@@ -203,6 +217,12 @@ struct Runtime {
             if (motion_held) return;
             if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
             motion.moveWithSpeed(yaw, pitch, speed);
+        };
+        auto move_relative = [&](int yaw_delta, int pitch_delta, int speed) {
+            if (motion_held) return;
+            const auto origin = motion.getCurrentAngles();
+            if (!own_neck) { saved_angles = origin; own_neck = true; }
+            MoveRelative(motion, origin, yaw_delta, pitch_delta, speed);
         };
         auto color = [&](uint8_t r,uint8_t g,uint8_t b) {
             if (led_held) return;
@@ -212,12 +232,12 @@ struct Runtime {
         };
         if (next == Phase::Theatre) {
             switch(next_kind) {
-            case Kind::Sneeze: av.setEmotion(avatar::Emotion::Doubt); move(0,30,250); color(55,55,75); break;
-            case Kind::Hiccup: av.setEmotion(avatar::Emotion::Doubt); move(0,100,200); color(60,50,30); break;
-            case Kind::Hungry: av.setEmotion(avatar::Emotion::Sad); move(0,50,120); color(45,25,10); break;
-            case Kind::Stretch: av.setEmotion(avatar::Emotion::Sleepy); move(0,220,120); color(70,60,40); break;
-            case Kind::Idea: av.setEmotion(avatar::Emotion::Happy); move(50,210,160); color(100,90,20); break;
-            case Kind::Shy: av.setEmotion(avatar::Emotion::Happy); move(110,160,130); color(100,30,60); break;
+            case Kind::Sneeze: av.setEmotion(avatar::Emotion::Doubt); move_relative(0,-90,250); color(55,55,75); break;
+            case Kind::Hiccup: av.setEmotion(avatar::Emotion::Doubt); move_relative(0,30,200); color(60,50,30); break;
+            case Kind::Hungry: av.setEmotion(avatar::Emotion::Sad); move_relative(0,-70,120); color(45,25,10); break;
+            case Kind::Stretch: av.setEmotion(avatar::Emotion::Sleepy); move_relative(0,90,120); color(70,60,40); break;
+            case Kind::Idea: av.setEmotion(avatar::Emotion::Happy); move_relative(50,70,160); color(100,90,20); break;
+            case Kind::Shy: av.setEmotion(avatar::Emotion::Happy); move_relative(110,30,130); color(100,30,60); break;
             case Kind::Yawn: av.setEmotion(avatar::Emotion::Sleepy); color(45,45,65); break;
             default: break;
             }
@@ -321,12 +341,12 @@ struct Runtime {
         auto& motion = sc.motion();
         saved_angles = motion.getCurrentAngles();
         own_neck = true;
-        cue_restore_neck = true;
+        restore_neck_on_release = false;
         ESP_LOGI(LOG_TAG, "servo action begin: %s face=%d", cue_names[static_cast<int>(request)], own_face);
-        auto preset = [&](int yaw, int pitch, int speed, avatar::Emotion face,
+        auto preset = [&](int delta_yaw, int delta_pitch, int speed, avatar::Emotion face,
                           uint8_t r, uint8_t g, uint8_t b) {
             if (own_face) sc.avatar().setEmotion(face);
-            motion.moveWithSpeed(yaw, pitch, speed);
+            MoveRelative(motion, saved_angles, delta_yaw, delta_pitch, speed);
             if (own_face && !led_held) {
                 own_led = true;
                 sc.leftNeonLight().setColor(r,g,b);
@@ -334,12 +354,12 @@ struct Runtime {
             }
         };
         switch (request) {
-        case Cue::Nod: preset(0,90,180,avatar::Emotion::Neutral,40,50,70); break;
-        case Cue::ShakeHead: preset(-120,120,180,avatar::Emotion::Doubt,50,50,60); break;
-        case Cue::TiltHead: preset(140,120,150,avatar::Emotion::Doubt,75,65,35); break;
-        case Cue::Happy: preset(-100,180,180,avatar::Emotion::Happy,110,30,65); break;
-        case Cue::Surprise: preset(0,240,200,avatar::Emotion::Doubt,100,100,100); break;
-        case Cue::Shy: preset(110,90,140,avatar::Emotion::Happy,90,35,55); break;
+        case Cue::Nod: preset(0,-80,180,avatar::Emotion::Neutral,40,50,70); break;
+        case Cue::ShakeHead: preset(-110,0,180,avatar::Emotion::Doubt,50,50,60); break;
+        case Cue::TiltHead: preset(120,0,150,avatar::Emotion::Doubt,75,65,35); break;
+        case Cue::Happy: preset(-90,55,180,avatar::Emotion::Happy,110,30,65); break;
+        case Cue::Surprise: preset(0,100,200,avatar::Emotion::Doubt,100,100,100); break;
+        case Cue::Shy: preset(110,-30,140,avatar::Emotion::Happy,90,35,55); break;
         default: break;
         }
     }
@@ -348,9 +368,9 @@ struct Runtime {
         auto& motion = sc.motion();
         if (elapsed >= 400 && !cue_second) {
             cue_second = true;
-            if (cue == Cue::ShakeHead) motion.moveWithSpeed(120,120,180);
-            if (cue == Cue::Happy) motion.moveWithSpeed(100,180,170);
-            if (cue == Cue::Nod) motion.moveWithSpeed(0,170,160);
+            if (cue == Cue::ShakeHead) MoveRelative(motion, saved_angles, 110, 0, 180);
+            if (cue == Cue::Happy) MoveRelative(motion, saved_angles, 90, 55, 170);
+            if (cue == Cue::Nod) MoveRelative(motion, saved_angles, 0, 50, 160);
         }
         if (elapsed >= 850) {
             ESP_LOGI(LOG_TAG, "servo action finished: %s", cue_names[static_cast<int>(cue)]);
@@ -418,6 +438,13 @@ void CancelForExternalChange(StackChan& sc) {
 void NotifyManualMotion() { manual_motion.store(true); interrupted.store(true); }
 void NotifyManualLed() { manual_led.store(true); interrupted.store(true); }
 bool IsAutonomousSceneActive() { return owns_auto.load(); }
+bool IsIdleServoMotionBlocked() {
+    // Suppress ordinary random head movement for the entire scene and
+    // at least 3000ms from theatre start, even for 2.8s skits.
+    const uint32_t until = r.theatre_motion_protect_until;
+    return owns_auto.load() ||
+           (until != 0 && static_cast<int32_t>(GetHAL().millis() - until) < 0);
+}
 bool RequestCue(const char* id) {
     if (!id || !enabled.load() || owns_auto.load()) return false;
     for (int i = 0; i < static_cast<int>(Cue::Count); ++i) {
@@ -434,8 +461,8 @@ void Update(StackChan& sc) {
     const bool event = interrupted.exchange(false);
     if (manual_motion.exchange(false)) {
         r.motion_held = true;
-        // A newer manual command takes precedence over cue restoration/queue.
-        if (r.cue_active) r.cue_restore_neck = false;
+        // A newer manual command takes precedence over ongoing animations.
+        if (r.cue_active) r.restore_neck_on_release = false;
         queued_cue.store(-1);
     }
     if (manual_led.exchange(false)) r.led_held = true;
