@@ -148,7 +148,8 @@ struct Runtime {
     bool cue_active = false;
     Cue cue = Cue::Nod;
     uint32_t cue_at = 0;
-    bool cue_second = false;
+    uint8_t cue_step = 0;
+    uint8_t wake_step = 0;
     // Restore the visibility of the existing avatar features after the
     // S3 Startled overlay, without modifying their expression or geometry.
     bool startled_face_active = false;
@@ -313,6 +314,7 @@ struct Runtime {
         owns_auto.store(true);
         restore_neck_on_release = next != Phase::Theatre;
         if (next == Phase::Theatre) theatre_motion_protect_until = now + 3000;
+        if (next == Phase::NapWake || next == Phase::MorningWake) wake_step = 0;
         auto& av = sc.avatar();
         auto& motion = sc.motion();
         // Autonomous motion never overrides a retained explicit neck position.
@@ -346,21 +348,59 @@ struct Runtime {
             }
         } else if (next == Phase::NapDrowsy || next == Phase::NightDrowsy) {
             av.setEmotion(avatar::Emotion::Sleepy);
-            // An already-running random idle servo trajectory must not keep
-            // moving through the 30-second drowsy/yawn sequence.
-            if (!motion_held && !continuing) motion.stop();
+            // Freeze a preceding random head movement and use its *current*
+            // position as the base for the entire sleep/wake sequence.
+            if (!motion_held) {
+                if (!continuing) motion.stop();
+                if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
+                MoveRelative(motion, saved_angles, 0, -35, 140);
+            }
             color(28,18,20);
+            ESP_LOGI(LOG_TAG, "sleep action: drowsy");
         } else if (next == Phase::NapYawn || next == Phase::NightYawn) {
             av.setEmotion(avatar::Emotion::Sleepy);
+            if (!motion_held) {
+                if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
+                MoveRelative(motion, saved_angles, 0, -85, 170);
+            }
+            ESP_LOGI(LOG_TAG, "sleep action: yawn");
         } else if (Sleeping(next)) {
             av.setEmotion(avatar::Emotion::Sleepy);
-            if (!motion_held) move(0,30,100);
-            color(10,8,15);
+            if (!motion_held) {
+                if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
+                MoveRelative(motion, saved_angles, 0, -125, 115);
+            }
+            // S3 sleep state: all 12 neck LEDs must be dark. Explicit sleep
+            // overrides any colour left by an earlier autonomous animation.
+            own_led = true;
+            led_held = false;
+            sc.leftNeonLight().setColor(0, 0, 0);
+            sc.rightNeonLight().setColor(0, 0, 0);
+            ESP_LOGI(LOG_TAG, "sleep action: settled; LEDs off");
             if (next == Phase::NapSleep) avatar_dream::Begin();
         } else if (next == Phase::NapWake || next == Phase::MorningWake) {
             av.setEmotion(avatar::Emotion::Happy);
-            move(0,160,120);
+            // Lift the head above its pre-sleep pose, then gently settle and
+            // return. Every target is clamped by the calibrated servo limits.
+            if (!motion_held) {
+                if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
+                MoveRelative(motion, saved_angles, 0, 90, 270);
+            }
             color(65,48,28);
+            ESP_LOGI(LOG_TAG, "wake action: lift");
+        }
+    }
+    void TickWake(StackChan& sc, uint32_t elapsed) {
+        if (motion_held) return;
+        // Staged wake movement, independent of render rate. The scheduler
+        // releases ownership at 2800ms and retains the existing final restore.
+        if (elapsed >= 1100 && wake_step == 0) {
+            wake_step = 1;
+            MoveRelative(sc.motion(), saved_angles, 0, 35, 190);
+        }
+        if (elapsed >= 2050 && wake_step == 1) {
+            wake_step = 2;
+            MoveRelative(sc.motion(), saved_angles, 0, 0, 180);
         }
     }
     void ApplyTheatreFace(StackChan& sc, const State& s) {
@@ -438,7 +478,7 @@ struct Runtime {
         Release(sc, true);
         cue = request;
         cue_at = now;
-        cue_second = false;
+        cue_step = 0;
         cue_active = true;
         owns_auto.store(true);
         // A live conversation owns the face/LED; gestures only move the neck.
@@ -460,12 +500,14 @@ struct Runtime {
             }
         };
         switch (request) {
-        case Cue::Nod: preset(0,-80,180,avatar::Emotion::Neutral,40,50,70); break;
-        case Cue::ShakeHead: preset(-110,0,180,avatar::Emotion::Doubt,50,50,60); break;
+        // Both actions return to the same position they started at.
+        case Cue::Nod: preset(0,-200,285,avatar::Emotion::Neutral,40,50,70); break;
+        case Cue::ShakeHead: preset(-125,0,320,avatar::Emotion::Doubt,50,50,60); break;
         case Cue::TiltHead: preset(120,0,150,avatar::Emotion::Doubt,75,65,35); break;
         case Cue::Happy: preset(-90,55,180,avatar::Emotion::Happy,110,30,65); break;
         case Cue::Surprise:
-            preset(0,100,200,avatar::Emotion::Neutral,100,100,100);
+            // Fast upward startle; clamp in MoveRelative protects the neck.
+            preset(0,200,510,avatar::Emotion::Neutral,100,100,100);
             if (own_face) {
                 // S3 AvatarRestPose::Startled: crossed eyes, sweat and
                 // dedicated mouth. Hide the normal face underneath it.
@@ -487,13 +529,38 @@ struct Runtime {
     void TickCue(StackChan& sc, uint32_t now) {
         const uint32_t elapsed = now - cue_at;
         auto& motion = sc.motion();
-        if (elapsed >= 400 && !cue_second) {
-            cue_second = true;
-            if (cue == Cue::ShakeHead) MoveRelative(motion, saved_angles, 110, 0, 180);
+        if (cue == Cue::ShakeHead) {
+            // Two complete left/right sweeps, then the exact starting target.
+            if (cue_step == 0 && elapsed >= 420) {
+                MoveRelative(motion, saved_angles, 125, 0, 320);
+                cue_step = 1;
+            } else if (cue_step == 1 && elapsed >= 840) {
+                MoveRelative(motion, saved_angles, -125, 0, 320);
+                cue_step = 2;
+            } else if (cue_step == 2 && elapsed >= 1260) {
+                MoveRelative(motion, saved_angles, 125, 0, 320);
+                cue_step = 3;
+            } else if (cue_step == 3 && elapsed >= 1680) {
+                MoveRelative(motion, saved_angles, 0, 0, 300);
+                cue_step = 4;
+            }
+        } else if (cue == Cue::Nod) {
+            // A deeper nod than the previous -80 unit movement.
+            if (cue_step == 0 && elapsed >= 650) {
+                MoveRelative(motion, saved_angles, 0, 0, 270);
+                cue_step = 1;
+            }
+        } else if (cue_step == 0 && elapsed >= 400) {
+            cue_step = 1;
             if (cue == Cue::Happy) MoveRelative(motion, saved_angles, 90, 55, 170);
-            if (cue == Cue::Nod) MoveRelative(motion, saved_angles, 0, 50, 160);
         }
-        if (elapsed >= 850) {
+        const uint32_t finish_ms =
+            cue == Cue::ShakeHead ? 2400 :
+            cue == Cue::Nod ? 1350 :
+            cue == Cue::Surprise ? 800 : 850;
+        if (elapsed >= finish_ms &&
+            (cue != Cue::ShakeHead || cue_step >= 4) &&
+            (cue != Cue::Nod || cue_step >= 1)) {
             ESP_LOGI(LOG_TAG, "servo action finished: %s", cue_names[static_cast<int>(cue)]);
             cue_active = false;
             Release(sc, true);
@@ -641,6 +708,8 @@ void Update(StackChan& sc) {
                  static_cast<int>(state.phase), static_cast<int>(state.kind), standby);
     }
     r.Begin(sc, state.phase, state.kind, now);
+    if (state.phase == Phase::NapWake || state.phase == Phase::MorningWake)
+        r.TickWake(sc, state.phase_elapsed_ms);
     // Limit scene redraws: the app update loop may run faster than animations
     // need, while each render mutates multiple LVGL objects.
     if (r.own_face && (r.last_draw_at == 0 || now - r.last_draw_at >= 100)) {
