@@ -12,6 +12,7 @@
 #include <deque>
 #include <string>
 #include <cstdint>
+#include <stackchan/avatar/avatar/elements/emotion.h>
 
 class StackChanAvatarDisplay : public LvglDisplay {
 private:
@@ -41,6 +42,12 @@ private:
     bool subtitle_prestart_queued_ = false;
     bool subtitle_playback_started_ = false;
     bool subtitle_playback_synced_ = false;
+
+    // S3 speech-expression lifetime. An explicit llm.emotion outranks the
+    // Japanese-text fallback; restore the preceding face after the reply.
+    bool speech_emotion_explicit_ = false;
+    bool speech_emotion_active_ = false;
+    stackchan::avatar::Emotion speech_emotion_before_ = stackchan::avatar::Emotion::Neutral;
 
     void AdvanceSubtitle();
     void AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary);
