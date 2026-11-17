@@ -27,7 +27,7 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
-        if (!stackchan.hasAvatar() || stackchan.avatar().isModifyLocked() || stage1::IsAutonomousSceneActive()) {
+        if (!stackchan.hasAvatar() || stackchan.avatar().isModifyLocked() || (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive())) {
             return;
         }
 
