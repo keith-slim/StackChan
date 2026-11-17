@@ -602,9 +602,20 @@ struct Runtime {
             if (!rest) rest = std::make_unique<AvatarRestFace>(lv_screen_active());
             if (startled_wake && waking_from_sleep && s.phase_elapsed_ms < 240)
                 rest->RenderWakePop(last_sleep_elapsed, s.phase_elapsed_ms);
-            else rest->Render(startled_wake ? AvatarRestPose::Startled :
-                              asleep ? AvatarRestPose::Sleeping : AvatarRestPose::Yawning,
-                              false, 0, s.phase_elapsed_ms);
+            else {
+                const uint8_t sleep_sound =
+                    s.phase == Phase::NapSleep ? voice::SleepSoundPlaying() : 0;
+                // S3: snores keep the nose bubble; sleep talk hides it.
+                // Use a short visual mouth cycle only while audio is playing.
+                const uint8_t mouth = sleep_sound
+                    ? static_cast<uint8_t>(30 + 45 * (1.0f + std::sin(
+                          s.phase_elapsed_ms * 0.019f)) * 0.5f)
+                    : 0;
+                rest->Render(startled_wake ? AvatarRestPose::Startled :
+                             asleep ? AvatarRestPose::Sleeping : AvatarRestPose::Yawning,
+                             sleep_sound != 0, mouth, s.phase_elapsed_ms,
+                             sleep_sound == 2);
+            }
         } else rest.reset();
         if (s.phase == Phase::NapSleep || (s.phase == Phase::Theatre &&
              (s.kind == Kind::Hungry || s.kind == Kind::Idea))) {
