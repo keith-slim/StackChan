@@ -159,6 +159,8 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
     // accepted the request. Rearm only this sound's own interval afterwards.
     if (active_sleep_voice != SleepVoiceKind::None) {
         if (voice::IsBusy()) return;
+        if (active_sleep_voice == SleepVoiceKind::Talk)
+            avatar_dream::EndTalk();
         if (active_sleep_voice == SleepVoiceKind::Snore)
             next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
         else
@@ -168,11 +170,22 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
     if (voice::IsBusy()) return; // Neither sleep sound may overlap any audio.
     // Match S3's priority: a ready dream utterance takes the snore slot first.
     if (next_talk_at && static_cast<int32_t>(now - next_talk_at) >= 0) {
-        if (voice::Request(*config, "sleep_talk", config->sleep_talk_prompt)) {
+        // Freeze the motif that is *currently visible*, as the S3 version
+        // does. Never attach a dream that was shown earlier in the nap.
+        const auto motif = avatar_dream::BeginTalk();
+        char prompt[513];
+        std::snprintf(prompt, sizeof(prompt), "%s", config->sleep_talk_prompt);
+        if (const char* name = avatar_dream::Name(motif)) {
+            const size_t used = std::strlen(prompt);
+            std::snprintf(prompt + used, sizeof(prompt) - used,
+                          "\n見ている夢は「%s」です。この夢に合った寝言にしてください。", name);
+        }
+        if (voice::Request(*config, "sleep_talk", prompt)) {
             active_sleep_voice = SleepVoiceKind::Talk;
             next_talk_at = 0;
             return;
         }
+        avatar_dream::EndTalk();
         next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
     }
     if (next_snore_at && static_cast<int32_t>(now - next_snore_at) >= 0) {
