@@ -7,7 +7,7 @@
 namespace stackchan::stage1::voice {
 struct Settings {
     char host[128] = ""; // Empty: disabled until explicitly configured.
-    uint16_t port = 8001;
+    uint16_t port = 8002;
     char morning[513] = "おはよう。今日もよろしくね。";
     char bedtime[513] = "そろそろ寝るね。おやすみなさい。";
     char touch[513] = "びっくりした。起きたよ。";
