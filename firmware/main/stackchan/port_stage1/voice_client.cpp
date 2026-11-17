@@ -146,11 +146,14 @@ void Worker(void*) {
 }
 }
 bool IsBusy() {
+    // While PlaySound is still queuing packets, IsPlaybackIdle may briefly
+    // return true. Never clear the playback ownership flag in that window.
+    if (worker_running.load() || pending.load() != nullptr) return true;
     if (playback_queued.load()) {
         if (!Application::GetInstance().GetAudioService().IsPlaybackIdle()) return true;
         playback_queued.store(false);
     }
-    return worker_running.load() || pending.load() != nullptr;
+    return false;
 }
 void Cancel() {
     generation.fetch_add(1);
