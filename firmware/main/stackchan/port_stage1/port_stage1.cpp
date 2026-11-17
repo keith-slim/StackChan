@@ -8,6 +8,7 @@
 #include <hal/hal.h>
 #include <lvgl.h>
 #include <esp_random.h>
+#include <esp_log.h>
 #include <atomic>
 #include <ctime>
 #include <cstring>
@@ -22,6 +23,9 @@ std::atomic<bool> manual_motion{false};
 std::atomic<bool> manual_led{false};
 std::atomic<bool> owns_auto{false};
 std::atomic<int> queued_cue{-1};
+constexpr const char* LOG_TAG = "STAGE1";
+uint32_t last_status_log_at = 0;
+bool status_logged = false;
 
 enum class Cue : int { Nod, ShakeHead, TiltHead, Happy, Surprise, Shy, Count };
 const char* const cue_names[] = {"nod", "shake_head", "tilt_head", "happy_move", "surprise_move", "shy_move"};
@@ -204,6 +208,9 @@ void Start() {
     // Re-enable stage-1 runtime for the controlled audio/WebSocket A/B test.
     // Keep the scene redraw rate limit in place.
     enabled.store(true);
+    status_logged = false;
+    last_status_log_at = 0;
+    ESP_LOGI(LOG_TAG, "runtime started enabled=true");
 }
 void Stop() {
     enabled.store(false);
@@ -255,7 +262,20 @@ void Update(StackChan& sc) {
     std::tm local{};
     const bool valid = epoch > 1700000000 && localtime_r(&epoch, &local) && local.tm_year >= 124;
     const auto minute = static_cast<uint16_t>(valid ? local.tm_hour * 60 + local.tm_min : 0);
-    State state = r.schedule.Step({now,minute,valid,idle.load(),event,esp_random()});
+    const bool standby = idle.load();
+    State state = r.schedule.Step({now,minute,valid,standby,event,esp_random()});
+    if (!status_logged || now - last_status_log_at >= 60000) {
+        ESP_LOGI(LOG_TAG, "runtime phase=%d kind=%d standby=%d clock_valid=%d minute=%u auto=%d",
+                 static_cast<int>(state.phase), static_cast<int>(state.kind),
+                 standby, valid, static_cast<unsigned>(minute), r.own_face);
+        status_logged = true;
+        last_status_log_at = now;
+    }
+    if (state.phase != r.phase || state.kind != r.kind) {
+        ESP_LOGI(LOG_TAG, "phase transition %d/%d -> %d/%d standby=%d",
+                 static_cast<int>(r.phase), static_cast<int>(r.kind),
+                 static_cast<int>(state.phase), static_cast<int>(state.kind), standby);
+    }
     r.Begin(sc, state.phase, state.kind, now);
     // Limit scene redraws: the app update loop may run faster than animations
     // need, while each render mutates multiple LVGL objects.
