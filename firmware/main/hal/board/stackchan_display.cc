@@ -5,6 +5,7 @@
  */
 #include "stackchan_display.h"
 #include <stackchan/port_stage1/port_stage1.h>
+#include <stackchan/port_stage1/speech_emotion.h>
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
@@ -338,6 +339,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
     auto& avatar = stackchan.avatar();
+    const auto previous_emotion = avatar.getEmotion();
     bool accepted = true;
 
     // Map emotion string to stackchan::Emotion
@@ -378,6 +380,18 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
         ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
         avatar.setEmotion(Emotion::Neutral);
         accepted = false;
+    }
+
+    if (accepted) {
+        // This path is used by protocol llm.emotion as well as explicit app
+        // commands. Preserve the first pre-reply face if a text cue was
+        // already inferred; the explicit emotion always takes precedence.
+        if (!speech_emotion_active_) {
+            speech_emotion_before_ = previous_emotion;
+            speech_emotion_active_ = true;
+        }
+        speech_emotion_explicit_ = true;
+        ESP_LOGI(TAG, "[EMOTION] explicit=%s", emotion);
     }
 
     // Resync blink modifier base eye weights
@@ -579,6 +593,25 @@ void StackChanAvatarDisplay::SetChatMessage(
     } else if (strcmp(role, "assistant") == 0) {
         if (content[0] == '\0') return;
 
+        // The existing protocol can stream TTS sentence text without an
+        // llm.emotion packet. Match S3's conservative speech heuristics,
+        // but never override a model-specified emotion in this reply.
+        if (!speech_emotion_explicit_) {
+            avatar::Emotion inferred;
+            if (stackchan::stage1::SpeechEmotionFromText(content, inferred) &&
+                stackchan.avatar().getEmotion() != inferred) {
+                stackchan::stage1::CancelForExternalChange(stackchan);
+                if (!speech_emotion_active_) {
+                    speech_emotion_before_ = stackchan.avatar().getEmotion();
+                    speech_emotion_active_ = true;
+                }
+                stackchan.avatar().setEmotion(inferred);
+                if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
+                    blink->resyncEyeWeights();
+                ESP_LOGI(TAG, "[EMOTION] S3 text fallback=%d", static_cast<int>(inferred));
+            }
+        }
+
         if (!subtitle_speaking_ && !subtitle_prestart_queued_) {
             // The first text packet of the upcoming response may arrive while
             // we are still LISTENING. Discard only the old response's review,
@@ -717,6 +750,21 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // Clear automatic face/LED/neck ownership before existing status handling.
     if (strcmp(status, Lang::Strings::STANDBY) != 0)
         stackchan::stage1::CancelForExternalChange(stackchan);
+
+    // A spoken emotion belongs to one reply, not to subsequent listening
+    // or idle periods. Restore its preceding expression at reply boundaries
+    // without clearing unread subtitles or restarting the speech transport.
+    if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
+        strcmp(status, Lang::Strings::STANDBY) == 0) {
+        if (speech_emotion_active_) {
+            avatar.setEmotion(speech_emotion_before_);
+            if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
+                blink->resyncEyeWeights();
+            ESP_LOGI(TAG, "[EMOTION] restored after reply");
+        }
+        speech_emotion_active_ = false;
+        speech_emotion_explicit_ = false;
+    }
     // Bridge the existing Xiaozhi state transitions to the S3 avatar only.
     // No new speech transport, microphone task or swipe gesture handler.
     if (strcmp(status, Lang::Strings::LISTENING) == 0)
