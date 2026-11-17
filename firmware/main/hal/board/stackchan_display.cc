@@ -344,9 +344,15 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     DisplayLockGuard lock(this);
 
+    // Startup speech opens the same WebSocket but is not a wake-word event.
+    // Its neutral CONNECTING/IDLE UI update must not reset a sleep/nap scene.
+    if (Application::GetInstance().IsStartupAnnouncementActive() &&
+        strcmp(emotion, "neutral") == 0)
+        return true;
     // A connecting/listening state often sets neutral immediately after a
     // wake word. Do not erase the S3 startled wake animation in that window.
-    if (!stackchan::stage1::IsWakeSequenceActive())
+    if (!stackchan::stage1::IsWakeSequenceActive() &&
+        !Application::GetInstance().IsStartupAnnouncementActive())
         stackchan::stage1::CancelForExternalChange(stackchan);
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
