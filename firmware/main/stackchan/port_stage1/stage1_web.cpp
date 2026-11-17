@@ -242,6 +242,106 @@ esp_err_t ReadConfig(httpd_req_t* req) {
     Reply(req, "200 OK", json);
     return ESP_OK;
 }
+// Voice text settings are deliberately separate from the small 512-byte
+// scheduler request. Temporary objects live in PSRAM to protect internal RAM.
+esp_err_t ReadVoice(httpd_req_t* req) {
+    cJSON* json = cJSON_CreateObject();
+    if (!json) { Reply(req, "503 Service Unavailable", "{\"error\":\"low memory\"}"); return ESP_OK; }
+    {
+        LvglLockGuard lock;
+        const auto* c = voice::Current();
+        if (c) {
+            cJSON_AddStringToObject(json, "host", c->host);
+            cJSON_AddNumberToObject(json, "port", c->port);
+            cJSON_AddStringToObject(json, "morning", c->morning);
+            cJSON_AddStringToObject(json, "bedtime", c->bedtime);
+            cJSON_AddStringToObject(json, "touch", c->touch);
+            cJSON_AddStringToObject(json, "wake_word", c->wake_word);
+            cJSON_AddStringToObject(json, "timer", c->timer);
+            cJSON_AddStringToObject(json, "snore", c->snore);
+            cJSON_AddStringToObject(json, "sleep_talk_prompt", c->sleep_talk_prompt);
+            cJSON_AddNumberToObject(json, "snore_min", c->snore_min);
+            cJSON_AddNumberToObject(json, "snore_max", c->snore_max);
+            cJSON_AddNumberToObject(json, "talk_min", c->talk_min);
+            cJSON_AddNumberToObject(json, "talk_max", c->talk_max);
+        }
+    }
+    char* text = cJSON_PrintUnformatted(json);
+    const bool filled = cJSON_GetObjectItemCaseSensitive(json, "host") != nullptr;
+    cJSON_Delete(json);
+    if (!filled || !text) {
+        if (text) cJSON_free(text);
+        Reply(req, "503 Service Unavailable", "{\"error\":\"voice settings unavailable\"}");
+        return ESP_OK;
+    }
+    Reply(req, "200 OK", text);
+    cJSON_free(text);
+    return ESP_OK;
+}
+bool VoiceText(const cJSON* json, const char* name, char* dest, size_t capacity) {
+    const auto* item = cJSON_GetObjectItemCaseSensitive(json, name);
+    if (!cJSON_IsString(item) || !item->valuestring) return false;
+    const size_t len = std::strlen(item->valuestring);
+    if (len >= capacity) return false;
+    std::memcpy(dest, item->valuestring, len + 1);
+    return true;
+}
+esp_err_t WriteVoice(httpd_req_t* req) {
+    char type[64]{};
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", type, sizeof(type)) != ESP_OK ||
+        std::strncmp(type, "application/json", 16) != 0) {
+        Reply(req,"415 Unsupported Media Type","{\"error\":\"JSON required\"}"); return ESP_OK;
+    }
+    if (req->content_len <= 0 || req->content_len > 8192) {
+        Reply(req,"413 Payload Too Large","{\"error\":\"invalid size\"}"); return ESP_OK;
+    }
+    char* buf = static_cast<char*>(heap_caps_malloc(req->content_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    void* memory = heap_caps_malloc(sizeof(voice::Settings), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf || !memory) {
+        if (buf) heap_caps_free(buf);
+        if (memory) heap_caps_free(memory);
+        Reply(req,"503 Service Unavailable","{\"error\":\"PSRAM unavailable\"}"); return ESP_OK;
+    }
+    auto* draft = new(memory) voice::Settings();
+    int got = 0;
+    while (got < req->content_len) {
+        const int n = httpd_req_recv(req, buf + got, req->content_len - got);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) { draft->~Settings(); heap_caps_free(memory); heap_caps_free(buf); return ESP_FAIL; }
+        got += n;
+    }
+    buf[got] = 0;
+    cJSON* root = cJSON_Parse(buf);
+    heap_caps_free(buf);
+    const auto* c = root;
+    int port=0, snore_lo=0, snore_hi=0, talk_lo=0, talk_hi=0;
+    const bool valid = cJSON_IsObject(c) &&
+        VoiceText(c,"host",draft->host,sizeof(draft->host)) &&
+        VoiceText(c,"morning",draft->morning,sizeof(draft->morning)) &&
+        VoiceText(c,"bedtime",draft->bedtime,sizeof(draft->bedtime)) &&
+        VoiceText(c,"touch",draft->touch,sizeof(draft->touch)) &&
+        VoiceText(c,"wake_word",draft->wake_word,sizeof(draft->wake_word)) &&
+        VoiceText(c,"timer",draft->timer,sizeof(draft->timer)) &&
+        VoiceText(c,"snore",draft->snore,sizeof(draft->snore)) &&
+        VoiceText(c,"sleep_talk_prompt",draft->sleep_talk_prompt,sizeof(draft->sleep_talk_prompt)) &&
+        Uint(c,"port",1,65535,1,port) &&
+        Uint(c,"snore_min",1,3600,1,snore_lo) && Uint(c,"snore_max",1,3600,1,snore_hi) &&
+        Uint(c,"talk_min",1,3600,1,talk_lo) && Uint(c,"talk_max",1,3600,1,talk_hi);
+    draft->port=port; draft->snore_min=snore_lo; draft->snore_max=snore_hi;
+    draft->talk_min=talk_lo; draft->talk_max=talk_hi;
+    bool saved=false;
+    if (valid && voice::Valid(*draft)) {
+        LvglLockGuard lock;
+        saved=voice::Save(*draft);
+    }
+    cJSON_Delete(root);
+    draft->~Settings();
+    heap_caps_free(memory);
+    Reply(req, !valid?"400 Bad Request":!saved?"500 Internal Server Error":"200 OK",
+        !valid?"{\"error\":\"invalid voice settings\"}":
+        !saved?"{\"error\":\"NVS save failed\"}":"{\"ok\":true}");
+    return ESP_OK;
+}
 bool Uint(const cJSON* root, const char* key, int min, int max, int step, int& value) {
     const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, key);
     if (!cJSON_IsNumber(item)) return false;
@@ -358,7 +458,7 @@ void Start() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 4096;
-    config.max_uri_handlers = 4;
+    config.max_uri_handlers = 6;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -374,10 +474,16 @@ void Start() {
     write.uri = "/api/stage1"; write.method = HTTP_POST; write.handler = WriteConfig;
     httpd_uri_t action{};
     action.uri = "/api/stage1/action"; action.method = HTTP_POST; action.handler = TriggerAction;
+    httpd_uri_t voice_read{};
+    voice_read.uri = "/api/stage1/voice"; voice_read.method = HTTP_GET; voice_read.handler = ReadVoice;
+    httpd_uri_t voice_write{};
+    voice_write.uri = "/api/stage1/voice"; voice_write.method = HTTP_POST; voice_write.handler = WriteVoice;
     if (httpd_register_uri_handler(server, &page) != ESP_OK ||
         httpd_register_uri_handler(server, &read) != ESP_OK ||
         httpd_register_uri_handler(server, &write) != ESP_OK ||
-        httpd_register_uri_handler(server, &action) != ESP_OK) {
+        httpd_register_uri_handler(server, &action) != ESP_OK ||
+        httpd_register_uri_handler(server, &voice_read) != ESP_OK ||
+        httpd_register_uri_handler(server, &voice_write) != ESP_OK) {
         ESP_LOGE(TAG, "URI registration failed");
         httpd_stop(server);
         server = nullptr;
