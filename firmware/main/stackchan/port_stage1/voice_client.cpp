@@ -31,6 +31,7 @@ struct Response {
 std::atomic<Job*> pending{nullptr};
 std::atomic<bool> worker_running{false};
 std::atomic<uint32_t> generation{0};
+std::atomic<bool> playback_queued{false};
 
 void FreeJob(Job* job) {
     if (job) heap_caps_free(job);
@@ -118,6 +119,7 @@ void Deliver(Job* job) {
         // queue. No second I2S driver, audio task or decoder is created.
         ESP_LOGI(TAG, "play kind=%s ogg_bytes=%u", job->kind,
                  static_cast<unsigned>(response.len));
+        playback_queued.store(true);
         Application::GetInstance().GetAudioService().PlaySound(
             std::string_view(reinterpret_cast<const char*>(response.bytes),
                              response.len));
@@ -143,18 +145,39 @@ void Worker(void*) {
     vTaskDelete(nullptr);
 }
 }
+bool IsBusy() {
+    if (playback_queued.load()) {
+        if (!Application::GetInstance().GetAudioService().IsPlaybackIdle()) return true;
+        playback_queued.store(false);
+    }
+    return worker_running.load() || pending.load() != nullptr;
+}
 void Cancel() {
     generation.fetch_add(1);
     FreeJob(pending.exchange(nullptr));
+    if (playback_queued.exchange(false)) {
+        auto& app = Application::GetInstance();
+        // Reset only while the application is not speaking/notifying:
+        // waking interrupts a sleep sound, but never clears a reply.
+        const auto state = app.GetDeviceState();
+        if (state == kDeviceStateIdle || state == kDeviceStateConnecting ||
+            state == kDeviceStateListening)
+            app.GetAudioService().ResetDecoder();
+    }
 }
 bool Request(const Settings& config, const char* kind, const char* text) {
     if (!config.host[0] || !kind || !text || !text[0]) return false;
     if (std::strlen(kind) >= 16 || std::strlen(text) >= 513) return false;
+    // As on S3, sleep sounds never preempt one another.
+    const bool sleep_sound = std::strcmp(kind, "snore") == 0 ||
+                             std::strcmp(kind, "sleep_talk") == 0;
+    if (sleep_sound && IsBusy()) return false;
     if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 18000 ||
         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) < 7000) {
         ESP_LOGW(TAG, "skip voice request: internal RAM guard");
         return false;
     }
+    if (!sleep_sound && playback_queued.load()) Cancel();
     auto* job = static_cast<Job*>(heap_caps_malloc(
         sizeof(Job), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!job) { ESP_LOGW(TAG, "skip: PSRAM unavailable"); return false; }
