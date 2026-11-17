@@ -7,7 +7,7 @@ namespace stackchan::stage1 {
 
 enum class Phase : uint8_t {
     Boot, Awake, Theatre, NapDrowsy, NapYawn, NapSleep, NapWake,
-    NightPending, NightDrowsy, NightYawn, NightSleep, NightTemporary, MorningWake, NightWake
+    NightPending, NightDrowsy, NightMessage, NightYawn, NightSleep, NightTemporary, MorningWake, NightWake
 };
 enum class Kind : uint8_t { None, Sneeze, Hiccup, Hungry, Stretch, Idea, Shy, Yawn };
 // Sleep wake sources match S3 DayNap: touch/pad, wake-word, timer.
@@ -81,6 +81,7 @@ public:
         kind_ = Kind::None;
         dream_ = -1;
         idle_due_ = nap_due_ = phase_at_ = dream_due_ = dream_hide_ = 0;
+        night_temp_ms_ = 120000;
         last_kind_ = Kind::None;
         wake_reason_ = WakeReason::None;
     }
@@ -103,11 +104,14 @@ public:
         }
         if (!day) {
             if (phase_ == Phase::NightWake) {
-                if (Elapsed(in.ms) >= 2800) Enter(Phase::NightTemporary, in.ms);
+                if (Elapsed(in.ms) >= 2800) {
+                    Enter(Phase::NightTemporary, in.ms);
+                    night_temp_ms_ = 60000 + (in.random % 120001); // S3: 1–3 min before resleep
+                }
                 return Snapshot(in.ms, day);
             }
             if (phase_ != Phase::NightPending && phase_ != Phase::NightDrowsy &&
-                phase_ != Phase::NightYawn && phase_ != Phase::NightSleep &&
+                phase_ != Phase::NightMessage && phase_ != Phase::NightYawn && phase_ != Phase::NightSleep &&
                 phase_ != Phase::NightTemporary) {
                 Enter(Phase::NightPending, in.ms);
             }
@@ -115,7 +119,10 @@ public:
                 Enter(Phase::NightDrowsy, in.ms);
             else if (phase_ == Phase::NightDrowsy) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
-                else if (Elapsed(in.ms) >= 10000) Enter(Phase::NightYawn, in.ms);
+                else if (Elapsed(in.ms) >= 10000) Enter(Phase::NightMessage, in.ms);
+            } else if (phase_ == Phase::NightMessage) {
+                if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
+                else if (Elapsed(in.ms) >= 3000) Enter(Phase::NightYawn, in.ms);
             } else if (phase_ == Phase::NightYawn) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
                 else if (Elapsed(in.ms) >= 3500) Enter(Phase::NightSleep, in.ms);
@@ -123,13 +130,13 @@ public:
                 Enter(Phase::NightTemporary, in.ms);
             } else if (phase_ == Phase::NightTemporary) {
                 if (!in.standby || in.activity) phase_at_ = in.ms;
-                else if (Elapsed(in.ms) >= 15000) Enter(Phase::NightSleep, in.ms);
+                else if (Elapsed(in.ms) >= night_temp_ms_) Enter(Phase::NightSleep, in.ms);
             }
             return Snapshot(in.ms, day);
         }
         if (phase_ == Phase::NightWake || phase_ == Phase::NightSleep || phase_ == Phase::NightTemporary ||
             phase_ == Phase::NightPending || phase_ == Phase::NightDrowsy ||
-            phase_ == Phase::NightYawn) {
+            phase_ == Phase::NightMessage || phase_ == Phase::NightYawn) {
             wake_reason_ = WakeReason::Morning;
             Enter(in.standby && !in.activity ? Phase::MorningWake : Phase::Awake, in.ms);
             return Snapshot(in.ms, day);
@@ -240,6 +247,7 @@ private:
     WakeReason wake_reason_ = WakeReason::None;
     uint32_t phase_at_ = 0, idle_due_ = 0, nap_due_ = 0;
     uint32_t nap_sleep_ms_ = 0, dream_due_ = 0, dream_hide_ = 0;
+    uint32_t night_temp_ms_ = 120000;
 };
 
 } // namespace stackchan::stage1
