@@ -62,6 +62,7 @@ public:
     }
     const Config& GetConfig() const { return cfg_; }
     Phase CurrentPhase() const { return phase_; }
+    WakeReason CurrentWakeReason() const { return wake_reason_; }
     bool RequestWake(WakeReason why, uint32_t ms) {
         if (why != WakeReason::Touch && why != WakeReason::Word) return false;
         if (phase_ == Phase::NapSleep || phase_ == Phase::NapYawn) {
