@@ -357,22 +357,23 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
         avatar.setEmotion(Emotion::Sad);
     } else if (strcmp(emotion, "sleepy") == 0) {
         avatar.setEmotion(Emotion::Sleepy);
-        avatar.setSpeech("Zzz…");
-        is_sleeping_ = true;
-        // avatar.mouth().setWeight(10);
+        // S3 distinguishes a sleepy *spoken emotion* from the sleep state.
+        // Keep the legacy Zzz/servo action for explicit non-conversation
+        // requests, but never move the neck or clear subtitles for speech.
+        if (!speech_conversation_running_) {
+            avatar.setSpeech("Zzz…");
+            is_sleeping_ = true;
 
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
+            ESP_LOGW(TAG, "Stop idle motion");
+            if (idle_motion_modifier_id_ >= 0) {
+                stackchan.removeModifier(idle_motion_modifier_id_);
+                idle_motion_modifier_id_ = -1;
+                stackchan.removeModifier(idle_expression_modifier_id_);
+                idle_expression_modifier_id_ = -1;
+            }
+            auto& motion = GetStackChan().motion();
+            motion.pitchServo().moveWithSpeed(0, 80);
         }
-
-        // Return to default pose
-        auto& motion = GetStackChan().motion();
-        motion.pitchServo().moveWithSpeed(0, 80);
 
     } else if (strcmp(emotion, "doubtful") == 0) {
         avatar.setEmotion(Emotion::Doubt);
@@ -746,6 +747,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     auto& motion = stackchan.motion();
 
     DisplayLockGuard lock(this);
+
+    speech_conversation_running_ =
+        strcmp(status, Lang::Strings::LISTENING) == 0 ||
+        strcmp(status, Lang::Strings::SPEAKING) == 0;
 
     // Clear automatic face/LED/neck ownership before existing status handling.
     if (strcmp(status, Lang::Strings::STANDBY) != 0)
