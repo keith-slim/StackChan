@@ -259,6 +259,9 @@ void StackChanAvatarDisplay::SetupUI()
     auto avatar = std::make_unique<DefaultAvatar>();
     avatar->init(lv_screen_active());
     avatar->getPanel()->onClick().connect([]() {
+        // S3: a screen tap during sleep wakes the avatar first. It must
+        // not toggle the Xiaozhi chat state on the same touch.
+        if (stackchan::stage1::RequestWakeTouch()) return;
         stackchan::stage1::NotifyActivity();
         static uint32_t last_toggle_tick = 0;
         const uint32_t now               = GetHAL().millis();
@@ -335,7 +338,10 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     DisplayLockGuard lock(this);
 
-    stackchan::stage1::CancelForExternalChange(stackchan);
+    // A connecting/listening state often sets neutral immediately after a
+    // wake word. Do not erase the S3 startled wake animation in that window.
+    if (!stackchan::stage1::IsWakeSequenceActive())
+        stackchan::stage1::CancelForExternalChange(stackchan);
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
     auto& avatar = stackchan.avatar();
@@ -752,8 +758,14 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         strcmp(status, Lang::Strings::LISTENING) == 0 ||
         strcmp(status, Lang::Strings::SPEAKING) == 0;
 
-    // Clear automatic face/LED/neck ownership before existing status handling.
-    if (strcmp(status, Lang::Strings::STANDBY) != 0)
+    // Xiaozhi's wake-word path enters CONNECTING before LISTENING. Capture
+    // either event while asleep; S3 wake visuals then finish independently
+    // of the existing audio connection/microphone processing.
+    const bool may_be_word = strcmp(status, Lang::Strings::CONNECTING) == 0 ||
+                             strcmp(status, Lang::Strings::LISTENING) == 0;
+    const bool wake_handoff = may_be_word && stackchan::stage1::RequestWakeWord();
+    const bool wake_visual = wake_handoff || stackchan::stage1::IsWakeSequenceActive();
+    if (strcmp(status, Lang::Strings::STANDBY) != 0 && !wake_visual)
         stackchan::stage1::CancelForExternalChange(stackchan);
 
     // A spoken emotion belongs to one reply, not to subsequent listening
@@ -772,7 +784,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
     // Bridge the existing Xiaozhi state transitions to the S3 avatar only.
     // No new speech transport, microphone task or swipe gesture handler.
-    if (strcmp(status, Lang::Strings::LISTENING) == 0)
+    if (strcmp(status, Lang::Strings::LISTENING) == 0 && !wake_visual)
         stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::Listening);
     else if (strcmp(status, Lang::Strings::STANDBY) == 0)
         stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::None);
