@@ -60,7 +60,7 @@ int main()
     assert(s.phase == Phase::NightWake && s.wake_reason == WakeReason::Touch);
     assert(!clock.RequestWake(WakeReason::Word, 4));
     assert(step(clock, 2801, 1400, false).phase == Phase::NightWake);
-    assert(step(clock, 2802, 1400, false).phase == Phase::NightTemporary);
+    assert(step(clock, 2802, 1400, false, false, 1).phase == Phase::NightTemporary);
     assert(step(clock, 2803, 1400).phase == Phase::NightTemporary);
     assert(step(clock, 62802, 1400).phase == Phase::NightTemporary);
     assert(step(clock, 62803, 1400).phase == Phase::NightSleep);
