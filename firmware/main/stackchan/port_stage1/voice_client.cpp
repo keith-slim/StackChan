@@ -32,6 +32,7 @@ std::atomic<Job*> pending{nullptr};
 std::atomic<bool> worker_running{false};
 std::atomic<uint32_t> generation{0};
 std::atomic<bool> playback_queued{false};
+std::atomic<uint8_t> sleep_sound_playing{0};
 
 void FreeJob(Job* job) {
     if (job) heap_caps_free(job);
@@ -119,6 +120,8 @@ void Deliver(Job* job) {
         // queue. No second I2S driver, audio task or decoder is created.
         ESP_LOGI(TAG, "play kind=%s ogg_bytes=%u", job->kind,
                  static_cast<unsigned>(response.len));
+        sleep_sound_playing.store(std::strcmp(job->kind, "sleep_talk") == 0 ? 2 :
+                                  std::strcmp(job->kind, "snore") == 0 ? 1 : 0);
         playback_queued.store(true);
         Application::GetInstance().GetAudioService().PlaySound(
             std::string_view(reinterpret_cast<const char*>(response.bytes),
@@ -152,12 +155,19 @@ bool IsBusy() {
     if (playback_queued.load()) {
         if (!Application::GetInstance().GetAudioService().IsPlaybackIdle()) return true;
         playback_queued.store(false);
+        sleep_sound_playing.store(0);
     }
     return false;
+}
+uint8_t SleepSoundPlaying() {
+    // IsBusy() also releases the playback ownership when audio drains.
+    IsBusy();
+    return playback_queued.load() ? sleep_sound_playing.load() : 0;
 }
 void Cancel() {
     generation.fetch_add(1);
     FreeJob(pending.exchange(nullptr));
+    sleep_sound_playing.store(0);
     if (playback_queued.exchange(false)) {
         auto& app = Application::GetInstance();
         // Reset only while the application is not speaking/notifying:
