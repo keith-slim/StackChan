@@ -1,6 +1,7 @@
 // Local Stage-1 settings page; independent of the Xiaozhi WebSocket.
 #include "stage1_web.h"
 #include "port_stage1.h"
+#include "voice_settings.h"
 #include <hal/hal.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
@@ -9,6 +10,7 @@
 #include <cJSON.h>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 namespace stackchan::stage1::web {
 namespace {
@@ -34,7 +36,8 @@ p{margin:8px 0}small,.hint{display:block;color:#68758a;font-size:10.5px;line-hei
 .fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 label{display:block;margin:0 0 5px;font-weight:500}
 input,button{font:inherit}
-input[type=time],input[type=number]{display:block;width:100%;max-width:14rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;background:#fff;color:inherit;padding:5px 8px}
+input[type=time],input[type=number],input[type=text],textarea{display:block;width:100%;max-width:14rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;background:#fff;color:inherit;padding:5px 8px}
+textarea{display:block;resize:vertical;min-height:60px;width:100%;max-width:none}
 .check{display:flex;gap:8px;align-items:center;margin:0 0 12px}
 input[type=checkbox]{width:16px;height:16px;margin:0}
 button{min-height:30px;padding:5px 12px;background:#285bd4;color:white;border:0;border-radius:7px;cursor:pointer}
@@ -52,7 +55,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#actions">サーボテスト</a>
+<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#actions">サーボテスト</a>
 </nav></aside><main>
 <h1>セッティング</h1>
 <form id="settings">
@@ -79,6 +82,35 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </div><small>昼寝当選後、眠気・あくびを経て就寝。夢の絵を表示します。</small></section>
 <div class="save"><button type="submit">保存して反映</button>
 <p id="status" class="status" role="status">読み込み中…</p></div>
+</form>
+<form id="voiceSettings">
+<section id="voice" class="card"><h2>発話サーバー（Docker内）</h2>
+<div class="fields">
+<label>サーバーのホスト名 / IP<input name="host" type="text" maxlength="127" placeholder="192.168.1.254" pattern="[A-Za-z0-9.-]*"></label>
+<label>ポート<input name="port" type="number" min="1" max="65535" required></label>
+</div><small>AIサーバーと同じDockerコンテナ内の音声サービス。ホスト名が空なら送信しません。</small></section>
+<section class="card"><h2>朝・夜の文言</h2><div class="fields">
+<label>朝の定時起床<textarea name="morning" rows="2"></textarea></label>
+<label>夜の就寝案内<textarea name="bedtime" rows="2"></textarea></label>
+</div><small>各512バイトまで。空欄は発話しません。</small></section>
+<section class="card"><h2>昼寝から起きたとき</h2><div class="fields">
+<label>パッド・スクリーンタッチ<textarea name="touch" rows="2"></textarea></label>
+<label>ウェイクワード<textarea name="wake_word" rows="2"></textarea></label>
+<label>タイマー<textarea name="timer" rows="2"></textarea></label>
+</div><small>起床理由ごとの文言（各512バイト）。空欄は省略します。</small></section>
+<section class="card"><h2>昼寝中のいびき・寝言</h2>
+<label>いびきの文言<textarea name="snore" rows="2"></textarea></label>
+<div class="fields">
+<label>いびき最短間隔（秒）<input name="snore_min" type="number" min="1" max="3600" required></label>
+<label>いびき最長間隔（秒）<input name="snore_max" type="number" min="1" max="3600" required></label>
+</div>
+<label>寝言用のGemini Liveへの指示<textarea name="sleep_talk_prompt" rows="3"></textarea></label>
+<div class="fields">
+<label>寝言最短間隔（秒）<input name="talk_min" type="number" min="1" max="3600" required></label>
+<label>寝言最長間隔（秒）<input name="talk_max" type="number" min="1" max="3600" required></label>
+</div><small>各256バイトまで。夜間は発声せず、昼寝中だけ使用します。</small>
+</section>
+<div class="save"><button type="submit">音声設定を保存</button><p id="voiceStatus" class="status" role="status">読み込み中…</p></div>
 </form>
 <section id="actions" class="card"><h2>サーボアクションの実機テスト</h2>
 <small>現在位置から相対的に動作します。うなずき・首振りは開始位置へ戻り、ほかの動作は終了位置を維持します。可動域は自動で制限します。</small>
@@ -145,7 +177,37 @@ document.getElementById('servoActions').addEventListener('click',async e=>{
  }catch(e){status.textContent='失敗: '+e.message;}
  finally{button.disabled=false;}
 });
-load();
+const voiceForm=document.getElementById('voiceSettings'),v=voiceForm.elements;
+const voiceStatus=document.getElementById('voiceStatus'),voiceFields=['host','port','morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','snore_min','snore_max','talk_min','talk_max'];
+async function loadVoice(){
+ try{
+  const r=await fetch('/api/stage1/voice',{cache:'no-store'});
+  if(!r.ok)throw Error('HTTP '+r.status);
+  const data=await r.json();for(const field of voiceFields)v[field].value=data[field]??'';
+  voiceStatus.textContent='読み込み完了';
+ }catch(e){voiceStatus.textContent='読み込み失敗: '+e.message;}
+}
+voiceForm.addEventListener('submit',async e=>{
+ e.preventDefault();if(!voiceForm.reportValidity())return;
+ for(const [low,high] of [['snore_min','snore_max'],['talk_min','talk_max']]){
+  if(Number(v[low].value)>Number(v[high].value)){voiceStatus.textContent='最短間隔は最長以下にしてください';return;}
+ }
+ const enc=new TextEncoder();
+ for(const field of ['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt']){
+  const max=(field==='snore'||field==='sleep_talk_prompt')?256:512;
+  if(enc.encode(v[field].value).length>max){voiceStatus.textContent=field+'は'+max+'バイト以内にしてください';return;}
+ }
+ const data={};for(const field of voiceFields)data[field]=
+  ['port','snore_min','snore_max','talk_min','talk_max'].includes(field)?Number(v[field].value):v[field].value;
+ voiceStatus.textContent='保存中…';
+ try{
+  const r=await fetch('/api/stage1/voice',{method:'POST',
+   headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(!r.ok)throw Error('HTTP '+r.status+': '+await r.text());
+  voiceStatus.textContent='保存して反映しました';
+ }catch(error){voiceStatus.textContent='保存失敗: '+error.message;}
+});
+load();loadVoice();
 </script></body></html>)STAGE1PAGE";
 
 void Reply(httpd_req_t* req, const char* status, const char* body) {
