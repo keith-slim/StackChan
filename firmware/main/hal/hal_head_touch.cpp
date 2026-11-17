@@ -138,8 +138,16 @@ static void _head_touch_update_task(void* param)
         // Update and fire event
         gesture = recognizer.update(data);
         if (gesture != HeadPetGesture::None) {
-            stackchan::stage1::NotifyActivity();
-            GetHAL().onHeadPetGesture.emit(gesture);
+            // S3: the head pad is a wake input as well as a pet sensor.
+            // Consume its initial Press during sleep, not the gesture stream.
+            if (gesture == HeadPetGesture::Press &&
+                stackchan::stage1::RequestWakeTouch()) {
+                continue;
+            }
+            if (!stackchan::stage1::IsWakeSequenceActive()) {
+                stackchan::stage1::NotifyActivity();
+                GetHAL().onHeadPetGesture.emit(gesture);
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
