@@ -125,6 +125,25 @@ void Hal::xiaozhi_mcp_init()
                            return true;
                        });
 
+    // Reuse the stage-1 action sequencer; MCP workers never touch servo/LVGL.
+    // Only an explicit requested action is allowed to move the head.
+    mclog::tagInfo(_tag, "add robot.play_action tool");
+    mcp_server.AddTool(
+        "self.robot.play_action",
+        "Play one short, predefined head gesture ONLY when the user explicitly "
+        "requests it. Valid action IDs: nod (うなずく), shake_head (首を横に振る), "
+        "tilt_head (首を傾ける), happy_move (喜ぶ), surprise_move (驚く), "
+        "shy_move (照れる). No arbitrary angles. "
+        "Returns false if another scene or action has priority. "
+        "Do not repeat automatically.",
+        PropertyList({Property("action", kPropertyTypeString, std::string(""))}),
+        [](const PropertyList& properties) -> ReturnValue {
+            const auto action = properties["action"].value<std::string>();
+            const bool queued = stackchan::stage1::RequestCue(action.c_str());
+            mclog::tagInfo(_tag, "play_action: action={}, queued={}", action, queued);
+            return queued;
+        });
+
     mclog::tagInfo(_tag, "add robot.set_led_color tool");
     mcp_server.AddTool(
         "self.robot.set_led_color",
