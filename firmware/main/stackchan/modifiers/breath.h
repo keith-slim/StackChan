@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../port_stage1/port_stage1.h"
 #include <hal/hal.h>
 #include <cstdint>
 #include <cmath>
@@ -36,7 +37,9 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
-        if (!stackchan.hasAvatar()) return;
+        // Stage-1 saves/restores face positions. Do not advance the relative
+        // breathing offset while its absolute pose animation owns the face.
+        if (!stackchan.hasAvatar() || stage1::IsAutonomousSceneActive()) return;
 
         uint32_t now = GetHAL().millis();
 
