@@ -128,7 +128,9 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         next_snore_at = next_talk_at = 0;
         active_sleep_voice = SleepVoiceKind::None;
     }
-    if (!config || !config->host[0]) return;
+    // Touch wake uses the existing 12800 conversation socket and does not
+    // require the optional 8002 speech-server host.
+    if (!config) return;
     if (entered) {
         switch (state.phase) {
         case Phase::NightMessage:
