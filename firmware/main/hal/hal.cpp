@@ -132,6 +132,7 @@ void Hal::updateHeapStatusLog()
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
 #include <stackchan/stackchan.h>
+#include <stackchan/port_stage1/stage1_web.h>
 #include <apps/common/common.h>
 #include <assets/assets.h>
 
@@ -195,6 +196,9 @@ void Hal::startXiaozhi()
         }
         hal_bridge::app_play_sound(OGG_NEW_NOTIFICATION);
     });
+
+    // Start the stage-1 LAN settings page on TCP port 80.
+    stackchan::stage1::web::Start();
 
     // Start stackchan update task
     xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
