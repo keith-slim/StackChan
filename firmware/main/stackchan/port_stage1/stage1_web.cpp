@@ -169,7 +169,7 @@ void Start() {
     config.server_port = 80;
     config.stack_size = 4096;
     config.max_uri_handlers = 3;
-    config.max_open_sockets = 2;
+    config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "port 80 start failed: %s", esp_err_to_name(err));
