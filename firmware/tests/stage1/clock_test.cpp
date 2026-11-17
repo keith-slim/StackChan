@@ -126,6 +126,34 @@ int main()
     s = step(naps, 630003, 500, false);
     assert(s.phase == Phase::NapWake && s.wake_reason == WakeReason::Word);
 
+    // The S3 voice service may need several seconds to generate and play a
+    // greeting. Sleep/wake animation must wait for it, not cut it at 2.8/3s.
+    Clock voiced;
+    assert(step(voiced, 1, 500).phase == Phase::Awake);
+    assert(step(voiced, 2, 1400, false).phase == Phase::NightPending);
+    assert(step(voiced, 3, 1400).phase == Phase::NightDrowsy);
+    assert(step(voiced, 10003, 1400).phase == Phase::NightMessage);
+    assert(voiced.Step({17003, 1400, true, true, false, 0, true}).phase == Phase::NightMessage);
+    assert(voiced.Step({17004, 1400, true, true, false, 0, false}).phase == Phase::NightYawn);
+
+    voiced.Reset();
+    assert(step(voiced, 1, 1400).phase == Phase::NightSleep);
+    assert(voiced.RequestWake(WakeReason::Touch, 2));
+    assert(voiced.Step({10002, 1400, true, true, false, 0, true}).phase == Phase::NightWake);
+    assert(voiced.Step({10003, 1400, true, true, false, 0, false}).phase == Phase::NightTemporary);
+
+    voiced.Reset();
+    assert(step(voiced, 1, 1400).phase == Phase::NightSleep);
+    assert(voiced.Step({2, 360, true, true, false, 0, false}).phase == Phase::MorningWake);
+    assert(voiced.Step({9000, 360, true, true, false, 0, true}).phase == Phase::MorningWake);
+    assert(voiced.Step({9001, 360, true, true, false, 0, false}).phase == Phase::Awake);
+
+    naps.Reset(); step(naps, 0, 500); step(naps, 1, 500);
+    step(naps, 600002, 500); step(naps, 626502, 500);
+    assert(naps.RequestWake(WakeReason::Touch, 626503));
+    assert(naps.Step({640000, 500, true, true, false, 0, true}).phase == Phase::NapWake);
+    assert(naps.Step({640001, 500, true, true, false, 0, false}).phase == Phase::Awake);
+
     // No accidental startled wake while already awake.
     assert(!naps.RequestWake(WakeReason::Touch, 700000));
 }
