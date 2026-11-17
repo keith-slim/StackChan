@@ -346,7 +346,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     } else if (strcmp(emotion, "happy") == 0) {
         avatar.setEmotion(Emotion::Happy);
     } else if (strcmp(emotion, "laughing") == 0) {
-        avatar.setEmotion(Emotion::Happy);
+        avatar.setEmotion(Emotion::Fun);
     } else if (strcmp(emotion, "angry") == 0) {
         avatar.setEmotion(Emotion::Angry);
     } else if (strcmp(emotion, "sad") == 0) {
