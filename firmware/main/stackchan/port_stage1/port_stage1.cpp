@@ -29,6 +29,10 @@ std::atomic<bool> manual_motion{false};
 std::atomic<bool> manual_led{false};
 std::atomic<bool> owns_auto{false};
 std::atomic<int> queued_cue{-1};
+// LVGL is owned by Update(). Head pad/voice tasks only set these flags.
+std::atomic<uint8_t> wake_intents{0}; // touch=1, wake word=2
+std::atomic<bool> sleep_wake_eligible{false};
+std::atomic<bool> wake_sequence_active{false};
 constexpr const char* LOG_TAG = "STAGE1";
 constexpr const char* CONFIG_NS = "sc_stage1";
 
@@ -150,6 +154,9 @@ struct Runtime {
     uint32_t cue_at = 0;
     uint8_t cue_step = 0;
     uint8_t wake_step = 0;
+    uint32_t last_sleep_elapsed = 0;
+    bool own_speech = false;
+    WakeReason last_wake_reason = WakeReason::None;
     // Restore the visibility of the existing avatar features after the
     // S3 Startled overlay, without modifying their expression or geometry.
     bool startled_face_active = false;
@@ -179,7 +186,8 @@ struct Runtime {
     static bool Auto(Phase p) {
         return p == Phase::Theatre || p == Phase::NapDrowsy || p == Phase::NapYawn ||
                p == Phase::NapSleep || p == Phase::NapWake || p == Phase::NightDrowsy ||
-               p == Phase::NightYawn || p == Phase::NightSleep || p == Phase::MorningWake;
+               p == Phase::NightMessage || p == Phase::NightYawn || p == Phase::NightSleep ||
+               p == Phase::NightWake || p == Phase::MorningWake;
     }
     void EndConversation(StackChan& sc) {
         if (conversation_pose == ConversationPose::None) return;
@@ -266,7 +274,9 @@ struct Runtime {
         avatar_dream::End();
     }
     void Release(StackChan& sc, bool restore) {
+        if (own_speech) { sc.avatar().clearSpeech(); own_speech = false; }
         ClearVisuals();
+        wake_sequence_active.store(false);
         if (startled_face_active) {
             sc.avatar().leftEye().setVisible(startled_left_visible);
             sc.avatar().rightEye().setVisible(startled_right_visible);
@@ -297,8 +307,11 @@ struct Runtime {
         if (phase == next && kind == next_kind) return;
         // Preserve the pre-automation face/pose across a multi-step night/nap scene.
         const bool continuing = own_face && Auto(next);
+        if (own_speech) { sc.avatar().clearSpeech(); own_speech = false; }
         if (continuing) ClearVisuals();
         else Release(sc, true);
+        if (next == Phase::NapWake || next == Phase::NightWake)
+            last_sleep_elapsed = now - phase_at;
         phase = next;
         kind = next_kind;
         phase_at = now;
@@ -314,7 +327,11 @@ struct Runtime {
         owns_auto.store(true);
         restore_neck_on_release = next != Phase::Theatre;
         if (next == Phase::Theatre) theatre_motion_protect_until = now + 3000;
-        if (next == Phase::NapWake || next == Phase::MorningWake) wake_step = 0;
+        if (next == Phase::NapWake || next == Phase::NightWake ||
+            next == Phase::MorningWake) {
+            wake_step = 0;
+            wake_sequence_active.store(true);
+        }
         auto& av = sc.avatar();
         auto& motion = sc.motion();
         // Autonomous motion never overrides a retained explicit neck position.
@@ -328,6 +345,13 @@ struct Runtime {
             const auto origin = motion.getCurrentAngles();
             if (!own_neck) { saved_angles = origin; own_neck = true; }
             MoveRelative(motion, origin, yaw_delta, pitch_delta, speed);
+        };
+        auto say = [&](const char* words) {
+            // Existing StackChan has a visual speech bubble. Keep its
+            // transport untouched; this is not an extra TTS worker.
+            if (!words || !*words) return;
+            av.setSpeech(words);
+            own_speech = true;
         };
         auto color = [&](uint8_t r,uint8_t g,uint8_t b) {
             if (led_held) return;
@@ -357,6 +381,11 @@ struct Runtime {
             }
             color(28,18,20);
             ESP_LOGI(LOG_TAG, "sleep action: drowsy");
+        } else if (next == Phase::NightMessage) {
+            av.setEmotion(avatar::Emotion::Sleepy);
+            say("そろそろ寝るね。おやすみなさい。"); // S3 daily_schedule default
+            color(28,18,20);
+            ESP_LOGI(LOG_TAG, "S3 bedtime message");
         } else if (next == Phase::NapYawn || next == Phase::NightYawn) {
             av.setEmotion(avatar::Emotion::Sleepy);
             if (!motion_held) {
@@ -368,7 +397,12 @@ struct Runtime {
             av.setEmotion(avatar::Emotion::Sleepy);
             if (!motion_held) {
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
-                MoveRelative(motion, saved_angles, 0, -125, 115);
+                // Sleep returns to the calibrated origin, not a relative
+                // offset from an earlier random movement.
+                const auto y = motion.yawServo().getAngleLimit();
+                const auto p = motion.pitchServo().getAngleLimit();
+                motion.moveWithSpeed(uitk::clamp(0, y.x, y.y),
+                                     uitk::clamp(0, p.x, p.y), 115);
             }
             // S3 sleep state: all 12 neck LEDs must be dark. Explicit sleep
             // overrides any colour left by an earlier autonomous animation.
@@ -378,16 +412,40 @@ struct Runtime {
             sc.rightNeonLight().setColor(0, 0, 0);
             ESP_LOGI(LOG_TAG, "sleep action: settled; LEDs off");
             if (next == Phase::NapSleep) avatar_dream::Begin();
-        } else if (next == Phase::NapWake || next == Phase::MorningWake) {
-            av.setEmotion(avatar::Emotion::Happy);
-            // Lift the head above its pre-sleep pose, then gently settle and
-            // return. Every target is clamped by the calibrated servo limits.
+        } else if (next == Phase::NapWake || next == Phase::NightWake) {
+            // S3 DayNap wake: briefly show the popping sleeping bubble, then
+            // the crossed-eye Startled face and source-specific greeting.
+            last_wake_reason = schedule.CurrentWakeReason();
+            av.setEmotion(avatar::Emotion::Neutral);
+            startled_left_visible = av.leftEye().getVisible();
+            startled_right_visible = av.rightEye().getVisible();
+            startled_mouth_visible = av.mouth().getVisible();
+            av.leftEye().setVisible(false);
+            av.rightEye().setVisible(false);
+            av.mouth().setVisible(false);
+            startled_face_active = true;
+            if (last_wake_reason == WakeReason::Word)
+                say("あ、呼んだ？ 聞いてるよ。");
+            else if (last_wake_reason == WakeReason::Touch)
+                say("びっくりした。起きたよ。");
+            else say("よく寝た。そろそろ起きるね。");
             if (!motion_held) {
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
-                MoveRelative(motion, saved_angles, 0, 90, 270);
+                MoveRelative(motion, motion.getCurrentAngles(), 0, 150, 330);
+            }
+            color(90,80,65);
+            ESP_LOGI(LOG_TAG, "S3 wake: reason=%d", static_cast<int>(last_wake_reason));
+        } else if (next == Phase::MorningWake) {
+            // S3 scheduled morning is NOT a startled wake. It starts sleepy,
+            // then returns to the normal face with the morning greeting.
+            av.setEmotion(avatar::Emotion::Sleepy);
+            say("おはよう。今日もよろしくね。");
+            if (!motion_held) {
+                if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
+                MoveRelative(motion, motion.getCurrentAngles(), 0, 90, 170);
             }
             color(65,48,28);
-            ESP_LOGI(LOG_TAG, "wake action: lift");
+            ESP_LOGI(LOG_TAG, "S3 morning: sleepy face and greeting");
         }
     }
     void TickWake(StackChan& sc, uint32_t elapsed) {
@@ -396,6 +454,8 @@ struct Runtime {
         // releases ownership at 2800ms and retains the existing final restore.
         if (elapsed >= 1100 && wake_step == 0) {
             wake_step = 1;
+            if (phase == Phase::MorningWake)
+                sc.avatar().setEmotion(avatar::Emotion::Neutral);
             MoveRelative(sc.motion(), saved_angles, 0, 35, 190);
         }
         if (elapsed >= 2050 && wake_step == 1) {
@@ -460,12 +520,16 @@ struct Runtime {
     }
     void Draw(const State& s) {
         const bool asleep = Sleeping(s.phase);
+        const bool startled_wake = s.phase == Phase::NapWake || s.phase == Phase::NightWake;
         const bool yawn = s.phase == Phase::NapYawn || s.phase == Phase::NightYawn ||
                           (s.phase == Phase::Theatre && s.kind == Kind::Yawn);
-        if (asleep || yawn) {
+        if (asleep || yawn || startled_wake) {
             if (!rest) rest = std::make_unique<AvatarRestFace>(lv_screen_active());
-            rest->Render(asleep ? AvatarRestPose::Sleeping : AvatarRestPose::Yawning,
-                         false, 0, s.phase_elapsed_ms);
+            if (startled_wake && s.phase_elapsed_ms < 240)
+                rest->RenderWakePop(last_sleep_elapsed, s.phase_elapsed_ms);
+            else rest->Render(startled_wake ? AvatarRestPose::Startled :
+                              asleep ? AvatarRestPose::Sleeping : AvatarRestPose::Yawning,
+                              false, 0, s.phase_elapsed_ms);
         } else rest.reset();
         if (s.phase == Phase::NapSleep || (s.phase == Phase::Theatre &&
              (s.kind == Kind::Hungry || s.kind == Kind::Idea))) {
@@ -591,6 +655,8 @@ void Start() {
              config.wake_minute, config.sleep_minute, config.theatre,
              config.naps, config.nap_chance);
     idle.store(false); interrupted.store(false);
+    wake_intents.store(0); sleep_wake_eligible.store(false);
+    wake_sequence_active.store(false);
     manual_motion.store(false); manual_led.store(false);
     queued_cue.store(-1); owns_auto.store(false);
     // Re-enable stage-1 runtime for the controlled audio/WebSocket A/B test.
@@ -606,6 +672,8 @@ void Stop() {
     r = Runtime{};
     queued_cue.store(-1);
     owns_auto.store(false);
+    wake_intents.store(0); sleep_wake_eligible.store(false);
+    wake_sequence_active.store(false);
 }
 // Caller holds the same LVGL lock used by Update(), so scene state is serialized.
 Config GetConfig() { return r.schedule.GetConfig(); }
@@ -622,6 +690,23 @@ void OnStandby(bool ready) {
     if (!ready) interrupted.store(true);
 }
 void NotifyActivity() { interrupted.store(true); }
+bool RequestWakeTouch() {
+    if (!enabled.load()) return false;
+    if (wake_sequence_active.load()) return true; // consume repeated contact
+    if (!sleep_wake_eligible.load()) return false;
+    wake_intents.fetch_or(1);
+    return true;
+}
+bool RequestWakeWord() {
+    if (!enabled.load()) return false;
+    if (wake_sequence_active.load()) return true;
+    if (!sleep_wake_eligible.load()) return false;
+    wake_intents.fetch_or(2);
+    return true;
+}
+bool IsWakeSequenceActive() {
+    return wake_sequence_active.load() || wake_intents.load() != 0;
+}
 void CancelForExternalChange(StackChan& sc) {
     if (!enabled.load()) return;
     r.EndConversation(sc);
@@ -668,7 +753,13 @@ bool RequestCue(const char* id) {
 void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
-    const bool event = interrupted.exchange(false);
+    bool event = interrupted.exchange(false);
+    const uint8_t wake_bits = wake_intents.exchange(0);
+    const WakeReason requested = (wake_bits & 2) ? WakeReason::Word :
+                                  (wake_bits & 1) ? WakeReason::Touch : WakeReason::None;
+    const bool accepted_wake = requested != WakeReason::None &&
+                                r.schedule.RequestWake(requested, now);
+    if (accepted_wake || wake_sequence_active.load()) event = false;
     if (manual_motion.exchange(false)) {
         r.motion_held = true;
         // A newer manual command takes precedence over ongoing animations.
@@ -702,7 +793,10 @@ void Update(StackChan& sc) {
     const bool valid = epoch > 1700000000 && localtime_r(&epoch, &local) && local.tm_year >= 124;
     const auto minute = static_cast<uint16_t>(valid ? local.tm_hour * 60 + local.tm_min : 0);
     const bool standby = idle.load();
-    State state = r.schedule.Step({now,minute,valid,standby,event,esp_random()});
+    // Xiaozhi can already be CONNECTING/LISTENING after a wake word.
+    // Preserve the brief S3 wake animation without blocking microphone I/O.
+    const bool pose_standby = standby || accepted_wake || wake_sequence_active.load();
+    State state = r.schedule.Step({now,minute,valid,pose_standby,event,esp_random()});
     if (!status_logged || now - last_status_log_at >= 60000) {
         ESP_LOGI(LOG_TAG, "runtime phase=%d kind=%d standby=%d clock_valid=%d minute=%u auto=%d",
                  static_cast<int>(state.phase), static_cast<int>(state.kind),
@@ -716,8 +810,13 @@ void Update(StackChan& sc) {
                  static_cast<int>(state.phase), static_cast<int>(state.kind), standby);
     }
     r.Begin(sc, state.phase, state.kind, now);
-    if (state.phase == Phase::NapWake || state.phase == Phase::MorningWake)
+    if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||
+        state.phase == Phase::MorningWake)
         r.TickWake(sc, state.phase_elapsed_ms);
+    sleep_wake_eligible.store(state.phase == Phase::NapSleep ||
+                              state.phase == Phase::NightSleep ||
+                              state.phase == Phase::NapYawn ||
+                              state.phase == Phase::NightYawn);
     // Limit scene redraws: the app update loop may run faster than animations
     // need, while each render mutates multiple LVGL objects.
     if (r.own_face && (r.last_draw_at == 0 || now - r.last_draw_at >= 100)) {
