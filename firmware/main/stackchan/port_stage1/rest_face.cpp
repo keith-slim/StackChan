@@ -47,8 +47,14 @@ AvatarRestFace::~AvatarRestFace() { lv_obj_delete(root_); }
 
 void AvatarRestFace::Render(AvatarRestPose pose, bool speaking, uint8_t mouth, uint32_t elapsed_ms, bool hide_sleep_bubble)
 {
-    // 起床演出の黒背景は通常の顔へ持ち越さず、鼻提灯も寝顔だけに限定する。
-    lv_obj_set_style_bg_opa(root_, LV_OPA_TRANSP, 0);
+    // Original StackChan keeps its own avatar/legacy decorators visible.
+    // A sleep/yawn pose is a *replacement*, not a transparent overlay;
+    // mask the previous face here, without altering the original LVGL
+    // elements or the speech path. Startled action stays transparent.
+    const bool replaces_face = pose == AvatarRestPose::Sleeping ||
+                               pose == AvatarRestPose::Yawning;
+    lv_obj_set_style_bg_color(root_, lv_color_hex(avatar_config::BACKGROUND_COLOR), 0);
+    lv_obj_set_style_bg_opa(root_, replaces_face ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     bubble_popping_ = false;
     if (pose != AvatarRestPose::Sleeping && bubble_) {
         lv_obj_delete(bubble_);
