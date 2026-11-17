@@ -322,6 +322,7 @@ struct Runtime {
         saved_angles = motion.getCurrentAngles();
         own_neck = true;
         cue_restore_neck = true;
+        ESP_LOGI(LOG_TAG, "servo action begin: %s face=%d", cue_names[static_cast<int>(request)], own_face);
         auto preset = [&](int yaw, int pitch, int speed, avatar::Emotion face,
                           uint8_t r, uint8_t g, uint8_t b) {
             if (own_face) sc.avatar().setEmotion(face);
@@ -352,6 +353,7 @@ struct Runtime {
             if (cue == Cue::Nod) motion.moveWithSpeed(0,170,160);
         }
         if (elapsed >= 850) {
+            ESP_LOGI(LOG_TAG, "servo action finished: %s", cue_names[static_cast<int>(cue)]);
             cue_active = false;
             Release(sc, true);
             phase = Phase::Boot;
@@ -432,8 +434,9 @@ void Update(StackChan& sc) {
     const bool event = interrupted.exchange(false);
     if (manual_motion.exchange(false)) {
         r.motion_held = true;
-        // A newer manual command takes precedence over cue restoration.
+        // A newer manual command takes precedence over cue restoration/queue.
         if (r.cue_active) r.cue_restore_neck = false;
+        queued_cue.store(-1);
     }
     if (manual_led.exchange(false)) r.led_held = true;
     if (event && (r.own_face || r.cue_active)) {
