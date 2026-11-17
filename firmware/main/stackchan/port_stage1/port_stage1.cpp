@@ -9,8 +9,6 @@
 #include <lvgl.h>
 #include <esp_random.h>
 #include <esp_log.h>
-#include <nvs.h>
-#include <esp_err.h>
 #include <atomic>
 #include <ctime>
 #include <cstring>
@@ -27,60 +25,6 @@ std::atomic<bool> manual_led{false};
 std::atomic<bool> owns_auto{false};
 std::atomic<int> queued_cue{-1};
 constexpr const char* LOG_TAG = "STAGE1";
-constexpr const char* CONFIG_NS = "sc_stage1";
-
-bool ValidConfig(const Config& c) {
-    return c.wake_minute < 1440 && c.sleep_minute < 1440 &&
-           c.wake_minute != c.sleep_minute && c.nap_chance <= 100 &&
-           c.nap_chance % 5 == 0;
-}
-
-Config LoadConfig() {
-    Config cfg{}; // Preserve the stage-1 defaults when no settings exist.
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(CONFIG_NS, NVS_READONLY, &handle);
-    if (err == ESP_ERR_NVS_NOT_FOUND) return cfg;
-    if (err != ESP_OK) {
-        ESP_LOGW(LOG_TAG, "config NVS open failed: %s; using defaults", esp_err_to_name(err));
-        return cfg;
-    }
-    uint8_t theatre = cfg.theatre, naps = cfg.naps;
-    // Missing keys retain their defaults, allowing forward-compatible upgrades.
-    nvs_get_u16(handle, "wake_min", &cfg.wake_minute);
-    nvs_get_u16(handle, "sleep_min", &cfg.sleep_minute);
-    nvs_get_u8(handle, "theatre", &theatre);
-    nvs_get_u8(handle, "naps", &naps);
-    nvs_get_u8(handle, "nap_chance", &cfg.nap_chance);
-    nvs_close(handle);
-    if (theatre > 1 || naps > 1) return Config{};
-    cfg.theatre = theatre != 0;
-    cfg.naps = naps != 0;
-    if (!ValidConfig(cfg)) {
-        ESP_LOGW(LOG_TAG, "invalid stage-1 NVS config; using defaults");
-        return Config{};
-    }
-    return cfg;
-}
-
-bool SaveConfig(const Config& cfg) {
-    if (!ValidConfig(cfg)) return false;
-    nvs_handle_t handle;
-    const esp_err_t opened = nvs_open(CONFIG_NS, NVS_READWRITE, &handle);
-    if (opened != ESP_OK) {
-        ESP_LOGE(LOG_TAG, "config NVS open failed: %s", esp_err_to_name(opened));
-        return false;
-    }
-    esp_err_t err = nvs_set_u16(handle, "wake_min", cfg.wake_minute);
-    if (err == ESP_OK) err = nvs_set_u16(handle, "sleep_min", cfg.sleep_minute);
-    if (err == ESP_OK) err = nvs_set_u8(handle, "theatre", cfg.theatre ? 1 : 0);
-    if (err == ESP_OK) err = nvs_set_u8(handle, "naps", cfg.naps ? 1 : 0);
-    if (err == ESP_OK) err = nvs_set_u8(handle, "nap_chance", cfg.nap_chance);
-    if (err == ESP_OK) err = nvs_commit(handle);
-    nvs_close(handle);
-    if (err != ESP_OK) ESP_LOGE(LOG_TAG, "config NVS save failed: %s", esp_err_to_name(err));
-    return err == ESP_OK;
-}
-
 uint32_t last_status_log_at = 0;
 bool status_logged = false;
 
@@ -338,13 +282,6 @@ Runtime r;
 void Start() {
     // Start after the StackChanAvatarDisplay has attached its avatar.
     r = Runtime{};
-    const Config config = LoadConfig();
-    if (!r.schedule.SetConfig(config)) {
-        ESP_LOGE(LOG_TAG, "stage-1 config rejected; using defaults");
-    }
-    ESP_LOGI(LOG_TAG, "config wake=%u sleep=%u theatre=%d naps=%d chance=%u",
-             config.wake_minute, config.sleep_minute, config.theatre,
-             config.naps, config.nap_chance);
     idle.store(false); interrupted.store(false);
     manual_motion.store(false); manual_led.store(false);
     queued_cue.store(-1); owns_auto.store(false);
@@ -360,16 +297,6 @@ void Stop() {
     r.ClearVisuals();
     r = Runtime{};
     owns_auto.store(false);
-}
-// Caller holds the same LVGL lock used by Update(), so scene state is serialized.
-Config GetConfig() { return r.schedule.GetConfig(); }
-bool SetConfig(const Config& config) {
-    if (!ValidConfig(config)) return false;
-    if (!SaveConfig(config)) return false;
-    if (!r.schedule.SetConfig(config)) return false;
-    interrupted.store(true);
-    ESP_LOGI(LOG_TAG, "stage-1 config saved and applied");
-    return true;
 }
 void OnStandby(bool ready) {
     idle.store(ready);
