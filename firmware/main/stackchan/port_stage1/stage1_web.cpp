@@ -33,10 +33,20 @@ button{font-size:1rem;padding:10px 24px}#status{min-height:2em;white-space:pre-w
 <label>起床時刻 <input name="wake" type="time" required></label>
 <label>就寝時刻 <input name="sleep" type="time" required></label>
 </fieldset>
-<fieldset><legend>自動演出</legend>
-<label><input name="theatre" type="checkbox"> 小芝居を有効にする（1～3分間隔）</label>
+<fieldset><legend>待機中の小芝居</legend>
+<label><input name="theatre" type="checkbox"> 小芝居を有効にする</label>
+<label>無操作時間・最短（秒） <input name="theatreMin" type="number" min="10" max="3600" step="10" required></label>
+<label>無操作時間・最長（秒） <input name="theatreMax" type="number" min="10" max="3600" step="10" required></label>
+<p>くしゃみ・しゃっくり・空腹・背伸び・ひらめき・照れ笑い・あくび。音声は使用しません。</p>
+</fieldset>
+<fieldset><legend>昼寝</legend>
 <label><input name="naps" type="checkbox"> 昼寝を有効にする</label>
-<label>昼寝の確率（％） <input name="chance" type="number" min="0" max="100" step="5" required></label>
+<label>昼寝する確率（％） <input name="chance" type="number" min="0" max="100" step="5" required></label>
+<label>昼寝抽選まで・最短（分） <input name="napIdleMin" type="number" min="1" max="1440" required></label>
+<label>昼寝抽選まで・最長（分） <input name="napIdleMax" type="number" min="1" max="1440" required></label>
+<label>昼寝の継続時間・最短（分） <input name="napSleepMin" type="number" min="1" max="1440" required></label>
+<label>昼寝の継続時間・最長（分） <input name="napSleepMax" type="number" min="1" max="1440" required></label>
+<p>昼寝に当選すると約30秒の眠気・あくび演出の後に眠ります。夢の絵を表示し、設定時間で目覚めます。</p>
 </fieldset><button type="submit">保存して反映</button></form>
 <p id="status" role="status">読み込み中…</p>
 <script>
@@ -51,6 +61,9 @@ async function load(){
   const c=await res.json();
   f.wake.value=time(c.wake_minute);f.sleep.value=time(c.sleep_minute);
   f.theatre.checked=c.theatre;f.naps.checked=c.naps;f.chance.value=c.nap_chance;
+  f.theatreMin.value=c.theatre_min_seconds;f.theatreMax.value=c.theatre_max_seconds;
+  f.napIdleMin.value=c.nap_idle_min_minutes;f.napIdleMax.value=c.nap_idle_max_minutes;
+  f.napSleepMin.value=c.nap_sleep_min_minutes;f.napSleepMax.value=c.nap_sleep_max_minutes;
   status.textContent='読み込み完了';
  }catch(e){status.textContent='読み込み失敗: '+e.message;}
 }
@@ -58,8 +71,16 @@ form.addEventListener('submit',async e=>{
  e.preventDefault();
  if(!form.reportValidity())return;
  if(f.wake.value===f.sleep.value){status.textContent='起床・就寝時刻は異なる値にしてください';return;}
+ for(const [lo,hi] of [['theatreMin','theatreMax'],['napIdleMin','napIdleMax'],['napSleepMin','napSleepMax']]){
+  if(Number(f[lo].value)>Number(f[hi].value)){
+   status.textContent='最短時間は最長時間以下にしてください';return;
+  }
+ }
  const data={wake_minute:minute(f.wake.value),sleep_minute:minute(f.sleep.value),
- theatre:f.theatre.checked,naps:f.naps.checked,nap_chance:Number(f.chance.value)};
+ theatre:f.theatre.checked,naps:f.naps.checked,nap_chance:Number(f.chance.value),
+ theatre_min_seconds:Number(f.theatreMin.value),theatre_max_seconds:Number(f.theatreMax.value),
+ nap_idle_min_minutes:Number(f.napIdleMin.value),nap_idle_max_minutes:Number(f.napIdleMax.value),
+ nap_sleep_min_minutes:Number(f.napSleepMin.value),nap_sleep_max_minutes:Number(f.napSleepMax.value)};
  status.textContent='保存中…';
  try{
   const res=await fetch('/api/stage1',{method:'POST',
@@ -88,12 +109,18 @@ esp_err_t ReadConfig(httpd_req_t* req) {
         LvglLockGuard lock;
         c = GetConfig();
     }
-    char json[180];
+    char json[384];
     std::snprintf(json, sizeof(json),
-        "{\"wake_minute\":%u,\"sleep_minute\":%u,\"theatre\":%s,\"naps\":%s,\"nap_chance\":%u}",
+        "{\"wake_minute\":%u,\"sleep_minute\":%u,\"theatre\":%s,\"naps\":%s,\"nap_chance\":%u,"
+        "\"theatre_min_seconds\":%u,\"theatre_max_seconds\":%u,"
+        "\"nap_idle_min_minutes\":%u,\"nap_idle_max_minutes\":%u,"
+        "\"nap_sleep_min_minutes\":%u,\"nap_sleep_max_minutes\":%u}",
         static_cast<unsigned>(c.wake_minute), static_cast<unsigned>(c.sleep_minute),
         c.theatre ? "true" : "false", c.naps ? "true" : "false",
-        static_cast<unsigned>(c.nap_chance));
+        static_cast<unsigned>(c.nap_chance),
+        static_cast<unsigned>(c.theatre_min_seconds), static_cast<unsigned>(c.theatre_max_seconds),
+        static_cast<unsigned>(c.nap_idle_min_minutes), static_cast<unsigned>(c.nap_idle_max_minutes),
+        static_cast<unsigned>(c.nap_sleep_min_minutes), static_cast<unsigned>(c.nap_sleep_max_minutes));
     Reply(req, "200 OK", json);
     return ESP_OK;
 }
@@ -112,11 +139,11 @@ esp_err_t WriteConfig(httpd_req_t* req) {
         Reply(req, "415 Unsupported Media Type", "{\"error\":\"JSON required\"}");
         return ESP_OK;
     }
-    if (req->content_len <= 0 || req->content_len > 256) {
+    if (req->content_len <= 0 || req->content_len > 512) {
         Reply(req, "413 Payload Too Large", "{\"error\":\"invalid size\"}");
         return ESP_OK;
     }
-    char buf[257]{};
+    char buf[513]{};
     int received = 0;
     while (received < req->content_len) {
         int n = httpd_req_recv(req, buf + received, req->content_len - received);
@@ -126,13 +153,23 @@ esp_err_t WriteConfig(httpd_req_t* req) {
     }
     cJSON* root = cJSON_Parse(buf);
     int wake = 0, sleep = 0, chance = 0;
+    int theatre_min = 0, theatre_max = 0, nap_idle_min = 0, nap_idle_max = 0;
+    int nap_sleep_min = 0, nap_sleep_max = 0;
     const cJSON* theatre = root ? cJSON_GetObjectItemCaseSensitive(root, "theatre") : nullptr;
     const cJSON* naps = root ? cJSON_GetObjectItemCaseSensitive(root, "naps") : nullptr;
     const bool valid = root && cJSON_IsObject(root) &&
         Uint(root, "wake_minute", 0, 1439, 1, wake) &&
         Uint(root, "sleep_minute", 0, 1439, 1, sleep) &&
         Uint(root, "nap_chance", 0, 100, 5, chance) &&
-        cJSON_IsBool(theatre) && cJSON_IsBool(naps) && wake != sleep;
+        Uint(root, "theatre_min_seconds", 10, 3600, 10, theatre_min) &&
+        Uint(root, "theatre_max_seconds", 10, 3600, 10, theatre_max) &&
+        Uint(root, "nap_idle_min_minutes", 1, 1440, 1, nap_idle_min) &&
+        Uint(root, "nap_idle_max_minutes", 1, 1440, 1, nap_idle_max) &&
+        Uint(root, "nap_sleep_min_minutes", 1, 1440, 1, nap_sleep_min) &&
+        Uint(root, "nap_sleep_max_minutes", 1, 1440, 1, nap_sleep_max) &&
+        cJSON_IsBool(theatre) && cJSON_IsBool(naps) && wake != sleep &&
+        theatre_min <= theatre_max && nap_idle_min <= nap_idle_max &&
+        nap_sleep_min <= nap_sleep_max;
     if (valid) {
         Config c{};
         c.wake_minute = wake;
@@ -140,6 +177,12 @@ esp_err_t WriteConfig(httpd_req_t* req) {
         c.theatre = cJSON_IsTrue(theatre);
         c.naps = cJSON_IsTrue(naps);
         c.nap_chance = chance;
+        c.theatre_min_seconds = theatre_min;
+        c.theatre_max_seconds = theatre_max;
+        c.nap_idle_min_minutes = nap_idle_min;
+        c.nap_idle_max_minutes = nap_idle_max;
+        c.nap_sleep_min_minutes = nap_sleep_min;
+        c.nap_sleep_max_minutes = nap_sleep_max;
         bool saved;
         {
             LvglLockGuard lock;
