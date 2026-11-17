@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../port_stage1/port_stage1.h"
 #include "../avatar/decorators/decorators.h"
 #include "../utils/random.h"
 #include <smooth_ui_toolkit.hpp>
@@ -39,6 +40,20 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
+        // Stage-1 sleep/skit/explicit actions own the avatar. Discard pending
+        // pet effects instead of restoring the previous face or servo angle.
+        if (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive()) {
+            _event_swipe = false;
+            _event_release = false;
+            if (_in_happy_state) {
+                stackchan.avatar().removeDecorator(_heart_decorator_id);
+                stackchan.avatar().removeDecorator(_shy_decorator_id);
+                _heart_decorator_id = _shy_decorator_id = -1;
+            }
+            _in_happy_state = false;
+            _is_waiting_restore = false;
+            return;
+        }
         uint32_t now = GetHAL().millis();
 
         // 处理“被抚摸中”事件
