@@ -2,10 +2,13 @@
 // Stage-1 face / neck / lighting sequencer. All rendering and servo writes run
 // under the existing LVGL lock through StackChan::update(). No new task.
 #include <cstdint>
+#include "stage1_clock.h"
 
 namespace stackchan {
 class StackChan;
 namespace stage1 {
+Config GetConfig(); // Call under LVGL lock after Start().
+bool SetConfig(const Config& config); // Persist to NVS and apply; caller holds LVGL lock.
 void Start();               // Called only after the Xiaozhi avatar is created.
 void Stop();                // Before its LVGL screen is destroyed; caller owns LVGL lock.
 void OnStandby(bool idle);  // Status change; does not touch UI objects.
