@@ -149,6 +149,7 @@ void Worker(void*) {
 }
 }
 bool IsBusy() {
+    if (Application::GetInstance().IsAnnouncementActive()) return true;
     // While PlaySound is still queuing packets, IsPlaybackIdle may briefly
     // return true. Never clear the playback ownership flag in that window.
     if (worker_running.load() || pending.load() != nullptr) return true;
@@ -179,8 +180,17 @@ void Cancel() {
     }
 }
 bool Request(const Settings& config, const char* kind, const char* text) {
-    if (!config.host[0] || !kind || !text || !text[0]) return false;
+    if (!kind || !text || !text[0]) return false;
     if (std::strlen(kind) >= 16 || std::strlen(text) >= 513) return false;
+    // The first migration stage uses the existing 12800 conversation transport
+    // for touch wake and Web test. All other events retain the 8002 fallback.
+    if (std::strcmp(kind, "touch") == 0 || std::strcmp(kind, "test") == 0) {
+        const bool accepted = Application::GetInstance().RequestAnnouncement(kind, text);
+        ESP_LOGI(TAG, "WebSocket 12800 kind=%s %s", kind,
+                 accepted ? "queued" : "busy/unavailable");
+        return accepted;
+    }
+    if (!config.host[0]) return false;
     // As on S3, sleep sounds never preempt one another.
     const bool sleep_sound = std::strcmp(kind, "snore") == 0 ||
                              std::strcmp(kind, "sleep_talk") == 0;
