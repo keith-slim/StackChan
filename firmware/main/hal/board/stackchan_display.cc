@@ -973,7 +973,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     if (is_sleeping_) {
         avatar.setSpeech("");
     }
-    stackchan::stage1::OnStandby(is_idle);
+    // The startup announcement is not user activity: keep the night/nap
+    // scheduler's standby state until normal playback has finished.
+    if (!startup_speech) stackchan::stage1::OnStandby(is_idle);
 }
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)
