@@ -8,6 +8,7 @@
 #include "listening_nod.h"
 #include "avatar_config.h"
 #include "voice_settings.h"
+#include "voice_client.h"
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
 #include <lvgl.h>
@@ -108,6 +109,59 @@ bool SaveConfig(const Config& cfg) {
     return err == ESP_OK;
 }
 
+uint32_t next_snore_at = 0, next_talk_at = 0;
+// Intervals and prompts follow the S3 nap settings; no permanent task.
+uint32_t VoiceDelay(uint16_t lo, uint16_t hi) {
+    const uint32_t span = static_cast<uint32_t>(hi - lo) + 1;
+    return (static_cast<uint32_t>(lo) + esp_random() % span) * 1000;
+}
+void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
+    const auto* config = voice::Current();
+    const bool entered = old_phase != state.phase;
+    if (entered && old_phase == Phase::NapSleep && state.phase != Phase::NapSleep) {
+        // A nap wake always supersedes an in-flight snore/sleep-talk.
+        voice::Cancel();
+        next_snore_at = next_talk_at = 0;
+    }
+    if (state.phase != Phase::NapSleep && entered) {
+        next_snore_at = next_talk_at = 0;
+    }
+    if (!config || !config->host[0]) return;
+    if (entered) {
+        switch (state.phase) {
+        case Phase::NightMessage:
+            voice::Request(*config, "bedtime", config->bedtime);
+            break;
+        case Phase::MorningWake:
+            voice::Request(*config, "morning", config->morning);
+            break;
+        case Phase::NapWake:
+        case Phase::NightWake:
+            switch (state.wake_reason) {
+            case WakeReason::Touch: voice::Request(*config, "touch", config->touch); break;
+            case WakeReason::Word: voice::Request(*config, "wake_word", config->wake_word); break;
+            case WakeReason::Timer: voice::Request(*config, "timer", config->timer); break;
+            default: break;
+            }
+            break;
+        case Phase::NapSleep:
+            next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
+            next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
+            break;
+        default: break;
+        }
+    }
+    if (state.phase == Phase::NapSleep) {
+        if (next_snore_at && static_cast<int32_t>(now - next_snore_at) >= 0) {
+            voice::Request(*config, "snore", config->snore);
+            next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
+        }
+        if (next_talk_at && static_cast<int32_t>(now - next_talk_at) >= 0) {
+            voice::Request(*config, "sleep_talk", config->sleep_talk_prompt);
+            next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
+        }
+    }
+}
 uint32_t last_status_log_at = 0;
 bool status_logged = false;
 
@@ -668,6 +722,7 @@ Runtime r;
 void Start() {
     // Start after the StackChanAvatarDisplay has attached its avatar.
     voice::Init();
+    next_snore_at = next_talk_at = 0;
     r = Runtime{};
     const Config config = LoadConfig();
     if (!r.schedule.SetConfig(config)) {
@@ -690,6 +745,7 @@ void Start() {
 }
 void Stop() {
     enabled.store(false);
+    voice::Cancel();
     voice::Stop();
     r.ClearVisuals();
     r = Runtime{};
@@ -710,6 +766,7 @@ bool SetConfig(const Config& config) {
 }
 void OnStandby(bool ready) {
     idle.store(ready);
+    if (!ready && !wake_sequence_active.load()) voice::Cancel();
     if (!ready) interrupted.store(true);
 }
 void NotifyActivity() { interrupted.store(true); }
@@ -838,7 +895,9 @@ void Update(StackChan& sc) {
                  static_cast<int>(r.phase), static_cast<int>(r.kind),
                  static_cast<int>(state.phase), static_cast<int>(state.kind), standby);
     }
+    const Phase old_phase = r.phase;
     r.Begin(sc, state.phase, state.kind, now);
+    VoiceTick(old_phase, state, now);
     if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||
         state.phase == Phase::MorningWake)
         r.TickWake(sc, state.phase_elapsed_ms);
