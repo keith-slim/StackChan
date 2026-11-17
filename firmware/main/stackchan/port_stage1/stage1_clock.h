@@ -135,7 +135,7 @@ public:
             break;
         case Phase::Awake:
             if (cfg_.theatre) {
-                if (!idle_due_) idle_due_ = in.ms + 90000 + in.random % 150001;
+                if (!idle_due_) idle_due_ = in.ms + 60000 + in.random % 120001;
                 if (static_cast<int32_t>(in.ms - idle_due_) >= 0) {
                     const auto last = static_cast<uint8_t>(last_kind_);
                     const auto slot = static_cast<uint8_t>(in.random % (last ? 6 : 7));
