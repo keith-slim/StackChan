@@ -882,7 +882,7 @@ void Update(StackChan& sc) {
     // Xiaozhi can already be CONNECTING/LISTENING after a wake word.
     // Preserve the brief S3 wake animation without blocking microphone I/O.
     const bool pose_standby = standby || accepted_wake || wake_sequence_active.load();
-    State state = r.schedule.Step({now,minute,valid,pose_standby,event,esp_random()});
+    State state = r.schedule.Step({now,minute,valid,pose_standby,event,esp_random(),voice::IsBusy()});
     if (!status_logged || now - last_status_log_at >= 60000) {
         ESP_LOGI(LOG_TAG, "runtime phase=%d kind=%d standby=%d clock_valid=%d minute=%u auto=%d",
                  static_cast<int>(state.phase), static_cast<int>(state.kind),
