@@ -444,7 +444,7 @@ struct Runtime {
             ESP_LOGI(LOG_TAG, "sleep action: drowsy");
         } else if (next == Phase::NightMessage) {
             av.setEmotion(avatar::Emotion::Sleepy);
-            say("そろそろ寝るね。おやすみなさい。"); // S3 daily_schedule default
+            say(voice::Current() ? voice::Current()->bedtime : "そろそろ寝るね。おやすみなさい。");
             color(28,18,20);
             ESP_LOGI(LOG_TAG, "S3 bedtime message");
         } else if (next == Phase::NapYawn || next == Phase::NightYawn) {
@@ -483,10 +483,10 @@ struct Runtime {
             av.mouth().setVisible(false);
             startled_face_active = true;
             if (last_wake_reason == WakeReason::Word)
-                say("あ、呼んだ？ 聞いてるよ。");
+                say(voice::Current() ? voice::Current()->wake_word : "あ、呼んだ？ 聞いてるよ。");
             else if (last_wake_reason == WakeReason::Touch)
-                say("びっくりした。起きたよ。");
-            else say("よく寝た。そろそろ起きるね。");
+                say(voice::Current() ? voice::Current()->touch : "びっくりした。起きたよ。");
+            else say(voice::Current() ? voice::Current()->timer : "よく寝た。そろそろ起きるね。");
             if (!motion_held) {
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
                 MoveRelative(motion, motion.getCurrentAngles(), 0, 150, 330);
@@ -497,7 +497,7 @@ struct Runtime {
             // S3 scheduled morning is NOT a startled wake. It starts sleepy,
             // then returns to the normal face with the morning greeting.
             av.setEmotion(avatar::Emotion::Sleepy);
-            say("おはよう。今日もよろしくね。");
+            say(voice::Current() ? voice::Current()->morning : "おはよう。今日もよろしくね。");
             if (!motion_held) {
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
                 MoveRelative(motion, motion.getCurrentAngles(), 0, 90, 170);
