@@ -13,6 +13,7 @@
 #include <ctime>
 #include <cstring>
 #include <memory>
+#include <cmath>
 
 namespace stackchan::stage1 {
 namespace {
@@ -31,6 +32,21 @@ enum class Cue : int { Nod, ShakeHead, TiltHead, Happy, Surprise, Shy, Count };
 const char* const cue_names[] = {"nod", "shake_head", "tilt_head", "happy_move", "surprise_move", "shy_move"};
 
 struct Runtime {
+    struct FeaturePose {
+        uitk::Vector2i position{0, 0};
+        int weight = 0, size = 0, rotation = 0;
+        static FeaturePose Capture(avatar::Feature& f) {
+            return {f.getPosition(), f.getWeight(), f.getSize(), f.getRotation()};
+        }
+        void Restore(avatar::Feature& f) const {
+            f.setPosition(position);
+            f.setSize(size);
+            f.setWeight(weight);
+            f.setRotation(rotation);
+        }
+    };
+    bool theatre_face_saved = false;
+    FeaturePose saved_left, saved_right, saved_mouth;
     Clock schedule;
     Phase phase = Phase::Boot;
     Kind kind = Kind::None;
@@ -67,6 +83,12 @@ struct Runtime {
     void Release(StackChan& sc, bool restore) {
         ClearVisuals();
         if (own_face && restore) sc.avatar().setEmotion(saved_emotion);
+        if (theatre_face_saved && restore) {
+            saved_left.Restore(sc.avatar().leftEye());
+            saved_right.Restore(sc.avatar().rightEye());
+            saved_mouth.Restore(sc.avatar().mouth());
+        }
+        theatre_face_saved = false;
         if (own_led && !led_held && restore) {
             sc.leftNeonLight().setColor(0,0,0);
             sc.rightNeonLight().setColor(0,0,0);
@@ -88,6 +110,12 @@ struct Runtime {
         phase_at = now;
         if (!Auto(next)) return;
         if (!continuing) saved_emotion = sc.avatar().getEmotion();
+        if (next == Phase::Theatre && !continuing) {
+            saved_left = FeaturePose::Capture(sc.avatar().leftEye());
+            saved_right = FeaturePose::Capture(sc.avatar().rightEye());
+            saved_mouth = FeaturePose::Capture(sc.avatar().mouth());
+            theatre_face_saved = true;
+        }
         own_face = true;
         owns_auto.store(true);
         auto& av = sc.avatar();
@@ -130,6 +158,58 @@ struct Runtime {
             move(0,160,120);
             color(65,48,28);
         }
+    }
+    void ApplyTheatreFace(StackChan& sc, const State& s) {
+        if (s.phase != Phase::Theatre || s.kind == Kind::Yawn) return;
+        // Ported from S3-stackchan AvatarBehavior::UpdateIdlePose(). The
+        // original firmware's static emotions alone do not animate a skit.
+        const uint32_t elapsed = s.phase_elapsed_ms;
+        int y = 0, mouth = 0, size = 0;
+        int eye = (s.kind == Kind::Idea || s.kind == Kind::Shy) ? 72 :
+                  (s.kind == Kind::Stretch ? 35 :
+                  (s.kind == Kind::Hungry ? 70 : 75));
+        switch (s.kind) {
+        case Kind::Sneeze:
+            if (elapsed >= 600 && elapsed < 1000) { eye = 25; mouth = 35; y = -15; }
+            else if (elapsed >= 1000 && elapsed < 1250) { eye = 0; mouth = 100; y = 45; }
+            break;
+        case Kind::Hiccup: {
+            const uint32_t beat = elapsed % 750;
+            if (elapsed < 2250 && beat >= 250 && beat < 400) {
+                y = -40; mouth = 65; eye = 100;
+            }
+            break;
+        }
+        case Kind::Hungry:
+            mouth = elapsed % 1100 < 220 ? 25 : 0;
+            break;
+        case Kind::Stretch:
+            if (elapsed < 1700) {
+                const float pulse = std::sin(elapsed * 3.141592654f / 1700.0f);
+                y = -static_cast<int>(pulse * 55);
+                size = static_cast<int>(pulse * 18);
+                mouth = static_cast<int>(pulse * 65);
+            }
+            break;
+        case Kind::Idea:
+            if (elapsed < 600) { eye = 55; mouth = 15; }
+            else if (elapsed < 1100) { eye = 100; size = 15; mouth = 45; }
+            break;
+        case Kind::Shy:
+            eye = elapsed % 700 < 180 ? 20 : 72;
+            mouth = elapsed % 900 < 350 ? 30 : 0;
+            break;
+        default: break;
+        }
+        for (auto* feature : {&sc.avatar().leftEye(), &sc.avatar().rightEye()}) {
+            feature->setPosition({0, y});
+            feature->setWeight(eye);
+            feature->setSize(size);
+            feature->setRotation(0);
+        }
+        sc.avatar().mouth().setPosition({0, y});
+        sc.avatar().mouth().setWeight(mouth);
+        sc.avatar().mouth().setRotation(0);
     }
     void Draw(const State& s) {
         const bool asleep = Sleeping(s.phase);
@@ -281,6 +361,7 @@ void Update(StackChan& sc) {
     // need, while each render mutates multiple LVGL objects.
     if (r.own_face && (r.last_draw_at == 0 || now - r.last_draw_at >= 100)) {
         r.Draw(state);
+        r.ApplyTheatreFace(sc, state);
         r.last_draw_at = now;
     }
 }
