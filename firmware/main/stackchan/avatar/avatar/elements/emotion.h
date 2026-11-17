@@ -14,6 +14,7 @@ enum class Emotion {
     Sad,
     Doubt,
     Sleepy,
+    Fun, // S3: laughing; Happy eyes with heart decoration
 };
 
 }  // namespace stackchan::avatar
