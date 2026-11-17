@@ -19,6 +19,7 @@ void Start();               // Called only after the Xiaozhi avatar is created.
 void Stop();                // Before its LVGL screen is destroyed; caller owns LVGL lock.
 void OnStandby(bool idle);  // Status change; does not touch UI objects.
 void NotifyActivity();      // Can be called from touch/IMU tasks.
+void NotifyExternalSpeech(); // Caller holds LVGL lock: protect newer subtitles.
 // Input handlers only enqueue a wake intent; LVGL and servo work stays
 // serialized in Update(). true means that the sleep-touch was consumed.
 bool RequestWakeTouch();    // Screen click or head pad press.
