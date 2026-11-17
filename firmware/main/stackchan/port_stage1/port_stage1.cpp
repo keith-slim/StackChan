@@ -136,6 +136,8 @@ struct Runtime {
     Cue cue = Cue::Nod;
     uint32_t cue_at = 0;
     bool cue_second = false;
+    // Explicit gestures may temporarily move a manually positioned neck.
+    bool cue_restore_neck = false;
     uitk::Vector2i saved_angles{0, 0};
     stackchan::avatar::Emotion saved_emotion = stackchan::avatar::Emotion::Neutral;
     std::unique_ptr<AvatarRestFace> rest;
@@ -169,9 +171,10 @@ struct Runtime {
             sc.rightNeonLight().setColor(0,0,0);
         }
         // Only return an automatic posture when no external command took over.
-        if (own_neck && !motion_held && restore)
+        if (own_neck && restore && (!motion_held || cue_restore_neck))
             sc.motion().moveWithSpeed(saved_angles.x, saved_angles.y, 120);
         own_face = own_led = own_neck = false;
+        cue_restore_neck = false;
         owns_auto.store(false);
     }
     void Begin(StackChan& sc, Phase next, Kind next_kind, uint32_t now) {
@@ -304,21 +307,26 @@ struct Runtime {
         } else dream.reset();
     }
     void BeginCue(StackChan& sc, Cue request, uint32_t now) {
-        Release(sc, false);
+        // Never discard an autonomous scene's original pose. The caller only
+        // starts a cue when no scene is in control.
+        Release(sc, true);
         cue = request;
         cue_at = now;
         cue_second = false;
         cue_active = true;
         owns_auto.store(true);
-        own_face = true;
+        // A live conversation owns the face/LED; gestures only move the neck.
+        own_face = idle.load();
         saved_emotion = sc.avatar().getEmotion();
         auto& motion = sc.motion();
-        if (!motion_held) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
+        saved_angles = motion.getCurrentAngles();
+        own_neck = true;
+        cue_restore_neck = true;
         auto preset = [&](int yaw, int pitch, int speed, avatar::Emotion face,
                           uint8_t r, uint8_t g, uint8_t b) {
-            sc.avatar().setEmotion(face);
-            if (!motion_held) motion.moveWithSpeed(yaw, pitch, speed);
-            if (!led_held) {
+            if (own_face) sc.avatar().setEmotion(face);
+            motion.moveWithSpeed(yaw, pitch, speed);
+            if (own_face && !led_held) {
                 own_led = true;
                 sc.leftNeonLight().setColor(r,g,b);
                 sc.rightNeonLight().setColor(r,g,b);
@@ -337,7 +345,7 @@ struct Runtime {
     void TickCue(StackChan& sc, uint32_t now) {
         const uint32_t elapsed = now - cue_at;
         auto& motion = sc.motion();
-        if (elapsed >= 400 && !cue_second && !motion_held) {
+        if (elapsed >= 400 && !cue_second) {
             cue_second = true;
             if (cue == Cue::ShakeHead) motion.moveWithSpeed(120,120,180);
             if (cue == Cue::Happy) motion.moveWithSpeed(100,180,170);
@@ -378,6 +386,7 @@ void Stop() {
     enabled.store(false);
     r.ClearVisuals();
     r = Runtime{};
+    queued_cue.store(-1);
     owns_auto.store(false);
 }
 // Caller holds the same LVGL lock used by Update(), so scene state is serialized.
@@ -399,6 +408,7 @@ void CancelForExternalChange(StackChan& sc) {
     if (!enabled.load()) return;
     r.Release(sc, true);
     r.cue_active = false;
+    queued_cue.store(-1); // New explicit motion must not be followed by a stale gesture.
     r.phase = Phase::Boot;
     r.schedule.Reset();
     interrupted.store(true); // Reset idle deadlines even if the caller is a touch event.
@@ -407,16 +417,24 @@ void NotifyManualMotion() { manual_motion.store(true); interrupted.store(true); 
 void NotifyManualLed() { manual_led.store(true); interrupted.store(true); }
 bool IsAutonomousSceneActive() { return owns_auto.load(); }
 bool RequestCue(const char* id) {
-    if (!id || !enabled.load()) return false;
-    for (int i = 0; i < static_cast<int>(Cue::Count); ++i)
-        if (std::strcmp(id, cue_names[i]) == 0) { queued_cue.store(i); return true; }
+    if (!id || !enabled.load() || owns_auto.load()) return false;
+    for (int i = 0; i < static_cast<int>(Cue::Count); ++i) {
+        if (std::strcmp(id, cue_names[i]) != 0) continue;
+        int empty = -1;
+        // Refuse overlapping requests rather than replacing a queued action.
+        return queued_cue.compare_exchange_strong(empty, i);
+    }
     return false;
 }
 void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
     const bool event = interrupted.exchange(false);
-    if (manual_motion.exchange(false)) r.motion_held = true;
+    if (manual_motion.exchange(false)) {
+        r.motion_held = true;
+        // A newer manual command takes precedence over cue restoration.
+        if (r.cue_active) r.cue_restore_neck = false;
+    }
     if (manual_led.exchange(false)) r.led_held = true;
     if (event && (r.own_face || r.cue_active)) {
         r.Release(sc, true); // explicit LED/neck ownership is respected by Release
@@ -426,7 +444,10 @@ void Update(StackChan& sc) {
     }
     int cue = queued_cue.exchange(-1);
     if (cue >= 0 && cue < static_cast<int>(Cue::Count)) {
-        r.BeginCue(sc, static_cast<Cue>(cue), now);
+        // An automatic scene that began after queueing keeps ownership.
+        if (!r.own_face && !r.cue_active)
+            r.BeginCue(sc, static_cast<Cue>(cue), now);
+        else ESP_LOGW(LOG_TAG, "cue skipped: autonomous scene is active");
     }
     if (r.cue_active) { r.TickCue(sc, now); return; }
 
