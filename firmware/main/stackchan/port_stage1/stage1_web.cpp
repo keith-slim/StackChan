@@ -18,48 +18,79 @@ std::atomic<bool> attempted{false};
 constexpr size_t MIN_FREE_INTERNAL = 18000;
 constexpr size_t MIN_LARGEST_INTERNAL = 5500;
 
-constexpr char PAGE[] = R"STAGE1PAGE(<!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>StackChan 工程1設定</title><style>
-:root{font-family:system-ui,sans-serif;color-scheme:light dark}
-body{max-width:550px;padding:20px;margin:auto;line-height:1.6}
-h1{font-size:1.4rem}fieldset{border:1px solid #888;border-radius:9px;margin:12px 0;padding:14px}
-label{display:block;margin:10px 0}input[type=time],input[type=number]{font-size:1.1rem;padding:6px}
-button{font-size:1rem;padding:10px 24px}#status{min-height:2em;white-space:pre-wrap}
-</style></head><body><h1>StackChan 工程1設定</h1>
-<p>保存すると直ちに反映され、再起動後も保持されます。</p>
+constexpr char PAGE[] = R"STAGE1PAGE(<!doctype html><html lang="ja"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StackChan 設定</title><style>
+:root{font:13px system-ui,sans-serif;color:#252f42;background:#eef1f5;line-height:1.6}
+*{box-sizing:border-box}body{margin:0}
+.app{display:grid;grid-template-columns:172px minmax(0,1fr);max-width:1080px;min-height:100vh;margin:auto}
+.sidebar{position:sticky;top:0;height:100vh;background:#182a46;padding:24px 12px;color:#fff}
+.brand{display:block;font-size:18px;font-weight:700;color:white;padding:0 12px 20px}
+nav{display:grid;gap:6px}nav a{display:block;color:#dbe6f6;text-decoration:none;padding:11px 14px;border-radius:8px}
+nav a:hover,nav a:focus{background:#285bd4}
+main{padding:18px;min-width:0}h1{font-size:19px;margin:0 0 12px}h2{font-size:16px;margin:0 0 12px}
+p{margin:8px 0}small,.hint{display:block;color:#68758a;font-size:10.5px;line-height:1.7}
+.card{background:#fff;border:1px solid #d6dce7;border-radius:8px;padding:14px;margin-bottom:12px}
+.fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+label{display:block;margin:0 0 5px;font-weight:500}
+input,button{font:inherit}
+input[type=time],input[type=number]{display:block;width:100%;max-width:14rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;background:#fff;color:inherit;padding:5px 8px}
+.check{display:flex;gap:8px;align-items:center;margin:0 0 12px}
+input[type=checkbox]{width:16px;height:16px;margin:0}
+button{min-height:30px;padding:5px 12px;background:#285bd4;color:white;border:0;border-radius:7px;cursor:pointer}
+button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
+.buttons{display:flex;flex-wrap:wrap;gap:8px}
+.status{min-height:1.6em;white-space:pre-wrap;overflow-wrap:anywhere;color:#465976;margin:8px 0 0}
+.save{margin:0 0 16px}.save button{font-weight:600}
+@media(max-width:740px){
+ .app{display:block}.sidebar{position:static;height:auto;padding:10px 12px}
+ .brand{display:inline-block;font-size:16px;padding:3px 10px 8px}
+ nav{display:flex;flex-wrap:wrap;gap:4px}nav a{padding:6px 10px}
+ main{padding:12px}
+}
+@media(max-width:440px){.fields{grid-template-columns:1fr}}
+</style></head><body>
+<div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
+<nav aria-label="設定メニュー">
+<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#actions">サーボテスト</a>
+</nav></aside><main>
+<h1>セッティング</h1>
 <form id="settings">
-<fieldset><legend>起床・就寝</legend>
-<label>起床時刻 <input name="wake" type="time" required></label>
-<label>就寝時刻 <input name="sleep" type="time" required></label>
-</fieldset>
-<fieldset><legend>待機中の小芝居</legend>
-<label><input name="theatre" type="checkbox"> 小芝居を有効にする</label>
-<label>無操作時間・最短（秒） <input name="theatreMin" type="number" min="10" max="3600" step="10" required></label>
-<label>無操作時間・最長（秒） <input name="theatreMax" type="number" min="10" max="3600" step="10" required></label>
-<p>くしゃみ・しゃっくり・空腹・背伸び・ひらめき・照れ笑い・あくび。音声は使用しません。</p>
-</fieldset>
-<fieldset><legend>昼寝</legend>
-<label><input name="naps" type="checkbox"> 昼寝を有効にする</label>
-<label>昼寝する確率（％） <input name="chance" type="number" min="0" max="100" step="5" required></label>
-<label>昼寝抽選まで・最短（分） <input name="napIdleMin" type="number" min="1" max="1440" required></label>
-<label>昼寝抽選まで・最長（分） <input name="napIdleMax" type="number" min="1" max="1440" required></label>
-<label>昼寝の継続時間・最短（分） <input name="napSleepMin" type="number" min="1" max="1440" required></label>
-<label>昼寝の継続時間・最長（分） <input name="napSleepMax" type="number" min="1" max="1440" required></label>
-<p>昼寝に当選すると約30秒の眠気・あくび演出の後に眠ります。夢の絵を表示し、設定時間で目覚めます。</p>
-</fieldset><button type="submit">保存して反映</button></form>
-<p id="status" role="status">読み込み中…</p>
-<fieldset><legend>サーボアクションの実機テスト</legend>
-<p>実行すると短く首を動かし、元の位置へ戻ります。動作中や睡眠中は受け付けません。</p>
-<div id="servoActions">
+<section id="daily" class="card"><h2>起床・就寝</h2>
+<div class="fields">
+<label>起床時刻<input name="wake" type="time" required></label>
+<label>就寝時刻<input name="sleep" type="time" required></label>
+</div></section>
+<section id="theatre" class="card"><h2>待機中の小芝居</h2>
+<label class="check"><input name="theatre" type="checkbox"> 小芝居を有効にする</label>
+<div class="fields">
+<label>無操作時間・最短（秒）<input name="theatreMin" type="number" min="10" max="3600" step="10" required></label>
+<label>無操作時間・最長（秒）<input name="theatreMax" type="number" min="10" max="3600" step="10" required></label>
+</div><small>7種類の短い無音演出。会話中は行いません。</small></section>
+<section id="nap" class="card"><h2>昼寝</h2>
+<label class="check"><input name="naps" type="checkbox"> 昼寝を有効にする</label>
+<div class="fields">
+<label>昼寝する確率（％）<input name="chance" type="number" min="0" max="100" step="5" required></label>
+<div></div>
+<label>抽選まで・最短（分）<input name="napIdleMin" type="number" min="1" max="1440" required></label>
+<label>抽選まで・最長（分）<input name="napIdleMax" type="number" min="1" max="1440" required></label>
+<label>継続時間・最短（分）<input name="napSleepMin" type="number" min="1" max="1440" required></label>
+<label>継続時間・最長（分）<input name="napSleepMax" type="number" min="1" max="1440" required></label>
+</div><small>昼寝当選後、眠気・あくびを経て就寝。夢の絵を表示します。</small></section>
+<div class="save"><button type="submit">保存して反映</button>
+<p id="status" class="status" role="status">読み込み中…</p></div>
+</form>
+<section id="actions" class="card"><h2>サーボアクションの実機テスト</h2>
+<small>現在位置から相対的に動作します。動作後の首位置は維持されます。</small>
+<div id="servoActions" class="buttons">
 <button type="button" data-action="nod">うなずく</button>
 <button type="button" data-action="shake_head">首を横に振る</button>
 <button type="button" data-action="tilt_head">首を傾ける</button>
 <button type="button" data-action="happy_move">喜ぶ</button>
 <button type="button" data-action="surprise_move">驚く</button>
 <button type="button" data-action="shy_move">照れる</button>
-</div><p id="actionStatus" role="status">待機中</p>
-</fieldset>
+</div><p id="actionStatus" class="status" role="status">待機中</p></section>
+</main></div>
 <script>
 const form=document.getElementById('settings'),status=document.getElementById('status');
 const f=form.elements;
