@@ -81,7 +81,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <p id="status" class="status" role="status">読み込み中…</p></div>
 </form>
 <section id="actions" class="card"><h2>サーボアクションの実機テスト</h2>
-<small>現在位置から相対的に動作します。動作後の首位置は維持されます。</small>
+<small>現在位置から相対的に動作します。うなずき・首振りは開始位置へ戻り、ほかの動作は終了位置を維持します。可動域は自動で制限します。</small>
 <div id="servoActions" class="buttons">
 <button type="button" data-action="nod">うなずく</button>
 <button type="button" data-action="shake_head">首を横に振る</button>
