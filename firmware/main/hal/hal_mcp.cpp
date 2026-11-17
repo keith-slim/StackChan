@@ -7,6 +7,7 @@
 #include <mooncake_log.h>
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
+#include <stackchan/port_stage1/port_stage1.h>
 #include <apps/common/common.h>
 #include <cstdlib>
 #include <ctime>
@@ -111,6 +112,8 @@ void Hal::xiaozhi_mcp_init()
 
                            LvglLockGuard lock;
 
+                           stackchan::stage1::CancelForExternalChange(GetStackChan());
+                           stackchan::stage1::NotifyManualMotion();
                            auto& motion = GetStackChan().motion();
                            if (pitch != -9999) {
                                motion.pitchServo().moveWithSpeed(pitch * 10, speed);
@@ -139,6 +142,8 @@ void Hal::xiaozhi_mcp_init()
 
             LvglLockGuard lock;
 
+            stackchan::stage1::CancelForExternalChange(GetStackChan());
+            stackchan::stage1::NotifyManualLed();
             GetStackChan().leftNeonLight().setColor(r, g, b);
             GetStackChan().rightNeonLight().setColor(r, g, b);
 

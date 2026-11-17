@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include <stackchan/port_stage1/port_stage1.h>
 #include "drivers/Si12T/Si12T.h"
 #include "board/hal_bridge.h"
 #include <mooncake_log.h>
@@ -137,6 +138,7 @@ static void _head_touch_update_task(void* param)
         // Update and fire event
         gesture = recognizer.update(data);
         if (gesture != HeadPetGesture::None) {
+            stackchan::stage1::NotifyActivity();
             GetHAL().onHeadPetGesture.emit(gesture);
         }
 

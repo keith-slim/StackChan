@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "stackchan_display.h"
+#include <stackchan/port_stage1/port_stage1.h>
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
@@ -199,6 +200,7 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
 StackChanAvatarDisplay::~StackChanAvatarDisplay()
 {
     ESP_LOGI(TAG, "Destroying StackChanAvatarDisplay");
+    stackchan::stage1::Stop(); // Remove scene children before LVGL / avatar teardown.
 
     if (preview_timer_ != nullptr) {
         esp_timer_stop(preview_timer_);
@@ -256,6 +258,7 @@ void StackChanAvatarDisplay::SetupUI()
     auto avatar = std::make_unique<DefaultAvatar>();
     avatar->init(lv_screen_active());
     avatar->getPanel()->onClick().connect([]() {
+        stackchan::stage1::NotifyActivity();
         static uint32_t last_toggle_tick = 0;
         const uint32_t now               = GetHAL().millis();
         if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
@@ -269,6 +272,7 @@ void StackChanAvatarDisplay::SetupUI()
     });
 
     stackchan.attachAvatar(std::move(avatar));
+    stackchan::stage1::Start();
     stackchan.addModifier(std::make_unique<BreathModifier>());
     blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
     stackchan.addModifier(std::make_unique<HeadPetModifier>());
@@ -330,6 +334,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     DisplayLockGuard lock(this);
 
+    stackchan::stage1::CancelForExternalChange(stackchan);
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
     auto& avatar = stackchan.avatar();
@@ -704,6 +709,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     DisplayLockGuard lock(this);
 
+    // Clear automatic face/LED/neck ownership before existing status handling.
+    if (strcmp(status, Lang::Strings::STANDBY) != 0)
+        stackchan::stage1::CancelForExternalChange(stackchan);
+
     bool is_idle      = false;
     bool is_listening = false;
 
@@ -806,6 +815,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     if (is_sleeping_) {
         avatar.setSpeech("");
     }
+    stackchan::stage1::OnStandby(is_idle);
 }
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)

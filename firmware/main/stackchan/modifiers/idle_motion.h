@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../port_stage1/port_stage1.h"
 #include "../utils/random.h"
 #include <smooth_ui_toolkit.hpp>
 // #include <mooncake_log.h>
@@ -39,7 +40,7 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
-        if (_paused || !stackchan.hasAvatar()) return;
+        if (_paused || !stackchan.hasAvatar() || stage1::IsAutonomousSceneActive()) return;
 
         uint32_t now = GetHAL().millis();
 
