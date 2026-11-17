@@ -32,7 +32,14 @@ constexpr const char* CONFIG_NS = "sc_stage1";
 bool ValidConfig(const Config& c) {
     return c.wake_minute < 1440 && c.sleep_minute < 1440 &&
            c.wake_minute != c.sleep_minute && c.nap_chance <= 100 &&
-           c.nap_chance % 5 == 0;
+           c.nap_chance % 5 == 0 &&
+           c.theatre_min_seconds >= 10 && c.theatre_max_seconds <= 3600 &&
+           c.theatre_min_seconds <= c.theatre_max_seconds &&
+           c.theatre_min_seconds % 10 == 0 && c.theatre_max_seconds % 10 == 0 &&
+           c.nap_idle_min_minutes >= 1 && c.nap_idle_max_minutes <= 1440 &&
+           c.nap_idle_min_minutes <= c.nap_idle_max_minutes &&
+           c.nap_sleep_min_minutes >= 1 && c.nap_sleep_max_minutes <= 1440 &&
+           c.nap_sleep_min_minutes <= c.nap_sleep_max_minutes;
 }
 
 Config LoadConfig() {
@@ -51,6 +58,12 @@ Config LoadConfig() {
     nvs_get_u8(handle, "theatre", &theatre);
     nvs_get_u8(handle, "naps", &naps);
     nvs_get_u8(handle, "nap_chance", &cfg.nap_chance);
+    nvs_get_u16(handle, "theatre_lo", &cfg.theatre_min_seconds);
+    nvs_get_u16(handle, "theatre_hi", &cfg.theatre_max_seconds);
+    nvs_get_u16(handle, "nap_idle_lo", &cfg.nap_idle_min_minutes);
+    nvs_get_u16(handle, "nap_idle_hi", &cfg.nap_idle_max_minutes);
+    nvs_get_u16(handle, "nap_sleep_lo", &cfg.nap_sleep_min_minutes);
+    nvs_get_u16(handle, "nap_sleep_hi", &cfg.nap_sleep_max_minutes);
     nvs_close(handle);
     if (theatre > 1 || naps > 1) return Config{};
     cfg.theatre = theatre != 0;
@@ -75,6 +88,12 @@ bool SaveConfig(const Config& cfg) {
     if (err == ESP_OK) err = nvs_set_u8(handle, "theatre", cfg.theatre ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(handle, "naps", cfg.naps ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(handle, "nap_chance", cfg.nap_chance);
+    if (err == ESP_OK) err = nvs_set_u16(handle, "theatre_lo", cfg.theatre_min_seconds);
+    if (err == ESP_OK) err = nvs_set_u16(handle, "theatre_hi", cfg.theatre_max_seconds);
+    if (err == ESP_OK) err = nvs_set_u16(handle, "nap_idle_lo", cfg.nap_idle_min_minutes);
+    if (err == ESP_OK) err = nvs_set_u16(handle, "nap_idle_hi", cfg.nap_idle_max_minutes);
+    if (err == ESP_OK) err = nvs_set_u16(handle, "nap_sleep_lo", cfg.nap_sleep_min_minutes);
+    if (err == ESP_OK) err = nvs_set_u16(handle, "nap_sleep_hi", cfg.nap_sleep_max_minutes);
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
     if (err != ESP_OK) ESP_LOGE(LOG_TAG, "config NVS save failed: %s", esp_err_to_name(err));
