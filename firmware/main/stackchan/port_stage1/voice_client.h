@@ -4,5 +4,6 @@
 #include "voice_settings.h"
 namespace stackchan::stage1::voice {
 bool Request(const Settings& config, const char* kind, const char* text);
+bool IsBusy(); // Queued/generating/playing voice; used for S3 scene ordering.
 void Cancel(); // Invalidate a stale nap voice on wake/conversation.
 }
