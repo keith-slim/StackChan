@@ -4,6 +4,9 @@
 #include "rest_face.h"
 #include "dream_face.h"
 #include "dream_context.h"
+#include "thinking_face.h"
+#include "listening_nod.h"
+#include "avatar_config.h"
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
 #include <lvgl.h>
@@ -122,6 +125,16 @@ struct Runtime {
     };
     bool theatre_face_saved = false;
     FeaturePose saved_left, saved_right, saved_mouth;
+    // The S3 conversation face owns only visuals; stage-1 still owns
+    // scheduling, servo actions, sleep and the existing chat/audio flow.
+    ConversationPose conversation_pose = ConversationPose::None;
+    bool conversation_saved = false;
+    FeaturePose conv_left, conv_right, conv_mouth;
+    bool conv_left_visible = true, conv_right_visible = true, conv_mouth_visible = true;
+    avatar::Emotion conv_emotion = avatar::Emotion::Neutral;
+    uint32_t conversation_at = 0, listening_nod_at = 0;
+    bool listening_nod = false;
+    std::unique_ptr<AvatarThinkingFace> thinking_face;
     Clock schedule;
     Phase phase = Phase::Boot;
     Kind kind = Kind::None;
@@ -166,6 +179,81 @@ struct Runtime {
         return p == Phase::Theatre || p == Phase::NapDrowsy || p == Phase::NapYawn ||
                p == Phase::NapSleep || p == Phase::NapWake || p == Phase::NightDrowsy ||
                p == Phase::NightYawn || p == Phase::NightSleep || p == Phase::MorningWake;
+    }
+    void EndConversation(StackChan& sc) {
+        if (conversation_pose == ConversationPose::None) return;
+        thinking_face.reset();
+        if (conversation_saved) {
+            sc.avatar().setEmotion(conv_emotion);
+            conv_left.Restore(sc.avatar().leftEye());
+            conv_right.Restore(sc.avatar().rightEye());
+            conv_mouth.Restore(sc.avatar().mouth());
+            sc.avatar().leftEye().setVisible(conv_left_visible);
+            sc.avatar().rightEye().setVisible(conv_right_visible);
+            sc.avatar().mouth().setVisible(conv_mouth_visible);
+        }
+        conversation_saved = false;
+        listening_nod = false;
+        conversation_pose = ConversationPose::None;
+    }
+    void BeginConversation(StackChan& sc, ConversationPose pose, uint32_t now) {
+        if (pose == ConversationPose::None) { EndConversation(sc); return; }
+        if (conversation_pose == pose) return;
+        if (!conversation_saved) {
+            Release(sc, true);
+            cue_active = false;
+            queued_cue.store(-1);
+            phase = Phase::Boot;
+            schedule.Reset();
+            auto& av = sc.avatar();
+            conv_emotion = av.getEmotion();
+            conv_left = FeaturePose::Capture(av.leftEye());
+            conv_right = FeaturePose::Capture(av.rightEye());
+            conv_mouth = FeaturePose::Capture(av.mouth());
+            conv_left_visible = av.leftEye().getVisible();
+            conv_right_visible = av.rightEye().getVisible();
+            conv_mouth_visible = av.mouth().getVisible();
+            conversation_saved = true;
+        }
+        if (pose == ConversationPose::Listening) {
+            thinking_face.reset();
+            listening_nod = false;
+        }
+        conversation_pose = pose;
+        conversation_at = now;
+        if (pose == ConversationPose::Thinking) {
+            listening_nod = true;
+            listening_nod_at = now;
+        }
+    }
+    void DrawConversation(StackChan& sc, uint32_t now) {
+        auto& av = sc.avatar();
+        const bool nodding = conversation_pose == ConversationPose::Thinking &&
+                             listening_nod &&
+                             now - listening_nod_at < avatar_nod::DURATION_MS;
+        if (conversation_pose == ConversationPose::Thinking && !nodding) {
+            listening_nod = false;
+            // Reuse S3's dedicated eyes, mouth and three-dot thinking cloud.
+            for (auto* feature : {&av.leftEye(), &av.rightEye(), &av.mouth()})
+                feature->setVisible(false);
+            if (!thinking_face)
+                thinking_face = std::make_unique<AvatarThinkingFace>(lv_screen_active());
+            thinking_face->Render(false, 0, now - conversation_at);
+            return;
+        }
+        thinking_face.reset();
+        for (auto* feature : {&av.leftEye(), &av.rightEye(), &av.mouth()})
+            feature->setVisible(true);
+        const bool blink = (now - conversation_at) % avatar_config::CONVERSATION_BLINK_PERIOD_MS >=
+            avatar_config::CONVERSATION_BLINK_PERIOD_MS - avatar_config::CONVERSATION_BLINK_MS;
+        const int offset = nodding ? avatar_nod::Offset(now - listening_nod_at) : -5;
+        for (auto* eye : {&av.leftEye(), &av.rightEye()}) {
+            eye->setPosition({0, offset});
+            eye->setSize(nodding ? 0 : 6);
+            eye->setWeight(blink && !nodding ? 0 : 100);
+        }
+        av.mouth().setPosition({0, nodding ? offset : 0});
+        av.mouth().setWeight(0);
     }
     void ClearVisuals() {
         last_draw_at = 0;
@@ -455,6 +543,7 @@ void OnStandby(bool ready) {
 void NotifyActivity() { interrupted.store(true); }
 void CancelForExternalChange(StackChan& sc) {
     if (!enabled.load()) return;
+    r.EndConversation(sc);
     r.Release(sc, true);
     r.cue_active = false;
     queued_cue.store(-1); // New explicit motion must not be followed by a stale gesture.
@@ -464,6 +553,19 @@ void CancelForExternalChange(StackChan& sc) {
 }
 void NotifyManualMotion() { manual_motion.store(true); interrupted.store(true); }
 void NotifyManualLed() { manual_led.store(true); interrupted.store(true); }
+void SetConversationPose(StackChan& sc, ConversationPose pose) {
+    if (!enabled.load() || !sc.hasAvatar()) return;
+    r.BeginConversation(sc, pose, GetHAL().millis());
+}
+void BeginListeningComplete(StackChan& sc) {
+    if (!enabled.load() || !sc.hasAvatar() ||
+        r.conversation_pose != ConversationPose::Listening) return;
+    r.BeginConversation(sc, ConversationPose::Thinking, GetHAL().millis());
+    ESP_LOGI(LOG_TAG, "S3 face: listening nod -> thinking");
+}
+bool IsConversationFaceActive() {
+    return r.conversation_pose != ConversationPose::None;
+}
 bool IsAutonomousSceneActive() { return owns_auto.load(); }
 bool IsIdleServoMotionBlocked() {
     // Suppress ordinary random head movement for the entire scene and
@@ -507,6 +609,12 @@ void Update(StackChan& sc) {
         else ESP_LOGW(LOG_TAG, "cue skipped: autonomous scene is active");
     }
     if (r.cue_active) { r.TickCue(sc, now); return; }
+    // Explicit conversation state always wins over idle skits and sleep
+    // previews; it is released on SPEAKING/STANDBY or other status changes.
+    if (r.conversation_pose != ConversationPose::None) {
+        r.DrawConversation(sc, now);
+        return;
+    }
 
     std::time_t epoch = std::time(nullptr);
     std::tm local{};
