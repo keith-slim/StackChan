@@ -160,9 +160,12 @@ void Start() {
         server = nullptr;
         return;
     }
-    const httpd_uri_t page{.uri="/", .method=HTTP_GET, .handler=Page, .user_ctx=nullptr};
-    const httpd_uri_t read{.uri="/api/stage1", .method=HTTP_GET, .handler=ReadConfig, .user_ctx=nullptr};
-    const httpd_uri_t write{.uri="/api/stage1", .method=HTTP_POST, .handler=WriteConfig, .user_ctx=nullptr};
+    httpd_uri_t page{};
+    page.uri = "/"; page.method = HTTP_GET; page.handler = Page;
+    httpd_uri_t read{};
+    read.uri = "/api/stage1"; read.method = HTTP_GET; read.handler = ReadConfig;
+    httpd_uri_t write{};
+    write.uri = "/api/stage1"; write.method = HTTP_POST; write.handler = WriteConfig;
     if (httpd_register_uri_handler(server, &page) != ESP_OK ||
         httpd_register_uri_handler(server, &read) != ESP_OK ||
         httpd_register_uri_handler(server, &write) != ESP_OK) {
