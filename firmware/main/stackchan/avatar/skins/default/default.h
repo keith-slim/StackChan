@@ -23,9 +23,15 @@ public:
 
     void init(lv_obj_t* parent, const lv_font_t* font = &lv_font_montserrat_16);
     uitk::lvgl_cpp::Container* getPanel() const;
+    void setEmotion(const Emotion& emotion) override;
+    void update() override;
 
 private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _pannel;
+    // Keep S3 emotion decorations separate from pet/IMU decorators so
+    // replacing an expression never destroys an unrelated reaction.
+    std::unique_ptr<Decorator> _s3_decoration_one;
+    std::unique_ptr<Decorator> _s3_decoration_two;
 };
 
 /**
