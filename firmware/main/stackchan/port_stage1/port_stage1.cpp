@@ -155,6 +155,7 @@ struct Runtime {
     uint8_t cue_step = 0;
     uint8_t wake_step = 0;
     uint32_t last_sleep_elapsed = 0;
+    bool waking_from_sleep = false;
     bool own_speech = false;
     WakeReason last_wake_reason = WakeReason::None;
     // Restore the visibility of the existing avatar features after the
@@ -310,8 +311,10 @@ struct Runtime {
         if (own_speech) { sc.avatar().clearSpeech(); own_speech = false; }
         if (continuing) ClearVisuals();
         else Release(sc, true);
-        if (next == Phase::NapWake || next == Phase::NightWake)
+        if (next == Phase::NapWake || next == Phase::NightWake) {
+            waking_from_sleep = Sleeping(phase);
             last_sleep_elapsed = now - phase_at;
+        }
         phase = next;
         kind = next_kind;
         phase_at = now;
@@ -525,7 +528,7 @@ struct Runtime {
                           (s.phase == Phase::Theatre && s.kind == Kind::Yawn);
         if (asleep || yawn || startled_wake) {
             if (!rest) rest = std::make_unique<AvatarRestFace>(lv_screen_active());
-            if (startled_wake && s.phase_elapsed_ms < 240)
+            if (startled_wake && waking_from_sleep && s.phase_elapsed_ms < 240)
                 rest->RenderWakePop(last_sleep_elapsed, s.phase_elapsed_ms);
             else rest->Render(startled_wake ? AvatarRestPose::Startled :
                               asleep ? AvatarRestPose::Sleeping : AvatarRestPose::Yawning,
@@ -690,6 +693,11 @@ void OnStandby(bool ready) {
     if (!ready) interrupted.store(true);
 }
 void NotifyActivity() { interrupted.store(true); }
+void NotifyExternalSpeech() {
+    // Xiaozhi owns the speech bubble once any ASR/system/TTS text arrives.
+    // The end of a wake animation must never delete a newer subtitle.
+    r.own_speech = false;
+}
 bool RequestWakeTouch() {
     if (!enabled.load()) return false;
     if (wake_sequence_active.load()) return true; // consume repeated contact
