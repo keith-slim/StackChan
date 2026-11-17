@@ -129,8 +129,15 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         active_sleep_voice = SleepVoiceKind::None;
     }
     // Touch wake uses the existing 12800 conversation socket and does not
-    // require the optional 8002 speech-server host.
+    // require the optional 8002 speech-server host. If legacy voice is not
+    // configured, preserve the old disabled behavior for every other scene.
     if (!config) return;
+    if (!config->host[0]) {
+        if (entered && (state.phase == Phase::NapWake || state.phase == Phase::NightWake) &&
+            state.wake_reason == WakeReason::Touch)
+            voice::Request(*config, "touch", config->touch);
+        return;
+    }
     if (entered) {
         switch (state.phase) {
         case Phase::NightMessage:
