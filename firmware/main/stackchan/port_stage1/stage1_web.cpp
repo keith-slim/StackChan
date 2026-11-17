@@ -49,6 +49,17 @@ button{font-size:1rem;padding:10px 24px}#status{min-height:2em;white-space:pre-w
 <p>昼寝に当選すると約30秒の眠気・あくび演出の後に眠ります。夢の絵を表示し、設定時間で目覚めます。</p>
 </fieldset><button type="submit">保存して反映</button></form>
 <p id="status" role="status">読み込み中…</p>
+<fieldset><legend>サーボアクションの実機テスト</legend>
+<p>実行すると短く首を動かし、元の位置へ戻ります。動作中や睡眠中は受け付けません。</p>
+<div id="servoActions">
+<button type="button" data-action="nod">うなずく</button>
+<button type="button" data-action="shake_head">首を横に振る</button>
+<button type="button" data-action="tilt_head">首を傾ける</button>
+<button type="button" data-action="happy_move">喜ぶ</button>
+<button type="button" data-action="surprise_move">驚く</button>
+<button type="button" data-action="shy_move">照れる</button>
+</div><p id="actionStatus" role="status">待機中</p>
+</fieldset>
 <script>
 const form=document.getElementById('settings'),status=document.getElementById('status');
 const f=form.elements;
@@ -88,6 +99,20 @@ form.addEventListener('submit',async e=>{
   if(!res.ok)throw Error('HTTP '+res.status+': '+await res.text());
   status.textContent='保存しました。設定は反映済みです。';
  }catch(e){status.textContent='保存失敗: '+e.message;}
+});
+document.getElementById('servoActions').addEventListener('click',async e=>{
+ const button=e.target.closest('button[data-action]');
+ if(!button)return;
+ const status=document.getElementById('actionStatus');
+ button.disabled=true;status.textContent='要求中…';
+ try{
+  const res=await fetch('/api/stage1/action',{method:'POST',
+   headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({action:button.dataset.action})});
+  if(!res.ok)throw Error(res.status===409?'動作中または利用できません':'HTTP '+res.status);
+  status.textContent='動作要求を受け付けました。';
+ }catch(e){status.textContent='失敗: '+e.message;}
+ finally{button.disabled=false;}
 });
 load();
 </script></body></html>)STAGE1PAGE";
@@ -196,6 +221,35 @@ esp_err_t WriteConfig(httpd_req_t* req) {
 }
 }
 
+esp_err_t TriggerAction(httpd_req_t* req) {
+    char content_type[64]{};
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
+        std::strncmp(content_type, "application/json", 16) != 0) {
+        Reply(req, "415 Unsupported Media Type", "{\"error\":\"JSON required\"}");
+        return ESP_OK;
+    }
+    if (req->content_len < 1 || req->content_len > 96) {
+        Reply(req, "400 Bad Request", "{\"error\":\"invalid action request\"}");
+        return ESP_OK;
+    }
+    char body[97]{};
+    int read = 0;
+    while (read < req->content_len) {
+        const int n = httpd_req_recv(req, body + read, req->content_len - read);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) return ESP_FAIL;
+        read += n;
+    }
+    cJSON* request = cJSON_Parse(body);
+    const cJSON* action = request ? cJSON_GetObjectItemCaseSensitive(request, "action") : nullptr;
+    const bool accepted = cJSON_IsString(action) && action->valuestring &&
+        std::strlen(action->valuestring) <= 32 && RequestCue(action->valuestring);
+    cJSON_Delete(request);
+    Reply(req, accepted ? "202 Accepted" : "409 Conflict",
+          accepted ? "{\"queued\":true}" : "{\"error\":\"unknown action or busy\"}");
+    return ESP_OK;
+}
+
 void Start() {
     // Never start during boot/audio initialization. Called once from the
     // already-running StackChan update task, only after Xiaozhi is idle.
@@ -211,7 +265,7 @@ void Start() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 4096;
-    config.max_uri_handlers = 3;
+    config.max_uri_handlers = 4;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -225,9 +279,12 @@ void Start() {
     read.uri = "/api/stage1"; read.method = HTTP_GET; read.handler = ReadConfig;
     httpd_uri_t write{};
     write.uri = "/api/stage1"; write.method = HTTP_POST; write.handler = WriteConfig;
+    httpd_uri_t action{};
+    action.uri = "/api/stage1/action"; action.method = HTTP_POST; action.handler = TriggerAction;
     if (httpd_register_uri_handler(server, &page) != ESP_OK ||
         httpd_register_uri_handler(server, &read) != ESP_OK ||
-        httpd_register_uri_handler(server, &write) != ESP_OK) {
+        httpd_register_uri_handler(server, &write) != ESP_OK ||
+        httpd_register_uri_handler(server, &action) != ESP_OK) {
         ESP_LOGE(TAG, "URI registration failed");
         httpd_stop(server);
         server = nullptr;
