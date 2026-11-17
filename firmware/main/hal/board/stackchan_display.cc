@@ -588,8 +588,8 @@ void StackChanAvatarDisplay::SetChatMessage(
     DisplayLockGuard lock(this);
 
     // During touch wake, the WebSocket CONNECTING transition sends an empty
-    // system message. It must not erase the local wake greeting before the
-    // first standalone subtitle arrives.
+    // system message. Keep the pending subtitle/display state intact until
+    // the first standalone subtitle arrives.
     if (strcmp(role, "system") == 0 && content[0] == '\0' &&
         Application::GetInstance().IsAnnouncementActive() &&
         stackchan::stage1::IsWakeSequenceActive()) {
@@ -796,7 +796,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     const bool wake_handoff = may_be_word && stackchan::stage1::RequestWakeWord();
     const bool wake_visual = wake_handoff || stackchan::stage1::IsWakeSequenceActive();
     // CONNECTING is only a transport state for touch-wake speech: do not
-    // replace the local wake greeting with a "connecting" bubble.
+    // display a "connecting" bubble before audio-synced subtitles arrive.
     const bool preserve_touch_caption =
         strcmp(status, Lang::Strings::CONNECTING) == 0 &&
         Application::GetInstance().IsAnnouncementActive() && wake_visual;

@@ -526,11 +526,13 @@ struct Runtime {
             av.rightEye().setVisible(false);
             av.mouth().setVisible(false);
             startled_face_active = true;
+            // Touch wake subtitles now come only from the 12800 WebSocket,
+            // paced with the actual audio. Do not show the stored full text
+            // locally first; word/timer wake retain their original captions.
             if (last_wake_reason == WakeReason::Word)
                 say(voice::Current() ? voice::Current()->wake_word : "あ、呼んだ？ 聞いてるよ。");
-            else if (last_wake_reason == WakeReason::Touch)
-                say(voice::Current() ? voice::Current()->touch : "びっくりした。起きたよ。");
-            else say(voice::Current() ? voice::Current()->timer : "よく寝た。そろそろ起きるね。");
+            else if (last_wake_reason != WakeReason::Touch)
+                say(voice::Current() ? voice::Current()->timer : "よく寝た。そろそろ起きるね。");
             if (!motion_held) {
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
                 MoveRelative(motion, motion.getCurrentAngles(), 0, 150, 330);
