@@ -32,6 +32,7 @@ struct Inputs {
     bool standby;
     bool activity;
     uint32_t random;
+    bool voice_busy = false; // Voice generation/queue not yet fully drained.
 };
 struct State {
     Phase phase = Phase::Boot;
@@ -105,7 +106,7 @@ public:
         }
         if (!day) {
             if (phase_ == Phase::NightWake) {
-                if (Elapsed(in.ms) >= 2800) {
+                if (Elapsed(in.ms) >= 2800 && !in.voice_busy) {
                     Enter(Phase::NightTemporary, in.ms);
                     night_temp_ms_ = 60000 + (in.random % 120001); // S3: 1–3 min before resleep
                 }
@@ -123,7 +124,7 @@ public:
                 else if (Elapsed(in.ms) >= 10000) Enter(Phase::NightMessage, in.ms);
             } else if (phase_ == Phase::NightMessage) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
-                else if (Elapsed(in.ms) >= 3000) Enter(Phase::NightYawn, in.ms);
+                else if (Elapsed(in.ms) >= 3000 && !in.voice_busy) Enter(Phase::NightYawn, in.ms);
             } else if (phase_ == Phase::NightYawn) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
                 else if (Elapsed(in.ms) >= 3500) Enter(Phase::NightSleep, in.ms);
@@ -178,10 +179,10 @@ public:
             }
             break;
         case Phase::NapWake:
-            if (Elapsed(in.ms) >= 2800) Enter(Phase::Awake, in.ms);
+            if (Elapsed(in.ms) >= 2800 && !in.voice_busy) Enter(Phase::Awake, in.ms);
             break;
         case Phase::MorningWake:
-            if (Elapsed(in.ms) >= 2800) Enter(Phase::Awake, in.ms);
+            if (Elapsed(in.ms) >= 2800 && !in.voice_busy) Enter(Phase::Awake, in.ms);
             break;
         case Phase::Awake:
             if (cfg_.theatre) {
