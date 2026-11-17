@@ -110,6 +110,8 @@ bool SaveConfig(const Config& cfg) {
 }
 
 uint32_t next_snore_at = 0, next_talk_at = 0;
+enum class SleepVoiceKind : uint8_t { None, Snore, Talk };
+SleepVoiceKind active_sleep_voice = SleepVoiceKind::None;
 // Intervals and prompts follow the S3 nap settings; no permanent task.
 uint32_t VoiceDelay(uint16_t lo, uint16_t hi) {
     const uint32_t span = static_cast<uint32_t>(hi - lo) + 1;
@@ -118,13 +120,13 @@ uint32_t VoiceDelay(uint16_t lo, uint16_t hi) {
 void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
     const auto* config = voice::Current();
     const bool entered = old_phase != state.phase;
-    if (entered && old_phase == Phase::NapSleep && state.phase != Phase::NapSleep) {
-        // A nap wake always supersedes an in-flight snore/sleep-talk.
+    if (entered && old_phase == Phase::NapSleep) {
+        // Wake/scene changes must invalidate the old sound before announcing.
         voice::Cancel();
-        next_snore_at = next_talk_at = 0;
     }
-    if (state.phase != Phase::NapSleep && entered) {
+    if (entered && (old_phase == Phase::NapSleep || state.phase == Phase::NapSleep)) {
         next_snore_at = next_talk_at = 0;
+        active_sleep_voice = SleepVoiceKind::None;
     }
     if (!config || !config->host[0]) return;
     if (entered) {
@@ -151,15 +153,35 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         default: break;
         }
     }
-    if (state.phase == Phase::NapSleep) {
-        if (next_snore_at && static_cast<int32_t>(now - next_snore_at) >= 0) {
-            voice::Request(*config, "snore", config->snore);
+    if (state.phase != Phase::NapSleep) return;
+
+    // Completion means generated audio has drained, not merely that HTTP
+    // accepted the request. Rearm only this sound's own interval afterwards.
+    if (active_sleep_voice != SleepVoiceKind::None) {
+        if (voice::IsBusy()) return;
+        if (active_sleep_voice == SleepVoiceKind::Snore)
             next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
-        }
-        if (next_talk_at && static_cast<int32_t>(now - next_talk_at) >= 0) {
-            voice::Request(*config, "sleep_talk", config->sleep_talk_prompt);
+        else
             next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
+        active_sleep_voice = SleepVoiceKind::None;
+    }
+    if (voice::IsBusy()) return; // Neither sleep sound may overlap any audio.
+    // Match S3's priority: a ready dream utterance takes the snore slot first.
+    if (next_talk_at && static_cast<int32_t>(now - next_talk_at) >= 0) {
+        if (voice::Request(*config, "sleep_talk", config->sleep_talk_prompt)) {
+            active_sleep_voice = SleepVoiceKind::Talk;
+            next_talk_at = 0;
+            return;
         }
+        next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
+    }
+    if (next_snore_at && static_cast<int32_t>(now - next_snore_at) >= 0) {
+        if (voice::Request(*config, "snore", config->snore)) {
+            active_sleep_voice = SleepVoiceKind::Snore;
+            next_snore_at = 0;
+            return;
+        }
+        next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
     }
 }
 uint32_t last_status_log_at = 0;
