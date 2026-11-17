@@ -257,7 +257,12 @@ void StackChanAvatarDisplay::SetupUI()
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 
     auto avatar = std::make_unique<DefaultAvatar>();
-    avatar->init(lv_screen_active());
+    // Use the same active font profile that Xiaozhi advertises for Glyph
+    // Push. A private Montserrat label would not see the fallback glyphs.
+    auto speech_font = current_theme_ ? current_theme_->GetTextFont() : nullptr;
+    avatar->init(lv_screen_active(),
+                 speech_font && speech_font->font() ? speech_font->font()
+                                                   : &lv_font_montserrat_16);
     avatar->getPanel()->onClick().connect([]() {
         // S3: a screen tap during sleep wakes the avatar first. It must
         // not toggle the Xiaozhi chat state on the same touch.
