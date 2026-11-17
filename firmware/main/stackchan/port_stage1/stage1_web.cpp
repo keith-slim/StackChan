@@ -2,6 +2,7 @@
 #include "stage1_web.h"
 #include "port_stage1.h"
 #include "voice_settings.h"
+#include "voice_client.h"
 #include <hal/hal.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
@@ -88,7 +89,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <div class="fields">
 <label>サーバーのホスト名 / IP<input name="host" type="text" maxlength="127" placeholder="192.168.1.254" pattern="[A-Za-z0-9.-]*"></label>
 <label>ポート<input name="port" type="number" min="1" max="65535" required></label>
-</div><small>AIサーバーと同じDockerコンテナ内の音声サービス。ホスト名が空なら送信しません。</small></section>
+</div><small>この欄は8002の従来発話用です。薄いIPは入力例で保存済み設定ではありません。12800のタッチ起床・テスト発話には不要です。</small></section>
 <section class="card"><h2>朝・夜の文言</h2><div class="fields">
 <label>朝の定時起床<textarea name="morning" rows="2"></textarea></label>
 <label>夜の就寝案内<textarea name="bedtime" rows="2"></textarea></label>
@@ -112,6 +113,11 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </section>
 <div class="save"><button type="submit">音声設定を保存</button><p id="voiceStatus" class="status" role="status">読み込み中…</p></div>
 </form>
+<section class="card"><h2>音声テスト（AIサーバー 12800）</h2>
+<label for="testSpeechText">読み上げる文章</label><textarea id="testSpeechText" rows="2" placeholder="テスト発話の文章"></textarea>
+<div class="buttons"><button type="button" id="testSpeech">読み上げテスト</button></div>
+<small>12800の既存Gemini Live音声・字幕経路を使用。通常会話中は開始しません。</small>
+<p id="testSpeechStatus" class="status" role="status">待機中</p></section>
 <section id="actions" class="card"><h2>サーボアクションの実機テスト</h2>
 <small>現在位置から相対的に動作します。うなずき・首振りは開始位置へ戻り、ほかの動作は終了位置を維持します。可動域は自動で制限します。</small>
 <div id="servoActions" class="buttons">
@@ -206,6 +212,21 @@ voiceForm.addEventListener('submit',async e=>{
   if(!r.ok)throw Error('HTTP '+r.status+': '+await r.text());
   voiceStatus.textContent='保存して反映しました';
  }catch(error){voiceStatus.textContent='保存失敗: '+error.message;}
+});
+const testSpeech=document.getElementById('testSpeech');
+testSpeech.addEventListener('click',async()=>{
+ const message=document.getElementById('testSpeechStatus');
+ const value=document.getElementById('testSpeechText').value;
+ const size=new TextEncoder().encode(value).length;
+ if(!size||size>512){message.textContent='文章はUTF-8で1～512バイトにしてください';return;}
+ testSpeech.disabled=true;message.textContent='発話を要求中…';
+ try{
+  const res=await fetch('/api/stage1/voice/test',{method:'POST',
+   headers:{'Content-Type':'application/json'},body:JSON.stringify({text:value})});
+  if(!res.ok)throw Error('HTTP '+res.status+': '+await res.text());
+  message.textContent='音声要求を受け付けました。再生結果は本体ログで確認してください。';
+ }catch(e){message.textContent='発話できません: '+e.message;}
+ finally{testSpeech.disabled=false;}
 });
 load();loadVoice();
 </script></body></html>)STAGE1PAGE";
@@ -458,7 +479,7 @@ void Start() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 4096;
-    config.max_uri_handlers = 6;
+    config.max_uri_handlers = 7;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
