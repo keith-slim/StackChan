@@ -199,7 +199,10 @@ void Start() {
     idle.store(false); interrupted.store(false);
     manual_motion.store(false); manual_led.store(false);
     queued_cue.store(-1); owns_auto.store(false);
-    enabled.store(true);
+    // Temporarily disable stage-1 runtime while investigating a post-update
+    // audio/WebSocket regression. Preserve all code and existing firmware paths.
+    // Re-enable only after an A/B test confirms playback stability.
+    enabled.store(false);
 }
 void Stop() {
     enabled.store(false);
