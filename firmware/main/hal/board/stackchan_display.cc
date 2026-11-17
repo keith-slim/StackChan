@@ -438,14 +438,22 @@ void StackChanAvatarDisplay::ResetSubtitleQueue()
 
 void StackChanAvatarDisplay::BeginSubtitleReview()
 {
-    // Only display captions that did not fit into live speech playback.
-    // Replaying the entire history duplicates the spoken answer on screen.
-    if (subtitle_queue_.empty()) return;
+    // Review only unread captions; if all played live, keep the last one
+    // visible for a reading interval before hiding the bubble.
+    const bool has_unread = !subtitle_queue_.empty();
+    if (!has_unread && !subtitle_playback_started_) return;
     subtitle_reviewing_ = true;
-    subtitle_displaying_ = false;
+    subtitle_displaying_ = !has_unread;
+    const uint32_t now = lv_tick_get();
     // Give late network frames a short chance to arrive after audio ends.
-    subtitle_review_wait_until_ms_ = lv_tick_get() + 450;
+    subtitle_review_wait_until_ms_ = now + 450;
     subtitle_until_ms_ = 0;
+    if (!has_unread) {
+        uint32_t duration = 1700;
+        const auto& bubble = GetStackChan().avatar().getKeyElements().speechBubble;
+        if (bubble) duration = bubble->getDisplayDurationMs();
+        subtitle_until_ms_ = now + std::min<uint32_t>((duration * 3u) / 2u, 8000u);
+    }
     if (subtitle_timer_ == nullptr) {
         subtitle_timer_ = lv_timer_create(
             [](lv_timer_t* timer) {
@@ -488,7 +496,8 @@ void StackChanAvatarDisplay::AdvanceSubtitle()
             lv_timer_delete(subtitle_timer_);
             subtitle_timer_ = nullptr;
         }
-        ESP_LOGI(TAG, "[SUBTITLE] review completed");
+        GetStackChan().avatar().clearSpeech();
+        ESP_LOGI(TAG, "[SUBTITLE] review completed; bubble hidden");
         return;
     }
 
@@ -795,11 +804,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
     // Bridge the existing Xiaozhi state transitions to the S3 avatar only.
     // No new speech transport, microphone task or swipe gesture handler.
-    if (strcmp(status, Lang::Strings::LISTENING) == 0 && !wake_visual)
-        stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::Listening);
-    else if (strcmp(status, Lang::Strings::STANDBY) == 0)
-        stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::None);
-
     bool is_idle      = false;
     bool is_listening = false;
 
@@ -867,6 +871,17 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     } else {
         avatar.setSpeech(status);
     }
+
+    // Stop mouth animation before capturing the listening pose or restoring
+    // the prior face. Otherwise an open lip-sync frame can be saved and
+    // restored as a stationary open mouth after speech ends.
+    if (strcmp(status, Lang::Strings::LISTENING) == 0 && !wake_visual)
+        stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::Listening);
+    else if (strcmp(status, Lang::Strings::STANDBY) == 0)
+        stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::None);
+    if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
+        strcmp(status, Lang::Strings::STANDBY) == 0)
+        avatar.mouth().setWeight(0);
 
     if (is_idle) {
         // Start idle motion
