@@ -16,6 +16,12 @@ struct Config {
     bool theatre = true;
     bool naps = true;
     uint8_t nap_chance = 30;
+    uint16_t theatre_min_seconds = 60;
+    uint16_t theatre_max_seconds = 180;
+    uint16_t nap_idle_min_minutes = 10;
+    uint16_t nap_idle_max_minutes = 20;
+    uint16_t nap_sleep_min_minutes = 5;
+    uint16_t nap_sleep_max_minutes = 15;
 };
 struct Inputs {
     uint32_t ms;
@@ -39,7 +45,14 @@ public:
     bool SetConfig(const Config& cfg) {
         if (cfg.wake_minute >= 1440 || cfg.sleep_minute >= 1440 ||
             cfg.wake_minute == cfg.sleep_minute || cfg.nap_chance > 100 ||
-            cfg.nap_chance % 5 != 0) return false;
+            cfg.nap_chance % 5 != 0 ||
+            cfg.theatre_min_seconds < 10 || cfg.theatre_max_seconds > 3600 ||
+            cfg.theatre_min_seconds > cfg.theatre_max_seconds ||
+            cfg.theatre_min_seconds % 10 || cfg.theatre_max_seconds % 10 ||
+            cfg.nap_idle_min_minutes < 1 || cfg.nap_idle_max_minutes > 1440 ||
+            cfg.nap_idle_min_minutes > cfg.nap_idle_max_minutes ||
+            cfg.nap_sleep_min_minutes < 1 || cfg.nap_sleep_max_minutes > 1440 ||
+            cfg.nap_sleep_min_minutes > cfg.nap_sleep_max_minutes) return false;
         cfg_ = cfg;
         idle_due_ = nap_due_ = 0;
         return true;
@@ -112,7 +125,9 @@ public:
         case Phase::NapYawn:
             if (Elapsed(in.ms) >= 3500) {
                 Enter(Phase::NapSleep, in.ms);
-                nap_sleep_ms_ = 5 * 60000 + in.random % (10 * 60000 + 1);
+                nap_sleep_ms_ = static_cast<uint32_t>(cfg_.nap_sleep_min_minutes) * 60000 +
+                    in.random % ((static_cast<uint32_t>(cfg_.nap_sleep_max_minutes) -
+                                  cfg_.nap_sleep_min_minutes) * 60000 + 1);
                 dream_due_ = in.ms + DreamWait(in.random >> 4);
             }
             break;
@@ -135,7 +150,9 @@ public:
             break;
         case Phase::Awake:
             if (cfg_.theatre) {
-                if (!idle_due_) idle_due_ = in.ms + 60000 + in.random % 120001;
+                if (!idle_due_) idle_due_ = in.ms + static_cast<uint32_t>(cfg_.theatre_min_seconds) * 1000 +
+                    in.random % ((static_cast<uint32_t>(cfg_.theatre_max_seconds) -
+                                  cfg_.theatre_min_seconds) * 1000 + 1);
                 if (static_cast<int32_t>(in.ms - idle_due_) >= 0) {
                     const auto last = static_cast<uint8_t>(last_kind_);
                     const auto slot = static_cast<uint8_t>(in.random % (last ? 6 : 7));
@@ -148,7 +165,9 @@ public:
                 }
             }
             if (cfg_.naps) {
-                if (!nap_due_) nap_due_ = in.ms + 10 * 60000 + in.random % (10 * 60000 + 1);
+                if (!nap_due_) nap_due_ = in.ms + static_cast<uint32_t>(cfg_.nap_idle_min_minutes) * 60000 +
+                    in.random % ((static_cast<uint32_t>(cfg_.nap_idle_max_minutes) -
+                                  cfg_.nap_idle_min_minutes) * 60000 + 1);
                 if (static_cast<int32_t>(in.ms - nap_due_) >= 0) {
                     nap_due_ = 0;
                     if ((in.random % 100) < cfg_.nap_chance) Enter(Phase::NapDrowsy, in.ms);
