@@ -40,7 +40,7 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
-        if (_paused || !stackchan.hasAvatar() || stage1::IsIdleServoMotionBlocked()) return;
+        if (_paused || !stackchan.hasAvatar() || (stage1::IsIdleServoMotionBlocked() || stage1::IsConversationFaceActive())) return;
 
         uint32_t now = GetHAL().millis();
 
