@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "stackchan_display.h"
+#include <application.h>
 #include <stackchan/port_stage1/port_stage1.h>
 #include <stackchan/port_stage1/speech_emotion.h>
 #include <esp_log.h>
@@ -586,6 +587,15 @@ void StackChanAvatarDisplay::SetChatMessage(
 
     DisplayLockGuard lock(this);
 
+    // During touch wake, the WebSocket CONNECTING transition sends an empty
+    // system message. It must not erase the local wake greeting before the
+    // first standalone subtitle arrives.
+    if (strcmp(role, "system") == 0 && content[0] == '\0' &&
+        Application::GetInstance().IsAnnouncementActive() &&
+        stackchan::stage1::IsWakeSequenceActive()) {
+        return;
+    }
+
     // System/ASR/TTS text takes precedence over the short wake greeting.
     if (strcmp(role, "user") == 0 || strcmp(role, "system") == 0 ||
         strcmp(role, "assistant") == 0)
@@ -785,6 +795,11 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
                              strcmp(status, Lang::Strings::LISTENING) == 0;
     const bool wake_handoff = may_be_word && stackchan::stage1::RequestWakeWord();
     const bool wake_visual = wake_handoff || stackchan::stage1::IsWakeSequenceActive();
+    // CONNECTING is only a transport state for touch-wake speech: do not
+    // replace the local wake greeting with a "connecting" bubble.
+    const bool preserve_touch_caption =
+        strcmp(status, Lang::Strings::CONNECTING) == 0 &&
+        Application::GetInstance().IsAnnouncementActive() && wake_visual;
     if (strcmp(status, Lang::Strings::STANDBY) != 0 && !wake_visual)
         stackchan::stage1::CancelForExternalChange(stackchan);
 
@@ -868,7 +883,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
         GetHAL().setRgbColor(0, 0, 0, 50);
         GetHAL().refreshRgb();
-    } else {
+    } else if (!preserve_touch_caption) {
         avatar.setSpeech(status);
     }
 
