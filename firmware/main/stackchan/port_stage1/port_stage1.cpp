@@ -401,6 +401,9 @@ struct Runtime {
         if (elapsed >= 2050 && wake_step == 1) {
             wake_step = 2;
             MoveRelative(sc.motion(), saved_angles, 0, 0, 180);
+            // The final wake step already requests the saved position.
+            // Avoid commanding that same pose again on scene release.
+            restore_neck_on_release = false;
         }
     }
     void ApplyTheatreFace(StackChan& sc, const State& s) {
@@ -561,6 +564,11 @@ struct Runtime {
         if (elapsed >= finish_ms &&
             (cue != Cue::ShakeHead || cue_step >= 4) &&
             (cue != Cue::Nod || cue_step >= 1)) {
+            // Keep ownership until the return-to-start motion settles.
+            // A bounded timeout avoids blocking all future actions if a
+            // servo stops reporting movement completion.
+            if ((cue == Cue::ShakeHead || cue == Cue::Nod) &&
+                motion.isMoving() && elapsed < 5000) return;
             ESP_LOGI(LOG_TAG, "servo action finished: %s", cue_names[static_cast<int>(cue)]);
             cue_active = false;
             Release(sc, true);
