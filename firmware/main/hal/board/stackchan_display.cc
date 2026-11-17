@@ -572,6 +572,11 @@ void StackChanAvatarDisplay::SetChatMessage(
 
     DisplayLockGuard lock(this);
 
+    // System/ASR/TTS text takes precedence over the short wake greeting.
+    if (strcmp(role, "user") == 0 || strcmp(role, "system") == 0 ||
+        strcmp(role, "assistant") == 0)
+        stackchan::stage1::NotifyExternalSpeech();
+
     if (strcmp(role, "user") == 0) {
         // S3 listening-complete animation: show a short visual nod, then
         // the thinking face. The ASR text/audio path is unchanged.
@@ -671,6 +676,7 @@ void StackChanAvatarDisplay::ClearChatMessages()
     }
 
     ResetSubtitleQueue();
+    stackchan::stage1::NotifyExternalSpeech();
     stackchan.avatar().clearSpeech();
 
     ESP_LOGI(TAG, "Chat messages cleared");
