@@ -39,7 +39,7 @@ public:
     {
         // Stage-1 saves/restores face positions. Do not advance the relative
         // breathing offset while its absolute pose animation owns the face.
-        if (!stackchan.hasAvatar() || stage1::IsAutonomousSceneActive()) return;
+        if (!stackchan.hasAvatar() || (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive())) return;
 
         uint32_t now = GetHAL().millis();
 
