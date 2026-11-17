@@ -7,9 +7,11 @@ namespace stackchan::stage1 {
 
 enum class Phase : uint8_t {
     Boot, Awake, Theatre, NapDrowsy, NapYawn, NapSleep, NapWake,
-    NightPending, NightDrowsy, NightYawn, NightSleep, NightTemporary, MorningWake
+    NightPending, NightDrowsy, NightYawn, NightSleep, NightTemporary, MorningWake, NightWake
 };
 enum class Kind : uint8_t { None, Sneeze, Hiccup, Hungry, Stretch, Idea, Shy, Yawn };
+// Sleep wake sources match S3 DayNap: touch/pad, wake-word, timer.
+enum class WakeReason : uint8_t { None, Touch, Word, Timer, Morning };
 struct Config {
     uint16_t wake_minute = 6 * 60;
     uint16_t sleep_minute = 23 * 60;
@@ -38,6 +40,7 @@ struct State {
     int8_t dream = -1;
     uint32_t phase_elapsed_ms = 0;
     bool day = true;
+    WakeReason wake_reason = WakeReason::None;
 };
 
 class Clock {
@@ -58,12 +61,28 @@ public:
         return true;
     }
     const Config& GetConfig() const { return cfg_; }
+    Phase CurrentPhase() const { return phase_; }
+    bool RequestWake(WakeReason why, uint32_t ms) {
+        if (why != WakeReason::Touch && why != WakeReason::Word) return false;
+        if (phase_ == Phase::NapSleep || phase_ == Phase::NapYawn) {
+            wake_reason_ = why;
+            Enter(Phase::NapWake, ms);
+            return true;
+        }
+        if (phase_ == Phase::NightSleep || phase_ == Phase::NightYawn) {
+            wake_reason_ = why;
+            Enter(Phase::NightWake, ms);
+            return true;
+        }
+        return false;
+    }
     void Reset() {
         phase_ = Phase::Boot;
         kind_ = Kind::None;
         dream_ = -1;
         idle_due_ = nap_due_ = phase_at_ = dream_due_ = dream_hide_ = 0;
         last_kind_ = Kind::None;
+        wake_reason_ = WakeReason::None;
     }
     static bool IsDay(uint16_t minute, const Config& c) {
         if (minute >= 1440) return false;
@@ -83,6 +102,10 @@ public:
             return Snapshot(in.ms, day); // initial sync is silent
         }
         if (!day) {
+            if (phase_ == Phase::NightWake) {
+                if (Elapsed(in.ms) >= 2800) Enter(Phase::NightTemporary, in.ms);
+                return Snapshot(in.ms, day);
+            }
             if (phase_ != Phase::NightPending && phase_ != Phase::NightDrowsy &&
                 phase_ != Phase::NightYawn && phase_ != Phase::NightSleep &&
                 phase_ != Phase::NightTemporary) {
@@ -104,13 +127,14 @@ public:
             }
             return Snapshot(in.ms, day);
         }
-        if (phase_ == Phase::NightSleep || phase_ == Phase::NightTemporary ||
+        if (phase_ == Phase::NightWake || phase_ == Phase::NightSleep || phase_ == Phase::NightTemporary ||
             phase_ == Phase::NightPending || phase_ == Phase::NightDrowsy ||
             phase_ == Phase::NightYawn) {
+            wake_reason_ = WakeReason::Morning;
             Enter(in.standby && !in.activity ? Phase::MorningWake : Phase::Awake, in.ms);
             return Snapshot(in.ms, day);
         }
-        if (!in.standby || in.activity) {
+        if ((!in.standby || in.activity) && phase_ != Phase::NapWake) {
             if (phase_ != Phase::Awake) Enter(Phase::Awake, in.ms);
             idle_due_ = nap_due_ = 0;
             return Snapshot(in.ms, day);
@@ -132,7 +156,10 @@ public:
             }
             break;
         case Phase::NapSleep:
-            if (Elapsed(in.ms) >= nap_sleep_ms_) Enter(Phase::NapWake, in.ms);
+            if (Elapsed(in.ms) >= nap_sleep_ms_) {
+                wake_reason_ = WakeReason::Timer;
+                Enter(Phase::NapWake, in.ms);
+            }
             else {
                 if (dream_ >= 0 && static_cast<int32_t>(in.ms - dream_hide_) >= 0) dream_ = -1;
                 if (static_cast<int32_t>(in.ms - dream_due_) >= 0) {
@@ -203,13 +230,14 @@ private:
     }
     uint32_t Elapsed(uint32_t now) const { return now - phase_at_; }
     State Snapshot(uint32_t now, bool day) const {
-        return {phase_, kind_, dream_, now - phase_at_, day};
+        return {phase_, kind_, dream_, now - phase_at_, day, wake_reason_};
     }
     Config cfg_{};
     Phase phase_ = Phase::Boot;
     Kind kind_ = Kind::None;
     Kind last_kind_ = Kind::None;
     int8_t dream_ = -1;
+    WakeReason wake_reason_ = WakeReason::None;
     uint32_t phase_at_ = 0, idle_due_ = 0, nap_due_ = 0;
     uint32_t nap_sleep_ms_ = 0, dream_due_ = 0, dream_hide_ = 0;
 };
