@@ -49,7 +49,7 @@ public:
         // Stage-1 owns eye shape during skits/rest. Preserve blink state and
         // the pre-scene eye weights so resuming cannot reopen to a skit pose.
         if (!stackchan.hasAvatar() || stackchan.avatar().isModifyLocked() ||
-            stage1::IsAutonomousSceneActive()) {
+            (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive())) {
             return;
         }
 
