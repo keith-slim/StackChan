@@ -214,6 +214,9 @@ struct Runtime {
             conv_right_visible = av.rightEye().getVisible();
             conv_mouth_visible = av.mouth().getVisible();
             conversation_saved = true;
+            // S3 conversation poses replace previous emotions/decorations,
+            // not just their eye and mouth geometry. Restore on exit.
+            av.setEmotion(avatar::Emotion::Neutral);
         }
         if (pose == ConversationPose::Listening) {
             thinking_face.reset();
@@ -343,6 +346,9 @@ struct Runtime {
             }
         } else if (next == Phase::NapDrowsy || next == Phase::NightDrowsy) {
             av.setEmotion(avatar::Emotion::Sleepy);
+            // An already-running random idle servo trajectory must not keep
+            // moving through the 30-second drowsy/yawn sequence.
+            if (!motion_held && !continuing) motion.stop();
             color(28,18,20);
         } else if (next == Phase::NapYawn || next == Phase::NightYawn) {
             av.setEmotion(avatar::Emotion::Sleepy);
