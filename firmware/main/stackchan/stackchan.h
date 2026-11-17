@@ -130,10 +130,11 @@ public:
      */
     void update()
     {
+        // Acquire theatre/nap/gesture ownership before ordinary idle modifiers.
+        // Otherwise a random idle movement can run on the same tick as a skit starts.
+        stage1::Update(*this);
         _modifier_pool.forEach([this](Modifier* modifier, int id) { modifier->_update(*this); });
         _modifier_pool.cleanup();
-        // Non-blocking S3 scene port, sharing the existing UI/motion update lock.
-        stage1::Update(*this);
 
         if (_avatar) {
             _avatar->update();
