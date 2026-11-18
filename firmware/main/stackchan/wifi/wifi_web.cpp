@@ -49,7 +49,8 @@ bool ReadStaticValue(const cJSON* obj, const char* key, uint8_t (&result)[4],
 bool ReadIpConfig(const cJSON* obj, IpSettings& out) {
     out = {};
     const char* mode = StringValue(obj, "mode");
-    if (!mode || !std::strcmp(mode, "dhcp")) return true;
+    if (!mode) return false;
+    if (!std::strcmp(mode, "dhcp")) return true;
     if (std::strcmp(mode, "static")) return false;
     out.use_static = 1;
     return ReadStaticValue(obj, "ip", out.ip, true) &&
@@ -202,9 +203,14 @@ esp_err_t WriteSettings(httpd_req_t* req) {
     std::string password = index >= 0 ? list[index].password : "";
     if (clear_password) password.clear();
     else if (password_text && *password_text) password = password_text;
-    if (password.size() > 63) {
+    const bool credentials_changed = index < 0 || password != list[index].password;
+    // Keep existing 64-hex WPA2 keys intact. A newly supplied 64-character
+    // value is allowed only when all characters are hexadecimal.
+    if (password.size() > 64 ||
+        (credentials_changed && password.size() == 64 &&
+         password.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)) {
         cJSON_Delete(obj);
-        return Reply(req,"400 Bad Request","{\"error\":\"password too long\"}");
+        return Reply(req,"400 Bad Request","{\"error\":\"invalid password length\"}");
     }
 
     IpSettings previous{};
@@ -216,7 +222,6 @@ esp_err_t WriteSettings(httpd_req_t* req) {
         cJSON_Delete(obj);
         return Reply(req,"500 Internal Server Error","{\"error\":\"IPv4 NVS save failed\"}");
     }
-    const bool credentials_changed = index < 0 || password != list[index].password;
     if (credentials_changed) {
         manager.AddSsid(ssid, password);
         if (!NvsCredentialsMatch(ssid, password)) {
