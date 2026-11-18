@@ -185,6 +185,31 @@ void Hal::xiaozhi_mcp_init()
             return saved;
         });
 
+    // Voice relative volume control complements the existing
+    // self.audio_speaker.set_volume absolute tool. Use the same HAL entry
+    // point as Web SETUP with permanent=true for persistent settings.
+    mclog::tagInfo(_tag, "add robot.adjust_volume tool");
+    mcp_server.AddTool(
+        "self.robot.adjust_volume",
+        "Increase or decrease this robot's speaker volume in percent. "
+        "delta must be +10 or -10. This is for explicit voice volume requests; "
+        "never use it for quoted, negative, or hypothetical instructions.",
+        PropertyList({Property("delta", kPropertyTypeInteger, 10, -10, 10)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int delta = properties["delta"].value<int>();
+            if (delta != 10 && delta != -10) return false;
+
+            const int current = static_cast<int>(getSpeakerVolume());
+            int next = current + delta;
+            if (next < 0) next = 0;
+            if (next > 100) next = 100;
+            setSpeakerVolume(static_cast<uint8_t>(next), true);
+            const int applied = static_cast<int>(getSpeakerVolume());
+            mclog::tagInfo(_tag, "adjust_volume: from={} delta={} applied={}",
+                           current, delta, applied);
+            return applied == next;
+        });
+
     mclog::tagInfo(_tag, "add robot.create_reminder tool");
     mcp_server.AddTool("self.robot.create_reminder",
                        "Create a reminder. Duration is in seconds. Message is what to say when time is up. Set repeat "
