@@ -113,6 +113,11 @@ bool SaveConfig(const Config& cfg) {
 uint32_t next_snore_at = 0, next_talk_at = 0;
 enum class SleepVoiceKind : uint8_t { None, Snore, Talk };
 SleepVoiceKind active_sleep_voice = SleepVoiceKind::None;
+enum class SceneVoice : uint8_t { None, Bedtime, Morning, Touch, Timer };
+SceneVoice pending_scene_voice = SceneVoice::None;
+Phase pending_scene_phase = Phase::Boot;
+uint32_t pending_scene_since = 0;
+bool VoicePending() { return pending_scene_voice != SceneVoice::None; }
 // Intervals and prompts follow the S3 nap settings; no permanent task.
 uint32_t VoiceDelay(uint16_t lo, uint16_t hi) {
     const uint32_t span = static_cast<uint32_t>(hi - lo) + 1;
@@ -129,26 +134,35 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         next_snore_at = next_talk_at = 0;
         active_sleep_voice = SleepVoiceKind::None;
     }
+    if (entered) {
+        pending_scene_voice = SceneVoice::None;
+        pending_scene_phase = state.phase;
+        pending_scene_since = now;
+    }
     // All autonomous speech now uses the existing 12800 Xiaozhi transport.
     // No second host/port is required or consulted.
     if (!config) return;
     if (entered) {
         switch (state.phase) {
         case Phase::NightMessage:
-            voice::Request(*config, "bedtime", config->bedtime);
+            if (config->bedtime[0]) pending_scene_voice = SceneVoice::Bedtime;
             break;
         case Phase::MorningWake:
-            voice::Request(*config, "morning", config->morning);
+            if (config->morning[0]) pending_scene_voice = SceneVoice::Morning;
             break;
         case Phase::NapWake:
         case Phase::NightWake:
             switch (state.wake_reason) {
-            case WakeReason::Touch: voice::Request(*config, "touch", config->touch); break;
+            case WakeReason::Touch:
+                if (config->touch[0]) pending_scene_voice = SceneVoice::Touch;
+                break;
             case WakeReason::Word:
                 // Application owns the real wake-word greeting before it starts
                 // microphone capture; do not queue a duplicate here.
                 break;
-            case WakeReason::Timer: voice::Request(*config, "timer", config->timer); break;
+            case WakeReason::Timer:
+                if (config->timer[0]) pending_scene_voice = SceneVoice::Timer;
+                break;
             default: break;
             }
             break;
@@ -159,10 +173,30 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         default: break;
         }
     }
+    if (pending_scene_voice != SceneVoice::None &&
+        state.phase == pending_scene_phase) {
+        const char* tag = nullptr;
+        const char* phrase = nullptr;
+        switch (pending_scene_voice) {
+        case SceneVoice::Bedtime: tag="bedtime"; phrase=config->bedtime; break;
+        case SceneVoice::Morning: tag="morning"; phrase=config->morning; break;
+        case SceneVoice::Touch: tag="touch"; phrase=config->touch; break;
+        case SceneVoice::Timer: tag="timer"; phrase=config->timer; break;
+        default: break;
+        }
+        if (tag && phrase && !voice::IsBusy() &&
+            voice::Request(*config, tag, phrase)) {
+            pending_scene_voice = SceneVoice::None;
+        } else if (static_cast<uint32_t>(now - pending_scene_since) > 15000) {
+            ESP_LOGW(LOG_TAG, "[SPEECH] kind=%s phase=timed_out_waiting_for_idle",
+                     tag ? tag : "unknown");
+            pending_scene_voice = SceneVoice::None;
+        }
+    }
     if (state.phase != Phase::NapSleep) return;
 
-    // Completion means generated audio has drained, not merely that HTTP
-    // accepted the request. Rearm only this sound's own interval afterwards.
+    // Completion means WebSocket TTS playback has drained; only then
+    // rearm that particular sleep sound's own interval.
     if (active_sleep_voice != SleepVoiceKind::None) {
         if (voice::IsBusy()) return;
         if (active_sleep_voice == SleepVoiceKind::Talk)
@@ -777,6 +811,7 @@ void Start() {
     // Start after the StackChanAvatarDisplay has attached its avatar.
     voice::Init();
     next_snore_at = next_talk_at = 0;
+    pending_scene_voice = SceneVoice::None;
     r = Runtime{};
     const Config config = LoadConfig();
     if (!r.schedule.SetConfig(config)) {
@@ -812,6 +847,7 @@ void Stop() {
     enabled.store(false);
     Application::GetInstance().SetWakeWordAnnouncementProvider({});
     voice::Cancel();
+    pending_scene_voice = SceneVoice::None;
     voice::Stop();
     r.ClearVisuals();
     r = Runtime{};
@@ -948,7 +984,8 @@ void Update(StackChan& sc) {
     // Xiaozhi can already be CONNECTING/LISTENING after a wake word.
     // Preserve the brief S3 wake animation without blocking microphone I/O.
     const bool pose_standby = standby || accepted_wake || wake_sequence_active.load();
-    State state = r.schedule.Step({now,minute,valid,pose_standby,event,esp_random(),voice::IsBusy()});
+    State state = r.schedule.Step({now,minute,valid,pose_standby,event,esp_random(),
+                                   voice::IsBusy() || VoicePending()});
     if (!status_logged || now - last_status_log_at >= 60000) {
         ESP_LOGI(LOG_TAG, "runtime phase=%d kind=%d standby=%d clock_valid=%d minute=%u auto=%d",
                  static_cast<int>(state.phase), static_cast<int>(state.kind),
