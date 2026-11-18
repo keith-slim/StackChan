@@ -26,6 +26,7 @@ constexpr char kTag[] = "CoreS3-SD";
 constexpr char kMount[] = "/sdcard";
 constexpr char kConfig[] = "/sdcard/config.json";
 constexpr char kPrevious[] = "/sdcard/Backup/config.json";
+constexpr char kPreviousStage[] = "/sdcard/Backup/config.json.rotate";
 constexpr char kBackupDir[] = "/sdcard/Backup";
 constexpr size_t kMaxFileBytes = 96 * 1024;
 std::mutex storage_mutex;
@@ -203,12 +204,37 @@ bool write_config_locked(const std::string& text) {
         return false;
     }
 
-    // Keep precisely one previous VALID generation, never overwrite a good
-    // backup with a corrupt current file.
+    // Preserve an existing valid backup until the new previous generation
+    // has been installed. A failed rename must never silently report success.
     if (has_original && original_valid) {
-        if ((std::remove(kPrevious) == 0 || errno == ENOENT) &&
-            std::rename(rollback.c_str(), kPrevious) != 0) {
-            ESP_LOGW(kTag, "Could not rotate previous config");
+        struct stat previous_info{};
+        const bool has_previous = stat(kPrevious, &previous_info) == 0;
+        if (!has_previous && errno != ENOENT) {
+            ESP_LOGE(kTag, "Cannot inspect previous backup; retaining rollback");
+            return false;
+        }
+        if (has_previous) {
+            // A leftover rotation file means an earlier interrupted update.
+            // Do not overwrite it: both generations remain recoverable.
+            struct stat rotation_info{};
+            if (stat(kPreviousStage, &rotation_info) == 0 || errno != ENOENT) {
+                ESP_LOGE(kTag, "Previous backup rotation pending; retaining rollback");
+                return false;
+            }
+            if (std::rename(kPrevious, kPreviousStage) != 0) {
+                ESP_LOGE(kTag, "Cannot preserve existing backup; retaining rollback");
+                return false;
+            }
+        }
+        if (std::rename(rollback.c_str(), kPrevious) != 0) {
+            ESP_LOGE(kTag, "Cannot install new backup; restoring prior backup");
+            if (has_previous && std::rename(kPreviousStage, kPrevious) != 0) {
+                ESP_LOGE(kTag, "Prior backup remains at %s", kPreviousStage);
+            }
+            return false;
+        }
+        if (has_previous && std::remove(kPreviousStage) != 0) {
+            ESP_LOGW(kTag, "Old backup remains at %s", kPreviousStage);
         }
     } else if (has_original) {
         std::remove(rollback.c_str());
@@ -252,7 +278,7 @@ bool ReadConfig(std::string& data, bool* recovered) {
     if (!access.ready()) return false;
     if (read_locked(kConfig, data) && is_json_object(data)) return true;
     data.clear();
-    for (const char* path : {kPrevious, "/sdcard/config.json.rollback", "/sdcard/config.json.bak"}) {
+    for (const char* path : {kPrevious, kPreviousStage, "/sdcard/config.json.rollback", "/sdcard/config.json.bak"}) {
         if (read_locked(path, data) && is_json_object(data)) {
             if (recovered) *recovered = true;
             // Backups may be healthy even when primary file is damaged.
