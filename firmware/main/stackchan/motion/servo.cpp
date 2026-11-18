@@ -55,13 +55,14 @@ void Servo::update()
         set_angle_impl(_angle_anim.end);
     }
 
-    // Auto release torque on rest
-    else if (_auto_torque_release_enabled && !isMoving()) {
-        if (GetHAL().millis() - _last_torque_check_tick > 200) {
-            if (getTorqueEnabled()) {
-                setTorqueEnabled(false);
-            }
-            _last_torque_check_tick = GetHAL().millis();
+    // Auto release torque on rest. Throttle hardware status queries too,
+    // not just torque writes: a disconnected servo otherwise incurs a UART
+    // timeout on almost every 20ms update, even when nothing is moving.
+    else if (_auto_torque_release_enabled &&
+             GetHAL().millis() - _last_torque_check_tick > 200) {
+        _last_torque_check_tick = GetHAL().millis();
+        if (!isMoving() && getTorqueEnabled()) {
+            setTorqueEnabled(false);
         }
     }
 }

@@ -105,8 +105,9 @@ public:
     bool is_moving_impl() override
     {
         int moving = _scs_bus.ReadMove(_config.id);
-        // mclog::tagInfo(_tag, "id: {} moving: {}", _id, moving);
-        return moving != 0;
+        // A failed UART read returns -1; it is not evidence of movement.
+        // The animation state is already checked by Servo::isMoving().
+        return moving > 0;
     }
 
     void setTorqueEnabled(bool enabled) override

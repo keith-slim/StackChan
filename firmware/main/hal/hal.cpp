@@ -258,12 +258,13 @@ static void _stackchan_update_task(void* param)
             stackchan::stage1::web::Start();
         }
 
-        LvglLockGuard lock;
-
+        // Keep the conversation pacing delay OUTSIDE the LVGL lock so
+        // subtitles and audio-related UI callbacks are not blocked by it.
         if (!hal_bridge::is_xiaozhi_idle()) {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
 
+        LvglLockGuard lock;
         GetStackChan().update();
 
         if (!hal_bridge::is_xiaozhi_ready()) {
