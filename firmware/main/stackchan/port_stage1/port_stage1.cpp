@@ -24,6 +24,8 @@
 #include <memory>
 #include <cmath>
 
+extern "C" void stackchan_nvs_commit_observer(void);
+
 namespace stackchan::stage1 {
 namespace {
 std::atomic<bool> enabled{false};
@@ -107,7 +109,8 @@ bool SaveConfig(const Config& cfg) {
     if (err == ESP_OK) err = nvs_set_u16(handle, "nap_sleep_hi", cfg.nap_sleep_max_minutes);
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
-    if (err != ESP_OK) ESP_LOGE(LOG_TAG, "config NVS save failed: %s", esp_err_to_name(err));
+    if (err == ESP_OK) stackchan_nvs_commit_observer();
+    else ESP_LOGE(LOG_TAG, "config NVS save failed: %s", esp_err_to_name(err));
     return err == ESP_OK;
 }
 
