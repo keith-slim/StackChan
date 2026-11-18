@@ -12,15 +12,9 @@ constexpr const char* NS = "sc_voice";
 struct TextField { const char* key; char* value; size_t size; };
 }
 bool Valid(const Settings& s) {
-    if (!s.port || s.snore_min < 1 || s.snore_min > s.snore_max || s.snore_max > 3600 ||
+    if (s.snore_min < 1 || s.snore_min > s.snore_max || s.snore_max > 3600 ||
         s.talk_min < 1 || s.talk_min > s.talk_max || s.talk_max > 3600) return false;
-    for (unsigned char c : s.host) {
-        if (c == 0) break;
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '.' || c == '-')) return false;
-    }
-    return std::memchr(s.host, 0, sizeof(s.host)) &&
-           std::memchr(s.morning, 0, sizeof(s.morning)) &&
+    return std::memchr(s.morning, 0, sizeof(s.morning)) &&
            std::memchr(s.bedtime, 0, sizeof(s.bedtime)) &&
            std::memchr(s.touch, 0, sizeof(s.touch)) &&
            std::memchr(s.wake_word, 0, sizeof(s.wake_word)) &&
@@ -36,7 +30,6 @@ bool Init() {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return true;
     TextField fields[] = {
-        {"host",current->host,sizeof(current->host)},
         {"morning",current->morning,sizeof(current->morning)},
         {"bedtime",current->bedtime,sizeof(current->bedtime)},
         {"touch",current->touch,sizeof(current->touch)},
@@ -49,7 +42,6 @@ bool Init() {
         size_t len=item.size;
         nvs_get_str(h,item.key,item.value,&len); // Missing keys keep S3 defaults.
     }
-    nvs_get_u16(h,"port",&current->port);
     nvs_get_u16(h,"snorelo",&current->snore_min);
     nvs_get_u16(h,"snorehi",&current->snore_max);
     nvs_get_u16(h,"talklo",&current->talk_min);
@@ -69,12 +61,11 @@ bool Save(const Settings& s) {
     if(nvs_open(NS,NVS_READWRITE,&h)!=ESP_OK)return false;
     esp_err_t err=ESP_OK;
     const struct {const char* key;const char* text;} strings[]={
-        {"host",s.host},{"morning",s.morning},{"bedtime",s.bedtime},
+        {"morning",s.morning},{"bedtime",s.bedtime},
         {"touch",s.touch},{"wakeword",s.wake_word},{"timer",s.timer},
         {"snore",s.snore},{"talkprompt",s.sleep_talk_prompt},
     };
     for(const auto& field:strings)if(err==ESP_OK)err=nvs_set_str(h,field.key,field.text);
-    if(err==ESP_OK)err=nvs_set_u16(h,"port",s.port);
     if(err==ESP_OK)err=nvs_set_u16(h,"snorelo",s.snore_min);
     if(err==ESP_OK)err=nvs_set_u16(h,"snorehi",s.snore_max);
     if(err==ESP_OK)err=nvs_set_u16(h,"talklo",s.talk_min);
