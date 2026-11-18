@@ -91,8 +91,13 @@ bool ValidValue(const Item& item) {
         case NVS_TYPE_I64: return Signed(item.value, INT64_MIN, INT64_MAX, s);
         case NVS_TYPE_STR: return item.value.size() <= kMaxValue;
         case NVS_TYPE_BLOB: {
-            std::vector<uint8_t> v;
-            return DecodeHex(item.value, v);
+            // Validate the hex text without allocating a redundant decoded BLOB.
+            // DecodeHex() still converts it when NVS restoration actually needs it.
+            if (item.value.size() % 2 != 0 || item.value.size() / 2 > kMaxValue) return false;
+            for (char digit : item.value) {
+                if (HexDigit(digit) < 0) return false;
+            }
+            return true;
         }
         default: return false;
     }
