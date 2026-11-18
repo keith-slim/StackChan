@@ -35,6 +35,12 @@ extern "C" void stackchan_nvs_commit_observer(void)
     _schedule_sd_backup_if_safe();
 }
 
+extern "C" bool stackchan_sd_nvs_backup_pending(void)
+{
+    return _sd_nvs_revision.load(std::memory_order_acquire) !=
+           _sd_saved_revision.load(std::memory_order_acquire);
+}
+
 Hal& GetHAL()
 {
     if (!_hal_instance) {
