@@ -3,6 +3,7 @@
 #include "port_stage1.h"
 #include "voice_settings.h"
 #include "voice_client.h"
+#include "setup_web.h"
 #include "stackchan/wifi/wifi_web.h"
 #include <hal/hal.h>
 #include <esp_http_server.h>
@@ -648,7 +649,7 @@ void Start() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 4096;
-    config.max_uri_handlers = 9;
+    config.max_uri_handlers = 11;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -677,6 +678,12 @@ void Start() {
     httpd_uri_t wifi_write{};
     wifi_write.uri = "/api/stage1/wifi"; wifi_write.method = HTTP_POST;
     wifi_write.handler = stackchan::wifi::web::WriteSettings;
+    httpd_uri_t setup_read{};
+    setup_read.uri = "/api/stage1/setup"; setup_read.method = HTTP_GET;
+    setup_read.handler = setup_web::Read;
+    httpd_uri_t setup_write{};
+    setup_write.uri = "/api/stage1/setup"; setup_write.method = HTTP_POST;
+    setup_write.handler = setup_web::Write;
     if (httpd_register_uri_handler(server, &page) != ESP_OK ||
         httpd_register_uri_handler(server, &read) != ESP_OK ||
         httpd_register_uri_handler(server, &write) != ESP_OK ||
@@ -685,7 +692,9 @@ void Start() {
         httpd_register_uri_handler(server, &voice_write) != ESP_OK ||
         httpd_register_uri_handler(server, &voice_test) != ESP_OK ||
         httpd_register_uri_handler(server, &wifi_read) != ESP_OK ||
-        httpd_register_uri_handler(server, &wifi_write) != ESP_OK) {
+        httpd_register_uri_handler(server, &wifi_write) != ESP_OK ||
+        httpd_register_uri_handler(server, &setup_read) != ESP_OK ||
+        httpd_register_uri_handler(server, &setup_write) != ESP_OK) {
         ESP_LOGE(TAG, "URI registration failed");
         httpd_stop(server);
         server = nullptr;
