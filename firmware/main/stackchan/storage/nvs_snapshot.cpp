@@ -214,9 +214,13 @@ bool BuildSnapshot(std::string& out) {
     if(!serialized)return false;
     out.assign(serialized);
     cJSON_free(serialized);
+    // The verification pass parses the same entries into another container.
+    // Release the original NVS copies first to avoid holding both at once.
+    const size_t expected_items = items.size();
+    std::vector<Item>().swap(items);
     // Do not publish an incomplete snapshot if a cJSON allocation failed.
     std::vector<Item> confirmed;
-    return ParseSnapshot(out,confirmed) && confirmed.size()==items.size();
+    return ParseSnapshot(out,confirmed) && confirmed.size()==expected_items;
 }
 bool ParseSnapshot(const std::string& text,std::vector<Item>& items) {
     cJSON* root=cJSON_ParseWithLength(text.data(),text.size());
