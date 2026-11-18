@@ -126,6 +126,54 @@ void Hal::xiaozhi_mcp_init()
                            return true;
                        });
 
+    // Relative voice head movement: read the servo's actual current angle
+    // and its live limits under the same LVGL lock before commanding motion.
+    // The servo's runtime limits may shrink after stall protection triggers.
+    mclog::tagInfo(_tag, "add robot.adjust_head_angles tool");
+    mcp_server.AddTool(
+        "self.robot.adjust_head_angles",
+        "Move the head relative to its current position by a bounded 10-degree step. "
+        "yaw_delta: +10 right, -10 left; pitch_delta: +10 up, -10 down. "
+        "Each axis is clamped to the servo's current limits, including stall-protection limits. "
+        "Only one axis may be moved per call.",
+        PropertyList({Property("yaw_delta", kPropertyTypeInteger, 0, -10, 10),
+                      Property("pitch_delta", kPropertyTypeInteger, 0, -10, 10),
+                      Property("speed", kPropertyTypeInteger, 150, 100, 1000)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int yaw_delta = properties["yaw_delta"].value<int>();
+            const int pitch_delta = properties["pitch_delta"].value<int>();
+            const int speed = properties["speed"].value<int>();
+
+            // Reject non-10-degree increments and combined movement.
+            if ((yaw_delta != 0 && yaw_delta != 10 && yaw_delta != -10) ||
+                (pitch_delta != 0 && pitch_delta != 10 && pitch_delta != -10) ||
+                ((yaw_delta == 0) == (pitch_delta == 0))) {
+                return false;
+            }
+
+            LvglLockGuard lock;
+            auto& motion = GetStackChan().motion();
+            stackchan::stage1::CancelForExternalChange(GetStackChan());
+            stackchan::stage1::NotifyManualMotion();
+
+            if (yaw_delta != 0) {
+                auto& servo = motion.yawServo();
+                const auto limit = servo.getAngleLimit();
+                const int before = servo.getCurrentAngle();
+                const int target = uitk::clamp(before + yaw_delta * 10, limit.x, limit.y);
+                mclog::tagInfo(_tag, "relative yaw: {} -> {}, limits: {}..{}", before, target, limit.x, limit.y);
+                if (target != before) servo.moveWithSpeed(target, speed);
+            } else {
+                auto& servo = motion.pitchServo();
+                const auto limit = servo.getAngleLimit();
+                const int before = servo.getCurrentAngle();
+                const int target = uitk::clamp(before + pitch_delta * 10, limit.x, limit.y);
+                mclog::tagInfo(_tag, "relative pitch: {} -> {}, limits: {}..{}", before, target, limit.x, limit.y);
+                if (target != before) servo.moveWithSpeed(target, speed);
+            }
+            return true;
+        });
+
     // Reuse the stage-1 action sequencer; MCP workers never touch servo/LVGL.
     // Only an explicit requested action is allowed to move the head.
     mclog::tagInfo(_tag, "add robot.play_action tool");
