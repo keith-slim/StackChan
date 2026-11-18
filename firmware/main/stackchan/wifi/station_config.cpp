@@ -33,7 +33,14 @@ extern "C" esp_err_t stackchan_apply_saved_station_ip(const char* ssid) {
         ESP_LOGW(kTag, "IPv4 settings unavailable; falling back to DHCP");
         return ApplyDhcp(netif);
     }
-    if (!setting.use_static) return ApplyDhcp(netif);
+    if (!setting.use_static) {
+        // Preserve the original DHCP flow for existing installations. Only
+        // reset the address when switching away from a previous static SSID.
+        esp_netif_dhcp_status_t status{};
+        if (esp_netif_dhcpc_get_status(netif, &status) == ESP_OK &&
+            status == ESP_NETIF_DHCP_STARTED) return ESP_OK;
+        return ApplyDhcp(netif);
+    }
 
     // ESP-IDF requires DHCP to be stopped before a static IPv4 address is set.
     auto err = esp_netif_dhcpc_stop(netif);
