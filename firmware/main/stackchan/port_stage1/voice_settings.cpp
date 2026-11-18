@@ -5,6 +5,8 @@
 #include <cstring>
 #include <new>
 
+extern "C" void stackchan_nvs_commit_observer(void);
+
 namespace stackchan::stage1::voice {
 namespace {
 Settings* current = nullptr;
@@ -72,7 +74,10 @@ bool Save(const Settings& s) {
     if(err==ESP_OK)err=nvs_set_u16(h,"talkhi",s.talk_max);
     if(err==ESP_OK)err=nvs_commit(h);
     nvs_close(h);
-    if(err==ESP_OK)*current=s;
+    if(err==ESP_OK) {
+        *current=s;
+        stackchan_nvs_commit_observer();
+    }
     else ESP_LOGE("STAGE1-VOICE","NVS save failed: %s",esp_err_to_name(err));
     return err==ESP_OK;
 }
