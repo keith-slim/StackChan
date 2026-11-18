@@ -6,7 +6,7 @@
 
 namespace stackchan::wifi {
 struct IpSettings {
-    bool use_static = false;
+    uint8_t use_static = 0; // 0=DHCP, 1=static; safe to deserialize from NVS
     uint8_t ip[4]{}, subnet[4]{}, gateway[4]{}, dns1[4]{}, dns2[4]{};
 };
 
@@ -38,6 +38,7 @@ inline bool IsUnicastIPv4(const uint8_t (&addr)[4]) {
 }
 
 inline bool ValidIpSettings(const IpSettings& s) {
+    if (s.use_static > 1) return false;
     if (!s.use_static) return true;
     const uint32_t ip = IPv4Number(s.ip);
     const uint32_t mask = IPv4Number(s.subnet);
