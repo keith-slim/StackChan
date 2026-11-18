@@ -85,11 +85,8 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <p id="status" class="status" role="status">読み込み中…</p></div>
 </form>
 <form id="voiceSettings">
-<section id="voice" class="card"><h2>発話サーバー（Docker内）</h2>
-<div class="fields">
-<label>サーバーのホスト名 / IP<input name="host" type="text" maxlength="127" placeholder="192.168.1.254" pattern="[A-Za-z0-9.-]*"></label>
-<label>ポート<input name="port" type="number" min="1" max="65535" required></label>
-</div><small>この欄は8002の従来発話用です。薄いIPは入力例で保存済み設定ではありません。12800のタッチ起床・テスト発話には不要です。</small></section>
+<section id="voice" class="card"><h2>Gemini Live発話・文言（既存WebSocket 12800）</h2>
+<small>音声は既存の会話サーバーと接続設定を共有します。別の発話用サーバー・ポート設定は不要です。</small></section>
 <section class="card"><h2>朝・夜の文言</h2><div class="fields">
 <label>朝の定時起床<textarea name="morning" rows="2"></textarea></label>
 <label>夜の就寝案内<textarea name="bedtime" rows="2"></textarea></label>
@@ -184,7 +181,7 @@ document.getElementById('servoActions').addEventListener('click',async e=>{
  finally{button.disabled=false;}
 });
 const voiceForm=document.getElementById('voiceSettings'),v=voiceForm.elements;
-const voiceStatus=document.getElementById('voiceStatus'),voiceFields=['host','port','morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','snore_min','snore_max','talk_min','talk_max'];
+const voiceStatus=document.getElementById('voiceStatus'),voiceFields=['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','snore_min','snore_max','talk_min','talk_max'];
 async function loadVoice(){
  try{
   const r=await fetch('/api/stage1/voice',{cache:'no-store'});
@@ -204,7 +201,7 @@ voiceForm.addEventListener('submit',async e=>{
   if(enc.encode(v[field].value).length>max){voiceStatus.textContent=field+'は'+max+'バイト以内にしてください';return;}
  }
  const data={};for(const field of voiceFields)data[field]=
-  ['port','snore_min','snore_max','talk_min','talk_max'].includes(field)?Number(v[field].value):v[field].value;
+  ['snore_min','snore_max','talk_min','talk_max'].includes(field)?Number(v[field].value):v[field].value;
  voiceStatus.textContent='保存中…';
  try{
   const r=await fetch('/api/stage1/voice',{method:'POST',
@@ -273,8 +270,6 @@ esp_err_t ReadVoice(httpd_req_t* req) {
         LvglLockGuard lock;
         const auto* c = voice::Current();
         if (c) {
-            cJSON_AddStringToObject(json, "host", c->host);
-            cJSON_AddNumberToObject(json, "port", c->port);
             cJSON_AddStringToObject(json, "morning", c->morning);
             cJSON_AddStringToObject(json, "bedtime", c->bedtime);
             cJSON_AddStringToObject(json, "touch", c->touch);
@@ -289,7 +284,7 @@ esp_err_t ReadVoice(httpd_req_t* req) {
         }
     }
     char* text = cJSON_PrintUnformatted(json);
-    const bool filled = cJSON_GetObjectItemCaseSensitive(json, "host") != nullptr;
+    const bool filled = cJSON_GetObjectItemCaseSensitive(json, "morning") != nullptr;
     cJSON_Delete(json);
     if (!filled || !text) {
         if (text) cJSON_free(text);
@@ -336,9 +331,8 @@ esp_err_t WriteVoice(httpd_req_t* req) {
     cJSON* root = cJSON_Parse(buf);
     heap_caps_free(buf);
     const auto* c = root;
-    int port=0, snore_lo=0, snore_hi=0, talk_lo=0, talk_hi=0;
+    int snore_lo=0, snore_hi=0, talk_lo=0, talk_hi=0;
     const bool valid = cJSON_IsObject(c) &&
-        VoiceText(c,"host",draft->host,sizeof(draft->host)) &&
         VoiceText(c,"morning",draft->morning,sizeof(draft->morning)) &&
         VoiceText(c,"bedtime",draft->bedtime,sizeof(draft->bedtime)) &&
         VoiceText(c,"touch",draft->touch,sizeof(draft->touch)) &&
@@ -346,10 +340,9 @@ esp_err_t WriteVoice(httpd_req_t* req) {
         VoiceText(c,"timer",draft->timer,sizeof(draft->timer)) &&
         VoiceText(c,"snore",draft->snore,sizeof(draft->snore)) &&
         VoiceText(c,"sleep_talk_prompt",draft->sleep_talk_prompt,sizeof(draft->sleep_talk_prompt)) &&
-        Uint(c,"port",1,65535,1,port) &&
         Uint(c,"snore_min",1,3600,1,snore_lo) && Uint(c,"snore_max",1,3600,1,snore_hi) &&
         Uint(c,"talk_min",1,3600,1,talk_lo) && Uint(c,"talk_max",1,3600,1,talk_hi);
-    draft->port=port; draft->snore_min=snore_lo; draft->snore_max=snore_hi;
+    draft->snore_min=snore_lo; draft->snore_max=snore_hi;
     draft->talk_min=talk_lo; draft->talk_max=talk_hi;
     bool saved=false;
     if (valid && voice::Valid(*draft)) {
