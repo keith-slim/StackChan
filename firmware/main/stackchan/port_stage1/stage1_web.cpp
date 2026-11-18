@@ -44,6 +44,11 @@ textarea{display:block;resize:vertical;min-height:60px;width:100%;max-width:none
 input[type=checkbox]{width:16px;height:16px;margin:0}
 button{min-height:30px;padding:5px 12px;background:#285bd4;color:white;border:0;border-radius:7px;cursor:pointer}
 button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
+.wifi-network{border:1px solid #d6dce7;border-radius:8px;padding:10px;margin:10px 0}
+.wifi-network .wifi-static{margin-top:10px}
+.wifi-network select,.wifi-network input[type=password]{display:block;width:100%;max-width:16rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;padding:5px 8px}
+.wifi-network .wifi-action{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.wifi-network .wifi-delete{background:#9b3540}
 .buttons{display:flex;flex-wrap:wrap;gap:8px}
 .status{min-height:1.6em;white-space:pre-wrap;overflow-wrap:anywhere;color:#465976;margin:8px 0 0}
 .save{margin:0 0 16px}.save button{font-weight:600}
@@ -57,7 +62,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#actions">サーボテスト</a>
+<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#actions">サーボテスト</a><a href="#wifi">Wi-Fi</a>
 </nav></aside><main>
 <h1>セッティング</h1>
 <form id="settings">
@@ -126,6 +131,18 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <button type="button" data-action="surprise_move">驚く</button>
 <button type="button" data-action="shy_move">照れる</button>
 </div><p id="actionStatus" class="status" role="status">待機中</p></section>
+<section id="wifi" class="card"><h2>Wi-Fi接続設定</h2>
+<p id="wifiCurrent" class="status">接続情報を読み込み中…</p>
+<small>SSIDごとにDHCP／固定IPを選択。既存パスワードは表示しません。空欄では変更されません。
+新しいSSIDを登録しても旧SSIDは復旧用に残ります。現在接続中のSSIDと最後の1件は削除できません。</small>
+<div id="wifiNetworks"></div>
+<div class="buttons"><button type="button" id="wifiAdd">SSIDを追加</button>
+<button type="button" id="wifiReload">再読み込み</button></div>
+<p id="wifiStatus" class="status" role="status">読み込み中…</p>
+<small>保存先はNVS、SDバックアップは既存の非同期処理で反映します。
+接続中のSSIDを保存した場合はWi-Fiを再接続します。
+Webとの接続が切れた場合は新しいIPアドレスから開き直してください。</small>
+</section>
 </main></div>
 <script>
 const form=document.getElementById('settings'),status=document.getElementById('status');
@@ -226,6 +243,113 @@ testSpeech.addEventListener('click',async()=>{
  }catch(e){message.textContent='発話できません: '+e.message;}
  finally{testSpeech.disabled=false;}
 });
+const wifiList=document.getElementById('wifiNetworks'),wifiStatus=document.getElementById('wifiStatus');
+let wifiSaved=[],wifiActive='';
+const ipFields=[['ip','IPアドレス'],['subnet','サブネットマスク'],['gw','ゲートウェイ'],['dns1','DNS1'],['dns2','DNS2（任意）']];
+function wifiRow(data={}){
+ const row=document.createElement('div');row.className='wifi-network';
+ row.dataset.originalSsid=data.ssid||'';
+ row.innerHTML='<div class="fields"><label>SSID<input class="wifi-ssid" type="text" maxlength="32" required></label>'+
+ '<label>パスワード<input class="wifi-pass" type="password" maxlength="63" autocomplete="new-password" placeholder="変更する場合のみ入力"></label></div>'+
+ '<label class="check"><input class="wifi-clear" type="checkbox">パスワードを空にする（オープンWi-Fi）</label>'+
+ '<label>IPアドレスの取得方法<select class="wifi-mode"><option value="dhcp">DHCP（自動取得）</option><option value="static">Static（固定IP）</option></select></label>'+
+ '<div class="wifi-static fields" hidden></div>'+
+ '<label class="check"><input class="wifi-reconnect" type="checkbox">保存後、Wi-Fiへ再接続</label>'+
+ '<div class="wifi-action"><button class="wifi-save" type="button">このSSIDを保存</button><button class="wifi-delete" type="button">削除</button></div>';
+ row.querySelector('.wifi-ssid').value=data.ssid||'';
+ row.querySelector('.wifi-mode').value=data.mode==='static'?'static':'dhcp';
+ row.querySelector('.wifi-reconnect').checked=!data.ssid||data.ssid===wifiActive;
+ row.querySelector('.wifi-delete').disabled=!data.ssid||data.ssid===wifiActive||wifiSaved.length<=1;
+ const region=row.querySelector('.wifi-static');
+ for(const [key,label] of ipFields){
+   const wrapper=document.createElement('label'),field=document.createElement('input');
+   wrapper.textContent=label;field.type='text';field.className='wifi-'+key;field.maxLength=15;
+   field.placeholder=key==='subnet'?'255.255.255.0':(key==='dns2'?'省略可':'192.168.1.1');
+   field.value=data[key]||'';wrapper.append(field);region.append(wrapper);
+ }
+ const toggle=()=>{
+   const fixed=row.querySelector('.wifi-mode').value==='static';
+   region.hidden=!fixed;
+   for(const [key] of ipFields){
+     const field=row.querySelector('.wifi-'+key);
+     field.required=fixed&&key!=='dns2';field.disabled=!fixed;
+   }
+ };
+ row.querySelector('.wifi-mode').addEventListener('change',toggle);toggle();
+ row.querySelector('.wifi-clear').addEventListener('change',()=>{
+   row.querySelector('.wifi-pass').disabled=row.querySelector('.wifi-clear').checked;
+ });
+ row.querySelector('.wifi-save').addEventListener('click',async()=>{
+   const ssid=row.querySelector('.wifi-ssid').value.trim();
+   if(!ssid){wifiStatus.textContent='SSIDを入力してください';return;}
+   const encoder=new TextEncoder();
+   if(encoder.encode(ssid).length>32||encoder.encode(row.querySelector('.wifi-pass').value).length>63){
+     wifiStatus.textContent='SSIDは32バイト、パスワードは63バイト以内です';return;
+   }
+   if(!row.querySelector('.wifi-ssid').reportValidity())return;
+   const payload={action:'save',ssid:ssid,password:row.querySelector('.wifi-pass').value,
+    clear_password:row.querySelector('.wifi-clear').checked,
+    mode:row.querySelector('.wifi-mode').value,
+    reconnect:row.querySelector('.wifi-reconnect').checked};
+   if(payload.mode==='static'){
+     for(const [key] of ipFields){
+       const field=row.querySelector('.wifi-'+key);
+       if(!field.reportValidity())return;
+       const value=field.value.trim();
+       if(key==='dns2'&&!value)continue;
+       if(!/^([0-9]{1,3}\\.){3}[0-9]{1,3}$/.test(value)||
+         value.split('.').some(part=>Number(part)>255)){
+         wifiStatus.textContent=key+'には正しいIPv4アドレスを指定してください';return;
+       }
+       payload[key]=value;
+     }
+   }
+   const renamed=!!row.dataset.originalSsid&&row.dataset.originalSsid!==ssid;
+   await wifiRequest(payload);
+   if(renamed)wifiStatus.textContent+=' 旧SSIDは復旧用に残しました。';
+ });
+ row.querySelector('.wifi-delete').addEventListener('click',async()=>{
+   if(!row.dataset.originalSsid||row.dataset.originalSsid===wifiActive)return;
+   if(!confirm('SSID「'+row.dataset.originalSsid+'」を削除しますか？'))return;
+   await wifiRequest({action:'delete',ssid:row.dataset.originalSsid});
+ });
+ wifiList.append(row);
+}
+async function wifiLoad(){
+ wifiStatus.textContent='Wi-Fi設定を読み込み中…';
+ try{
+   const response=await fetch('/api/stage1/wifi',{cache:'no-store'});
+   if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
+   const data=await response.json();
+   wifiActive=data.connected?data.connected_ssid:'';
+   wifiSaved=data.networks||[];
+   document.getElementById('wifiCurrent').textContent=data.connected?
+    '現在の接続: '+data.connected_ssid+' / IP: '+data.connected_ip:'Wi-Fiは未接続です';
+   wifiList.replaceChildren();wifiSaved.forEach(wifiRow);
+   wifiStatus.textContent=data.sd_pending?'読み込み完了 / SD同期待ち':'読み込み完了';
+ }catch(err){wifiStatus.textContent='読み込み失敗: '+err.message;}
+}
+async function wifiRequest(payload){
+ wifiStatus.textContent='NVSへ保存中…';
+ try{
+   const response=await fetch('/api/stage1/wifi',{method:'POST',
+     headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+   if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
+   const result=await response.json();
+   await wifiLoad();
+   wifiStatus.textContent=result.saved_nvs?
+     'NVSへ保存済み。SDバックアップは同期待ち'+
+      (result.reconnect?'。Wi-Fiを再接続します。':'。'):'保存結果を確認してください';
+ }catch(err){wifiStatus.textContent='保存失敗: '+err.message;}
+}
+document.getElementById('wifiAdd').addEventListener('click',()=>{
+ if(wifiList.querySelectorAll('.wifi-network').length>=10){
+   wifiStatus.textContent='SSIDは最大10件です';return;
+ }
+ wifiRow({});wifiStatus.textContent='SSIDを入力して保存してください';
+});
+document.getElementById('wifiReload').addEventListener('click',wifiLoad);
+wifiLoad();
 load();loadVoice();
 </script></body></html>)STAGE1PAGE";
 
