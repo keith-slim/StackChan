@@ -9,7 +9,7 @@ if(CONFIG_LIBC_NEWLIB_NANO_FORMAT)
         "Component config -> C standard library).")
 endif()
 
-# Source discovery includes Stage1 quiet-mode support; keep this glob script-mode safe.
+# Source discovery includes Stage1 quiet-mode and its LVGL tape overlay; script-mode safe.
 file(GLOB_RECURSE STACK_CHAN_SOURCES
     "apps/*.c"
     "apps/*.cc"
