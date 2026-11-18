@@ -297,7 +297,7 @@ function wifiRow(data={}){
        if(!field.reportValidity())return;
        const value=field.value.trim();
        if(key==='dns2'&&!value)continue;
-       if(!/^([0-9]{1,3}\\.){3}[0-9]{1,3}$/.test(value)||
+       if(!/^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(value)||
          value.split('.').some(part=>Number(part)>255)){
          wifiStatus.textContent=key+'には正しいIPv4アドレスを指定してください';return;
        }
