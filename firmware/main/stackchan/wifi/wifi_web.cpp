@@ -17,7 +17,7 @@ namespace stackchan::wifi::web {
 namespace {
 constexpr char kTag[] = "StackChanWiFiWeb";
 constexpr int kMaxSavedSsid = 10;
-constexpr size_t kMaxBody = 768;
+constexpr size_t kMaxBody = 512;
 std::atomic<uint32_t> reconnect_after_ms{0};
 
 extern "C" void stackchan_nvs_commit_observer(void);
