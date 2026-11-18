@@ -9,6 +9,7 @@
 #include "avatar_config.h"
 #include "voice_settings.h"
 #include "voice_client.h"
+#include "quiet_mode.h"
 #include <application.h>
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
@@ -143,9 +144,16 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         pending_scene_phase = state.phase;
         pending_scene_since = now;
     }
-    // All autonomous speech now uses the existing 12800 Xiaozhi transport.
-    // No second host/port is required or consulted.
+    // All autonomous speech uses the existing 12800 Xiaozhi transport.
+    // Quiet mode suppresses only background utterances. Keep the normal
+    // conversation/wake-word transport and existing visuals untouched.
     if (!config) return;
+    if (quiet_mode::Active()) {
+        pending_scene_voice = SceneVoice::None;
+        next_snore_at = next_talk_at = 0;
+        if (!voice::IsBusy()) active_sleep_voice = SleepVoiceKind::None;
+        return;
+    }
     if (entered) {
         switch (state.phase) {
         case Phase::NightMessage:
@@ -176,6 +184,14 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
             break;
         default: break;
         }
+    }
+    // If quiet expired during a nap, schedule fresh delays rather than
+    // speaking immediately from overdue timers or remaining silent forever.
+    if (state.phase == Phase::NapSleep &&
+        next_snore_at == 0 && next_talk_at == 0 &&
+        active_sleep_voice == SleepVoiceKind::None) {
+        next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
+        next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
     }
     if (pending_scene_voice != SceneVoice::None &&
         state.phase == pending_scene_phase) {
@@ -813,6 +829,7 @@ Runtime r;
 
 void Start() {
     // Start after the StackChanAvatarDisplay has attached its avatar.
+    quiet_mode::Init();
     voice::Init();
     next_snore_at = next_talk_at = 0;
     pending_scene_voice = SceneVoice::None;
