@@ -206,14 +206,19 @@ esp_err_t WriteSettings(httpd_req_t* req) {
             cJSON_Delete(obj);
             return Reply(req,"409 Conflict","{\"error\":\"cannot remove active or last SSID\"}");
         }
+        const SsidItem previous_item = list[index];
         manager.RemoveSsid(index);
         if (!NvsSsidAbsent(ssid)) {
+            // Existing API updates its in-memory vector before writing NVS.
+            // Restore the previous entry if the persistent delete failed.
+            manager.AddSsid(previous_item.ssid, previous_item.password, previous_item.channel);
             cJSON_Delete(obj);
             return Reply(req,"500 Internal Server Error","{\"error\":\"SSID NVS delete failed\"}");
         }
         if (!RemoveIpSettings(ssid)) {
+            manager.AddSsid(previous_item.ssid, previous_item.password, previous_item.channel);
             cJSON_Delete(obj);
-            return Reply(req,"500 Internal Server Error","{\"error\":\"IPv4 NVS delete failed\"}");
+            return Reply(req,"500 Internal Server Error","{\"error\":\"IPv4 NVS delete failed; SSID restored\"}");
         }
         stackchan_nvs_commit_observer();
         cJSON_Delete(obj);
