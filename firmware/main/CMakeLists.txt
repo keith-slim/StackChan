@@ -9,6 +9,7 @@ if(CONFIG_LIBC_NEWLIB_NANO_FORMAT)
         "Component config -> C standard library).")
 endif()
 
+# Reconfigure to discover new Web SETUP sources with the existing script-safe glob.
 file(GLOB_RECURSE STACK_CHAN_SOURCES
     "apps/*.c"
     "apps/*.cc"
