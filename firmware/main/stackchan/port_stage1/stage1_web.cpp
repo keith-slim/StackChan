@@ -45,6 +45,12 @@ textarea{display:block;resize:vertical;min-height:60px;width:100%;max-width:none
 input[type=checkbox]{width:16px;height:16px;margin:0}
 button{min-height:30px;padding:5px 12px;background:#285bd4;color:white;border:0;border-radius:7px;cursor:pointer}
 button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
+.setup-row{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin:8px 0 12px}
+.setup-row label{flex:1 1 190px;min-width:0}
+.setup-row select{display:block;width:100%;max-width:19rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;background:white;color:inherit;padding:5px 8px}
+.setup-ro{display:grid;grid-template-columns:minmax(105px,170px) minmax(0,1fr);gap:7px;margin:7px 0}
+.setup-ro b{font-weight:500}.setup-ro span{overflow-wrap:anywhere}
+@media(max-width:440px){.setup-ro{grid-template-columns:1fr;gap:0}}
 .wifi-network{border:1px solid #d6dce7;border-radius:8px;padding:10px;margin:10px 0}
 .wifi-network .wifi-static{margin-top:10px}
 .wifi-network select,.wifi-network input[type=password]{display:block;width:100%;max-width:16rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;padding:5px 8px}
@@ -63,7 +69,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#actions">サーボテスト</a><a href="#wifi">Wi-Fi</a>
+<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#actions">サーボテスト</a><a href="#wifi">Wi-Fi</a><a href="#device">デバイス</a><a href="#aiSetup">AI・省電力</a><a href="#appsSetup">アプリ表示</a><a href="#deviceInfo">端末情報</a>
 </nav></aside><main>
 <h1>セッティング</h1>
 <form id="settings">
@@ -143,6 +149,26 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <small>保存先はNVS、SDバックアップは既存の非同期処理で反映します。
 接続中のSSIDを保存した場合はWi-Fiを再接続します。
 Webとの接続が切れた場合は新しいIPアドレスから開き直してください。</small>
+</section>
+<section id="device" class="card"><h2>デバイス設定</h2>
+<div id="setupDeviceFields"></div>
+<small>明るさ・音量は本体と同じ値を保存して反映します。タイムゾーンも本体SETUPと同じ選択肢です。</small></section>
+<section id="aiSetup" class="card"><h2>AI・省電力設定</h2>
+<div id="setupAiFields"></div>
+<small>本体SETUPの「General」「Power Saving」と共通の設定値です。保存後は次回の本体起動時に確実に適用されます。</small></section>
+<section id="appsSetup" class="card"><h2>アプリの表示・非表示</h2>
+<div id="setupAppFields"></div>
+<small>ランチャーのアイコン表示だけを変更します。AI自動起動とは別設定です。SETUPは非表示になりません。</small></section>
+<section id="deviceInfo" class="card"><h2>アカウント・端末情報（閲覧のみ）</h2>
+<div id="setupInfoRows"></div>
+<small>アカウント名と端末名は本体保存済み情報を表示します。ここからサーバーへの再取得、解除、初期化、OTA更新は行いません。</small>
+<h2>ハードウェア・診断</h2>
+<p>サーボの動作確認は上の「サーボテスト」から実行できます。
+マイク・RGBストリップのテスト、Wi-Fi接続テストは本体のSETUPアプリで行えます。</p></section>
+<section class="card"><h2>本体SETUPの読込・保存状態</h2>
+<div class="buttons"><button id="setupReload" type="button">設定を再読み込み</button></div>
+<p id="setupStatus" class="status" role="status">読み込み中…</p>
+<small>NVSへの保存とSDバックアップの完了は別々です。SD同期が保留の場合はその状態を表示します。</small>
 </section>
 </main></div>
 <script>
@@ -351,6 +377,107 @@ document.getElementById('wifiAdd').addEventListener('click',()=>{
 });
 document.getElementById('wifiReload').addEventListener('click',wifiLoad);
 wifiLoad();
+// SETUP app mirror: use the same HAL and app-visibility persistence APIs.
+const setupStatus=document.getElementById('setupStatus');
+const setupTz=[
+ ['BIT12','Baker Is. (UTC-12)'],['SST11','Midway Island (UTC-11)'],
+ ['HST10','Honolulu (UTC-10)'],['AKST9','Alaska (UTC-9)'],
+ ['PST8','Los Angeles (UTC-8)'],['MST7','Denver (UTC-7)'],
+ ['CST6','Chicago (UTC-6)'],['EST5','New York (UTC-5)'],
+ ['AST4','Halifax (UTC-4)'],['BRT3','S.Paulo (UTC-3)'],
+ ['GST2','S.Georgia (UTC-2)'],['AZOT1','Azores (UTC-1)'],
+ ['GMT0','London (UTC+0)'],['CET-1','Berlin (UTC+1)'],
+ ['EET-2','Cairo (UTC+2)'],['MSK-3','Moscow (UTC+3)'],
+ ['GST-4','Dubai (UTC+4)'],['PKT-5','Karachi (UTC+5)'],
+ ['BST-6','Dhaka (UTC+6)'],['ICT-7','Bangkok (UTC+7)'],
+ ['CST-8','Beijing (UTC+8)'],['JST-9','Tokyo (UTC+9)'],
+ ['AEST-10','Sydney (UTC+10)'],['SBT-11','Noumea (UTC+11)'],
+ ['NZST-12','Auckland (UTC+12)'],['FJT-13','Fiji (UTC+13)'],
+ ['LINT-14','Line Islands (UTC+14)']];
+const setupAppNames=[
+ ['ai_agent','AI.AGENT'],['avatar','AVATAR'],['espnow_remote','ESPNOW.REMOTE'],
+ ['app_center','APP.CENTER'],['ezdata','EZDATA'],['dance','DANCE']];
+async function setupSave(field,value,app){
+ setupStatus.textContent='NVSへ保存中: '+field;
+ try{
+  const payload={field,value};if(app)payload.app=app;
+  const response=await fetch('/api/stage1/setup',{method:'POST',
+   headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
+  const result=await response.json();
+  const loaded=await setupLoad();
+  if(loaded)setupStatus.textContent='NVSに保存しました。SDバックアップは別途同期'+
+   (result.reboot_required?'。AI設定の実動作への反映には再起動が必要です。':'。');
+ }catch(e){setupStatus.textContent='保存失敗: '+e.message;}
+}
+function setupField(holder,field,label,options,value,app){
+ const row=document.createElement('div');row.className='setup-row';
+ const caption=document.createElement('label');caption.textContent=label;
+ const select=document.createElement('select');
+ for(const [entry,text] of options){
+   const option=document.createElement('option');option.value=String(entry);
+   option.textContent=text;select.append(option);
+ }
+ select.value=String(value);
+ if(select.selectedIndex<0){
+  const unknown=document.createElement('option');unknown.value=String(value);
+  unknown.textContent='現在値: '+value+'（本体の保存値）';
+  select.prepend(unknown);select.value=String(value);
+ }
+ caption.append(select);
+ const button=document.createElement('button');button.type='button';button.textContent='保存';
+ button.addEventListener('click',async()=>{
+  button.disabled=true;
+  try{
+   const selected=select.value;
+   const bool=selected==='true'?true:selected==='false'?false:null;
+   const data=bool!==null?bool:
+      (/^-?[0-9]+$/.test(selected)?Number(selected):selected);
+   await setupSave(field,data,app);
+  }finally{button.disabled=false;}
+ });
+ row.append(caption,button);holder.append(row);
+}
+function setupInfo(label,value){
+ const row=document.createElement('div');row.className='setup-ro';
+ const title=document.createElement('b');title.textContent=label;
+ const text=document.createElement('span');text.textContent=value??'—';
+ row.append(title,text);document.getElementById('setupInfoRows').append(row);
+}
+async function setupLoad(){
+ setupStatus.textContent='本体SETUPの設定を読み込み中…';
+ try{
+  const response=await fetch('/api/stage1/setup',{cache:'no-store'});
+  if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
+  const d=await response.json();
+  const device=document.getElementById('setupDeviceFields');device.replaceChildren();
+  const ai=document.getElementById('setupAiFields');ai.replaceChildren();
+  const apps=document.getElementById('setupAppFields');apps.replaceChildren();
+  document.getElementById('setupInfoRows').replaceChildren();
+  setupField(device,'brightness','画面の明るさ',[1,15,30,45,60,75,90,100].map(n=>[n,n+'%']),d.brightness);
+  setupField(device,'volume','スピーカー音量',Array.from({length:21},(_,i)=>[i*5,i*5+'%']),d.volume);
+  setupField(device,'timezone','タイムゾーン',setupTz,d.timezone);
+  setupField(ai,'idle_movement','待機中のランダム動作',[[0,'なし'],[1,'少なめ'],[2,'普通'],[3,'多め']],d.idle_movement);
+  setupField(ai,'start_ai_on_boot','起動時にAIを自動開始',[[false,'無効'],[true,'有効']],d.start_ai_on_boot);
+  setupField(ai,'idle_shutdown_seconds','無操作時の自動電源OFF',Array.from({length:13},(_,i)=>[i*300,i===0?'オフ':i*5+'分']),d.idle_shutdown_seconds);
+  setupField(ai,'allow_shutdown_charging','充電中の自動電源OFF',[[false,'許可しない'],[true,'許可する']],d.allow_shutdown_charging);
+  if(d.app_visibility_loaded){
+   for(let i=0;i<setupAppNames.length;i++){
+    const [key,label]=setupAppNames[i];
+    setupField(apps,'app_visibility',label,[[false,'非表示'],[true,'表示']],Boolean(d.app_visibility_mask&(1<<i)),key);
+   }
+  }else{apps.textContent='NVSからアプリ表示設定を読み込めません。編集を無効にしました。';}
+  setupInfo('アカウント名',d.account_username||'未取得');
+  setupInfo('端末名',d.device_name||'未取得');
+  setupInfo('ファームウェア',d.firmware_version);
+  setupInfo('Wi-Fi MAC',d.mac);
+  setupInfo('バッテリー',d.battery+'%'+(d.charging?'（充電中）':''));
+  setupStatus.textContent=d.sd_pending?'読み込み完了 / SDバックアップ同期待ち':'読み込み完了';
+  return true;
+ }catch(e){setupStatus.textContent='読込失敗: '+e.message;return false;}
+}
+document.getElementById('setupReload').addEventListener('click',setupLoad);
+setupLoad();
 load();loadVoice();
 </script></body></html>)STAGE1PAGE";
 
