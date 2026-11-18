@@ -10,6 +10,8 @@
 #include "voice_settings.h"
 #include "voice_client.h"
 #include "quiet_mode.h"
+#include "quiet_mark.h"
+#include <stackchan/avatar/skins/default/default.h>
 #include <application.h>
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
@@ -322,6 +324,19 @@ struct Runtime {
     stackchan::avatar::Emotion saved_emotion = stackchan::avatar::Emotion::Neutral;
     std::unique_ptr<AvatarRestFace> rest;
     std::unique_ptr<AvatarDreamFace> dream;
+    std::unique_ptr<AvatarQuietMark> quiet_mark;
+
+    // All LVGL work stays in Update's existing display lock. The source
+    // mouth is the original DefaultAvatar or the S3-style rest face.
+    void SyncQuietMark(StackChan& sc, bool visible) {
+        if (!visible) { quiet_mark.reset(); return; }
+        lv_obj_t* mouth = rest ? rest->MouthObject() :
+            static_cast<avatar::DefaultMouth&>(sc.avatar().mouth()).getObject();
+        if (!mouth) { quiet_mark.reset(); return; }
+        if (!quiet_mark)
+            quiet_mark = std::make_unique<AvatarQuietMark>(lv_screen_active());
+        quiet_mark->Render(mouth);
+    }
 
     static void MoveRelative(stackchan::motion::Motion& motion,
                              const uitk::Vector2i& origin,
@@ -966,6 +981,11 @@ bool RequestCue(const char* id) {
 void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
+    // Clear stale mode marks immediately, including when the update takes
+    // an early return for manual cues or conversation overlays.
+    if (!quiet_mode::Active() || !idle.load() || voice::IsBusy() ||
+        VoicePending() || r.conversation_pose != ConversationPose::None ||
+        wake_sequence_active.load()) r.SyncQuietMark(sc, false);
     bool event = interrupted.exchange(false);
     const uint8_t wake_bits = wake_intents.exchange(0);
     const WakeReason requested = (wake_bits & 2) ? WakeReason::Word :
@@ -994,10 +1014,15 @@ void Update(StackChan& sc) {
             r.BeginCue(sc, static_cast<Cue>(cue), now);
         else ESP_LOGW(LOG_TAG, "cue skipped: autonomous scene is active");
     }
-    if (r.cue_active) { r.TickCue(sc, now); return; }
+    if (r.cue_active) {
+        r.SyncQuietMark(sc, false);
+        r.TickCue(sc, now);
+        return;
+    }
     // Explicit conversation state always wins over idle skits and sleep
     // previews; it is released on SPEAKING/STANDBY or other status changes.
     if (r.conversation_pose != ConversationPose::None) {
+        r.SyncQuietMark(sc, false);
         r.DrawConversation(sc, now);
         return;
     }
@@ -1042,6 +1067,13 @@ void Update(StackChan& sc) {
         r.ApplyTheatreFace(sc, state);
         r.last_draw_at = now;
     }
+    // A mode indicator, never an audio control: show in quiet standby, hide
+    // during manual conversation, queued greetings and active playback.
+    // Render after face updates so it follows the real mouth position.
+    r.SyncQuietMark(sc, quiet_mode::Active() && standby &&
+        !r.cue_active && r.conversation_pose == ConversationPose::None &&
+        !voice::IsBusy() && !VoicePending() && !r.own_speech &&
+        !wake_sequence_active.load());
 }
 
 } // namespace stackchan::stage1
