@@ -10,7 +10,8 @@ AvatarQuietMark::AvatarQuietMark(lv_obj_t* parent) {
     lv_obj_remove_style_all(root_);
     lv_obj_set_size(root_, stackchan::avatar::scaled(34, scale_) + 1,
                            stackchan::avatar::scaled(30, scale_) + 1);
-    lv_obj_remove_flag(root_, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(root_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(root_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(root_, Draw, LV_EVENT_DRAW_MAIN, this);
 }
 
