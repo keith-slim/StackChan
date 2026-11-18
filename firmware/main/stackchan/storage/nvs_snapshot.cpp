@@ -147,7 +147,8 @@ esp_err_t WriteValue(nvs_handle_t h, const Item& item) {
         case NVS_TYPE_BLOB: {
             std::vector<uint8_t> buf;
             if(!DecodeHex(item.value,buf))return ESP_ERR_INVALID_ARG;
-            return nvs_set_blob(h,key,buf.empty()?"":buf.data(),buf.size());
+            return nvs_set_blob(h,key,buf.empty() ? static_cast<const void*>("") :
+                                  static_cast<const void*>(buf.data()),buf.size());
         }
         default: return ESP_ERR_INVALID_ARG;
     }
@@ -164,6 +165,7 @@ std::string Checksum(const char* data) {
     std::snprintf(text,sizeof(text),"%016llx",static_cast<unsigned long long>(hash));
     return text;
 }
+bool ParseSnapshot(const std::string& text,std::vector<Item>& items);
 bool BuildSnapshot(std::string& out) {
     std::vector<Item> items;
     nvs_iterator_t it=nullptr;
@@ -211,7 +213,9 @@ bool BuildSnapshot(std::string& out) {
     if(!serialized)return false;
     out.assign(serialized);
     cJSON_free(serialized);
-    return true;
+    // Do not publish an incomplete snapshot if a cJSON allocation failed.
+    std::vector<Item> confirmed;
+    return ParseSnapshot(out,confirmed) && confirmed.size()==items.size();
 }
 bool ParseSnapshot(const std::string& text,std::vector<Item>& items) {
     cJSON* root=cJSON_ParseWithLength(text.data(),text.size());
@@ -305,11 +309,13 @@ bool RestoreNvsIfEmpty() {
 }
 
 bool BackupNvsIfChanged() {
+    static std::string last_confirmed;
     std::string text;
     if(!BuildSnapshot(text))return false;
+    if(text==last_confirmed)return true; // Avoid repeated SD mounts when nothing changed.
     std::string previous;
     if(ReadConfig(previous)) {
-        if(previous==text)return true;
+        if(previous==text){last_confirmed=text;return true;}
         std::vector<Item> items;
         if(!ParseSnapshot(previous,items)) {
             ESP_LOGW(kTag,"Existing SD config belongs to another format; will not overwrite it");
@@ -317,7 +323,10 @@ bool BackupNvsIfChanged() {
         }
     }
     const bool ok=WriteConfig(text);
-    if(ok)ESP_LOGI(kTag,"NVS snapshot saved to SD");
+    if(ok) {
+        last_confirmed=text;
+        ESP_LOGI(kTag,"NVS snapshot saved to SD");
+    }
     return ok;
 }
 } // namespace stackchan::sd

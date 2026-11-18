@@ -56,7 +56,7 @@ void Hal::init()
     // namespaces without editing the many independent settings call sites.
     const BaseType_t backup_task = xTaskCreate([](void*) {
         while (true) {
-            vTaskDelay(pdMS_TO_TICKS(60000));
+            vTaskDelay(pdMS_TO_TICKS(10000));
             if (!hal_bridge::is_xiaozhi_ready() || hal_bridge::is_xiaozhi_idle()) {
                 stackchan::sd::BackupNvsIfChanged();
             }
