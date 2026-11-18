@@ -79,6 +79,10 @@ class Access {
 public:
     Access() : guard_(storage_mutex) {
         if (!config.display_io || !config.set_power) return;
+        if (config.camera_mutex) {
+            camera_guard_ = std::unique_lock<std::mutex>(*config.camera_mutex, std::try_to_lock);
+            if (!camera_guard_.owns_lock()) return; // Do not interrupt an active capture.
+        }
         // No new LVGL flush can be submitted while this lock is held.
         if (!lvgl_port_lock(5000)) return;
         display_locked_ = true;
@@ -128,6 +132,7 @@ public:
     Access& operator=(const Access&) = delete;
 private:
     std::unique_lock<std::mutex> guard_;
+    std::unique_lock<std::mutex> camera_guard_;
     bool display_locked_ = false;
     bool pin_switched_ = false;
     bool power_attempted_ = false;

@@ -1,6 +1,7 @@
 #pragma once
 #include <esp_lcd_panel_io.h>
 #include <string>
+#include <mutex>
 
 namespace stackchan::sd {
 // CoreS3 LCD and SD share SPI3 (SCLK=36, MOSI=37) and GPIO35
@@ -8,6 +9,7 @@ namespace stackchan::sd {
 // and the display's queued SPI transfers are drained before pin switching.
 struct Config {
     esp_lcd_panel_io_handle_t display_io = nullptr;
+    std::mutex* camera_mutex = nullptr; // SD skips if capture currently owns it.
     void* power_context = nullptr;
     bool (*set_power)(void*, bool) = nullptr;
 };

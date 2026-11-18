@@ -380,6 +380,7 @@ private:
     PowerSaveTimer* power_save_timer_;
     hal_bridge::XiaozhiConfig_t xiaozhi_config_;
     std::mutex power_state_mutex_;
+    std::mutex camera_storage_mutex_;
     PowerState power_state_;
     bool last_power_save_enabled_             = false;
     int64_t last_power_state_check_ms_        = 0;
@@ -689,6 +690,7 @@ private:
         };
 
         camera_ = new StackChanCamera(video_config);
+        camera_->SetStorageMutex(&camera_storage_mutex_);
         camera_->SetHMirror(false);
     }
 
@@ -706,6 +708,7 @@ public:
         // Register only: SD is never mounted during board initialization.
         stackchan::sd::Configure({
             .display_io = static_cast<StackChanAvatarDisplay*>(display_)->GetPanelIOForSd(),
+            .camera_mutex = &camera_storage_mutex_,
             .power_context = aw9523_,
             .set_power = [](void* ctx, bool on) {
                 return static_cast<Aw9523*>(ctx)->SetSdPower(on);
