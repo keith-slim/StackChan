@@ -5,6 +5,8 @@
  */
 #include "hal.h"
 #include <memory>
+#include <atomic>
+#include <esp_heap_caps.h>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
 #include <esp_system.h>
@@ -52,17 +54,6 @@ void Hal::init()
     imu_init();
     servo_init();
     lvgl_init();
-    // Low-priority periodic snapshots capture NVS writes from ALL existing
-    // namespaces without editing the many independent settings call sites.
-    const BaseType_t backup_task = xTaskCreate([](void*) {
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(10000));
-            if (!hal_bridge::is_xiaozhi_ready() || hal_bridge::is_xiaozhi_idle()) {
-                stackchan::sd::BackupNvsIfChanged();
-            }
-        }
-    }, "sd_nvs_backup", 6144, nullptr, 1, nullptr);
-    if (backup_task != pdPASS) mclog::tagError(_tag, "SD NVS backup task creation failed");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -166,12 +157,54 @@ void Hal::xiaozhi_board_init()
     hal_bridge::xiaozhi_board_init();
 }
 
+// SD snapshots use a short-lived task rather than reserving a 6 KB internal
+// stack for the entire uptime. NVS flash operations require an internal stack.
+static std::atomic<bool> _sd_backup_running{false};
+static void _sd_backup_task(void*)
+{
+    stackchan::sd::BackupNvsIfChanged();
+    _sd_backup_running.store(false, std::memory_order_release);
+    vTaskDelete(nullptr);
+}
+
+static void _schedule_sd_backup_if_safe()
+{
+    // Leave headroom for the Wi-Fi PHY timers, audio, and DMA allocations.
+    constexpr size_t kMinInternalFree = 32 * 1024;
+    constexpr size_t kMinLargestBlock = 8 * 1024;
+    if (_sd_backup_running.load(std::memory_order_acquire) ||
+        (hal_bridge::is_xiaozhi_ready() && !hal_bridge::is_xiaozhi_idle())) {
+        return;
+    }
+    const size_t free_bytes = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (free_bytes < kMinInternalFree || largest < kMinLargestBlock) {
+        // Never launch optional SD work when the network/audio memory is tight.
+        return;
+    }
+    bool expected = false;
+    if (!_sd_backup_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    if (xTaskCreate(_sd_backup_task, "sd_nvs_backup", 6144, nullptr, 1, nullptr) != pdPASS) {
+        _sd_backup_running.store(false, std::memory_order_release);
+        mclog::tagError(_tag, "SD NVS backup task creation failed");
+    }
+}
+
 static void _stackchan_update_task(void* param)
 {
     bool is_setup_done = false;
+    uint32_t last_sd_backup_check = GetHAL().millis();
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(20));
+        const uint32_t now = GetHAL().millis();
+        if (now - last_sd_backup_check >= 10000) {
+            last_sd_backup_check = now;
+            // Schedule outside the LVGL lock; SD access acquires that lock.
+            _schedule_sd_backup_if_safe();
+        }
 
         tools::update_reminders();
 
