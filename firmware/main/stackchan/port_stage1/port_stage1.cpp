@@ -13,6 +13,7 @@
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
 #include <lvgl.h>
+#include <esp_lvgl_port.h>
 #include <esp_random.h>
 #include <esp_log.h>
 #include <nvs.h>
@@ -834,10 +835,15 @@ void Start() {
     Application::GetInstance().SetWakeWordAnnouncementProvider([]() -> std::string {
         if (!enabled.load() || !sleep_wake_eligible.load() ||
             wake_sequence_active.load() || wake_intents.load() != 0) return {};
+        // Web settings are saved under LVGL's lock. Snapshot the phrase
+        // under that same lock so a concurrent edit cannot tear a UTF-8
+        // utterance; the microphone/network code runs after unlocking.
+        if (!lvgl_port_lock(100)) return {};
         const auto* settings = voice::Current();
-        if (!settings || !settings->wake_word[0]) return {};
-        if (!RequestWakeWord()) return {};
-        return settings->wake_word;
+        const std::string greeting = settings ? settings->wake_word : "";
+        lvgl_port_unlock();
+        if (greeting.empty() || !RequestWakeWord()) return {};
+        return greeting;
     });
     status_logged = false;
     last_status_log_at = 0;
