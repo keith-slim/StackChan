@@ -94,7 +94,7 @@ bool NvsCredentialsMatch(const std::string& ssid, const std::string& password) {
 bool NvsSsidAbsent(const std::string& ssid) {
     nvs_handle_t h = 0;
     const esp_err_t open = nvs_open("wifi", NVS_READONLY, &h);
-    if (open == ESP_ERR_NVS_NOT_FOUND) return true;
+    if (open == ESP_ERR_NVS_NOT_FOUND) return false;
     if (open != ESP_OK) return false;
     bool found = false;
     for (int i = 0; i < kMaxSavedSsid; ++i) {
@@ -102,7 +102,12 @@ bool NvsSsidAbsent(const std::string& ssid) {
         const std::string key = "ssid" + suffix;
         char value[33]{};
         size_t length = sizeof(value);
-        if (nvs_get_str(h, key.c_str(), value, &length) == ESP_OK && ssid == value) {
+        const esp_err_t read = nvs_get_str(h, key.c_str(), value, &length);
+        if (read != ESP_OK && read != ESP_ERR_NVS_NOT_FOUND) {
+            nvs_close(h);
+            return false;
+        }
+        if (read == ESP_OK && ssid == value) {
             found = true;
             break;
         }
