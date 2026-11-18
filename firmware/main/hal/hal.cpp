@@ -8,6 +8,9 @@
 #include <mooncake_log.h>
 #include <nvs_flash.h>
 #include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include "board/hal_bridge.h"
 #include "stackchan/storage/nvs_snapshot.h"
 
 static std::unique_ptr<Hal> _hal_instance;
