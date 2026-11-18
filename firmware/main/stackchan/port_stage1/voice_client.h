@@ -1,6 +1,6 @@
 #pragma once
-// Asynchronous, bounded voice transfer to the companion Docker service.
-// No new always-on task; scheduled only for S3 sleep/wake/nap events.
+// All S3 sleep/wake/nap speech uses the already-configured Xiaozhi WebSocket
+// (12800). No separate HTTP client, audio decoder, TTS service or port.
 #include "voice_settings.h"
 namespace stackchan::stage1::voice {
 bool Request(const Settings& config, const char* kind, const char* text);
