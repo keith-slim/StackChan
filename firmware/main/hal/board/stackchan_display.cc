@@ -346,13 +346,13 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     // Startup speech opens the same WebSocket but is not a wake-word event.
     // Its neutral CONNECTING/IDLE UI update must not reset a sleep/nap scene.
-    if (Application::GetInstance().IsStartupAnnouncementActive() &&
+    if (Application::GetInstance().IsAnnouncementActive() &&
         strcmp(emotion, "neutral") == 0)
         return true;
     // A connecting/listening state often sets neutral immediately after a
     // wake word. Do not erase the S3 startled wake animation in that window.
     if (!stackchan::stage1::IsWakeSequenceActive() &&
-        !Application::GetInstance().IsStartupAnnouncementActive())
+        !Application::GetInstance().IsAnnouncementActive())
         stackchan::stage1::CancelForExternalChange(stackchan);
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
@@ -653,7 +653,7 @@ void StackChanAvatarDisplay::SetChatMessage(
         // llm.emotion packet. Match S3's conservative speech heuristics,
         // but never override a model-specified emotion in this reply.
         if (!speech_emotion_explicit_ && !stackchan::stage1::IsWakeSequenceActive() &&
-            !Application::GetInstance().IsStartupAnnouncementActive()) {
+            !Application::GetInstance().IsAnnouncementActive()) {
             avatar::Emotion inferred;
             if (stackchan::stage1::SpeechEmotionFromText(content, inferred) &&
                 stackchan.avatar().getEmotion() != inferred) {
@@ -827,8 +827,8 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // of the existing audio connection/microphone processing.
     const bool may_be_word = strcmp(status, Lang::Strings::CONNECTING) == 0 ||
                              strcmp(status, Lang::Strings::LISTENING) == 0;
-    const bool startup_speech = Application::GetInstance().IsStartupAnnouncementActive();
-    const bool wake_handoff = may_be_word && !startup_speech &&
+    const bool standalone_speech = Application::GetInstance().IsAnnouncementActive();
+    const bool wake_handoff = may_be_word && !standalone_speech &&
                               stackchan::stage1::RequestWakeWord();
     const bool wake_visual = wake_handoff || stackchan::stage1::IsWakeSequenceActive();
     // CONNECTING is only a transport state for touch-wake speech: do not
@@ -839,7 +839,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // The boot notice must not be interpreted as a wake-word event, nor
     // reset an active night/nap scene just because its speech socket opens.
     if (strcmp(status, Lang::Strings::STANDBY) != 0 && !wake_visual &&
-        !startup_speech)
+        !standalone_speech)
         stackchan::stage1::CancelForExternalChange(stackchan);
     if (strcmp(status, Lang::Strings::STANDBY) != 0)
         startup_hint_text_.clear();
@@ -925,7 +925,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().setRgbColor(0, 0, 0, 50);
         GetHAL().refreshRgb();
     } else if (!preserve_touch_caption &&
-               !(startup_speech && strcmp(status, Lang::Strings::CONNECTING) == 0)) {
+               !(standalone_speech && strcmp(status, Lang::Strings::CONNECTING) == 0)) {
         avatar.setSpeech(status);
     }
 
@@ -976,7 +976,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
     // The startup announcement is not user activity: keep the night/nap
     // scheduler's standby state until normal playback has finished.
-    if (!startup_speech) stackchan::stage1::OnStandby(is_idle);
+    if (!standalone_speech) stackchan::stage1::OnStandby(is_idle);
 }
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)
