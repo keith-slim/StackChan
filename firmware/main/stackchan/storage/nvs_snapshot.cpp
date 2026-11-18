@@ -15,6 +15,7 @@
 
 #include <cJSON.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <nvs.h>
 #include <nvs_flash.h>
 
@@ -310,22 +311,29 @@ bool RestoreNvsIfEmpty() {
 
 bool BackupNvsIfChanged() {
     static std::string last_confirmed;
+    static int64_t last_failure_us=0;
     std::string text;
     if(!BuildSnapshot(text))return false;
     if(text==last_confirmed)return true; // Avoid repeated SD mounts when nothing changed.
+    const int64_t now_us=esp_timer_get_time();
+    if(last_failure_us && now_us-last_failure_us<60000000LL)return false; // Missing SD: retry at most once a minute.
     std::string previous;
     if(ReadConfig(previous)) {
         if(previous==text){last_confirmed=text;return true;}
         std::vector<Item> items;
         if(!ParseSnapshot(previous,items)) {
             ESP_LOGW(kTag,"Existing SD config belongs to another format; will not overwrite it");
+            last_failure_us=now_us;
             return false;
         }
     }
     const bool ok=WriteConfig(text);
     if(ok) {
         last_confirmed=text;
+        last_failure_us=0;
         ESP_LOGI(kTag,"NVS snapshot saved to SD");
+    } else {
+        last_failure_us=now_us;
     }
     return ok;
 }

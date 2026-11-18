@@ -14,6 +14,8 @@
 #include <driver/sdspi_host.h>
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
 
