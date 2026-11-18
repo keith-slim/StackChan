@@ -9,7 +9,7 @@ if(CONFIG_LIBC_NEWLIB_NANO_FORMAT)
         "Component config -> C standard library).")
 endif()
 
-file(GLOB_RECURSE STACK_CHAN_SOURCES
+file(GLOB_RECURSE STACK_CHAN_SOURCES CONFIGURE_DEPENDS
     "apps/*.c"
     "apps/*.cc"
     "apps/*.cpp"
