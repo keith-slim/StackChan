@@ -3,6 +3,9 @@
 #include <esp_log.h>
 #include <nvs.h>
 
+// Match Settings: committed changes request the existing asynchronous SD mirror.
+extern "C" void stackchan_nvs_commit_observer(void) __attribute__((weak));
+
 namespace hal_toggles {
 namespace {
 constexpr const char* TAG    = "AppVisibility";
@@ -69,6 +72,8 @@ bool save_states(const ToggleStates& states)
     error = nvs_set_u8(handle, MASK_KEY, mask);
     if (error == ESP_OK) error = nvs_commit(handle);
     nvs_close(handle);
+    if (error == ESP_OK && stackchan_nvs_commit_observer)
+        stackchan_nvs_commit_observer();
     return error == ESP_OK ? true : fail(error);
 }
 }  // namespace hal_toggles
