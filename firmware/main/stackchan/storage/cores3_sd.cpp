@@ -178,6 +178,9 @@ bool write_config_locked(const std::string& text) {
     std::string current;
     const bool has_original = read_locked(kConfig, current);
     const bool original_valid = has_original && is_json_object(current);
+    // Only these flags are needed below. Free the old JSON before reading
+    // the new generation back for verification, avoiding duplicate buffers.
+    std::string().swap(current);
     if (has_original) {
         if (std::remove(rollback.c_str()) != 0 && errno != ENOENT) {
             std::remove(stage.c_str());
