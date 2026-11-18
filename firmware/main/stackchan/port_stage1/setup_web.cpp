@@ -102,6 +102,25 @@ esp_err_t Read(httpd_req_t* request) {
     AddBool(root, "charging", hal.isBatteryCharging());
     AddBool(root, "sd_pending", stackchan_sd_nvs_backup_pending());
 
+    // A partial cJSON tree caused by low heap must never look like a valid
+    // settings response: otherwise the browser might save missing defaults.
+    constexpr const char* required[] = {
+        "brightness", "volume", "timezone", "idle_shutdown_seconds",
+        "allow_shutdown_charging", "idle_movement", "start_ai_on_boot",
+        "app_visibility_loaded", "account_username", "device_name",
+        "firmware_version", "mac", "battery", "charging", "sd_pending"
+    };
+    for (const char* key : required) {
+        if (!cJSON_GetObjectItemCaseSensitive(root, key)) {
+            cJSON_Delete(root);
+            return Reply(request, "503 Service Unavailable",
+                         "{\"error\":\"low memory\"}");
+        }
+    }
+    if (loaded && !cJSON_GetObjectItemCaseSensitive(root, "app_visibility_mask")) {
+        cJSON_Delete(root);
+        return Reply(request, "503 Service Unavailable", "{\"error\":\"low memory\"}");
+    }
     char* response = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!response) return Reply(request, "503 Service Unavailable", "{\"error\":\"low memory\"}");
