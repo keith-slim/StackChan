@@ -13,6 +13,7 @@
 #include <driver/gpio.h>
 #include <driver/sdspi_host.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_lvgl_port.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -29,6 +30,13 @@ constexpr char kBackupDir[] = "/sdcard/Backup";
 constexpr size_t kMaxFileBytes = 96 * 1024;
 std::mutex storage_mutex;
 Config config;
+
+void log_sd_memory(const char* stage) {
+    ESP_LOGI(kTag, "[MEM_DIAG] %s internal=%u largest=%u psram=%u", stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
 
 bool safe_name(const char* relative) {
     if (!relative || !*relative || *relative == '/' || std::strstr(relative, "..")) return false;
@@ -80,6 +88,7 @@ bool verified_write(const std::string& path, const std::string& data) {
 class Access {
 public:
     Access() : guard_(storage_mutex) {
+        log_sd_memory("before_sd_access");
         if (!config.display_io || !config.set_power) return;
         if (config.camera_mutex) {
             camera_guard_ = std::unique_lock<std::mutex>(*config.camera_mutex, std::try_to_lock);
@@ -114,6 +123,7 @@ public:
             return;
         }
         mounted_ = true;
+        log_sd_memory("after_sd_mount");
     }
     ~Access() {
         if (mounted_) {
@@ -128,6 +138,7 @@ public:
             gpio_set_direction(GPIO_NUM_35, GPIO_MODE_OUTPUT);
         }
         if (display_locked_) lvgl_port_unlock();
+        log_sd_memory("after_sd_access");
     }
     bool ready() const { return mounted_; }
     Access(const Access&) = delete;
