@@ -235,10 +235,10 @@ esp_err_t WriteSettings(httpd_req_t* req) {
 }
 
 void ApplyPendingIfIdle() {
-    const uint32_t ready_at = reconnect_after_ms.load(std::memory_order_acquire);
+    uint32_t ready_at = reconnect_after_ms.load(std::memory_order_acquire);
     if (!ready_at || static_cast<int32_t>(GetHAL().millis()-ready_at) < 0 || Busy()) return;
     if (!reconnect_after_ms.compare_exchange_strong(
-            const_cast<uint32_t&>(ready_at), 0, std::memory_order_acq_rel)) return;
+            ready_at, 0, std::memory_order_acq_rel)) return;
     auto& wifi = WifiManager::GetInstance();
     if (!wifi.IsInitialized()) return;
     ESP_LOGI(kTag,"Applying saved Wi-Fi settings without reboot");
