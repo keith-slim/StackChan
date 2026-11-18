@@ -72,6 +72,8 @@ public:
     void setWeight(int weight) override;
     void setRotation(int rotation) override;
     void setVisible(bool visible) override;
+    // Read-only LVGL reference for Stage1 quiet tape alignment.
+    lv_obj_t* getObject() const { return _mouth ? _mouth->get() : nullptr; }
 
 private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _mouth;
