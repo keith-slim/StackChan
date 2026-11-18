@@ -21,6 +21,7 @@ constexpr size_t kMaxBody = 768;
 std::atomic<uint32_t> reconnect_after_ms{0};
 
 extern "C" void stackchan_nvs_commit_observer(void);
+extern "C" bool stackchan_sd_nvs_backup_pending(void);
 
 esp_err_t Reply(httpd_req_t* req, const char* code, const char* body) {
     httpd_resp_set_status(req, code);
@@ -129,6 +130,7 @@ esp_err_t ReadSettings(httpd_req_t* req) {
     cJSON_AddStringToObject(root, "connected_ip", wifi.GetIpAddress().c_str());
     cJSON_AddBoolToObject(root, "reconnect_pending",
                           reconnect_after_ms.load(std::memory_order_acquire) != 0);
+    cJSON_AddBoolToObject(root, "sd_pending", stackchan_sd_nvs_backup_pending());
     char* serialized = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!serialized) return Reply(req, "503 Service Unavailable", "{\"error\":\"low memory\"}");
