@@ -376,7 +376,6 @@ document.getElementById('wifiAdd').addEventListener('click',()=>{
  wifiRow({});wifiStatus.textContent='SSIDを入力して保存してください';
 });
 document.getElementById('wifiReload').addEventListener('click',wifiLoad);
-wifiLoad();
 // SETUP app mirror: use the same HAL and app-visibility persistence APIs.
 const setupStatus=document.getElementById('setupStatus');
 const setupTz=[
@@ -477,8 +476,8 @@ async function setupLoad(){
  }catch(e){setupStatus.textContent='読込失敗: '+e.message;return false;}
 }
 document.getElementById('setupReload').addEventListener('click',setupLoad);
-setupLoad();
-load();loadVoice();
+// Avoid concurrent large JSON responses on the memory-constrained server.
+Promise.resolve().then(load).then(loadVoice).then(wifiLoad).then(setupLoad);
 </script></body></html>)STAGE1PAGE";
 
 void Reply(httpd_req_t* req, const char* status, const char* body) {
