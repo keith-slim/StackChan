@@ -42,7 +42,9 @@ const char* StringValue(const cJSON* obj, const char* key) {
 bool ReadStaticValue(const cJSON* obj, const char* key, uint8_t (&result)[4],
                      bool required) {
     const char* value = StringValue(obj, key);
-    if (!value || !*value) return !required;
+    if (!value) return !required &&
+        !cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!*value) return !required;
     return ParseIPv4(value, result);
 }
 
@@ -87,6 +89,26 @@ bool NvsCredentialsMatch(const std::string& ssid, const std::string& password) {
     }
     nvs_close(h);
     return found;
+}
+
+bool NvsSsidAbsent(const std::string& ssid) {
+    nvs_handle_t h = 0;
+    const esp_err_t open = nvs_open("wifi", NVS_READONLY, &h);
+    if (open == ESP_ERR_NVS_NOT_FOUND) return true;
+    if (open != ESP_OK) return false;
+    bool found = false;
+    for (int i = 0; i < kMaxSavedSsid; ++i) {
+        const std::string suffix = i ? std::to_string(i) : "";
+        const std::string key = "ssid" + suffix;
+        char value[33]{};
+        size_t length = sizeof(value);
+        if (nvs_get_str(h, key.c_str(), value, &length) == ESP_OK && ssid == value) {
+            found = true;
+            break;
+        }
+    }
+    nvs_close(h);
+    return !found;
 }
 
 void RequestReconnect() {
@@ -180,6 +202,10 @@ esp_err_t WriteSettings(httpd_req_t* req) {
             return Reply(req,"409 Conflict","{\"error\":\"cannot remove active or last SSID\"}");
         }
         manager.RemoveSsid(index);
+        if (!NvsSsidAbsent(ssid)) {
+            cJSON_Delete(obj);
+            return Reply(req,"500 Internal Server Error","{\"error\":\"SSID NVS delete failed\"}");
+        }
         if (!RemoveIpSettings(ssid)) {
             cJSON_Delete(obj);
             return Reply(req,"500 Internal Server Error","{\"error\":\"IPv4 NVS delete failed\"}");
@@ -215,8 +241,10 @@ esp_err_t WriteSettings(httpd_req_t* req) {
 
     IpSettings previous{};
     if (!LoadIpSettings(ssid, previous)) {
-        cJSON_Delete(obj);
-        return Reply(req,"409 Conflict","{\"error\":\"saved IPv4 configuration corrupt\"}");
+        // Overwriting a corrupt IPv4 blob is a safe recovery operation.
+        // The connection path already falls back to DHCP for invalid data.
+        ESP_LOGW(kTag, "Replacing invalid saved IPv4 settings");
+        previous = {};
     }
     if (!SaveIpSettings(ssid, ip)) {
         cJSON_Delete(obj);
