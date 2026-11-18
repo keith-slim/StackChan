@@ -8,6 +8,7 @@
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
 #include <stackchan/port_stage1/port_stage1.h>
+#include <stackchan/port_stage1/quiet_mode.h>
 #include <apps/common/common.h>
 #include <cstdlib>
 #include <ctime>
@@ -167,6 +168,21 @@ void Hal::xiaozhi_mcp_init()
             GetStackChan().rightNeonLight().setColor(r, g, b);
 
             return true;
+        });
+
+    mclog::tagInfo(_tag, "add robot.set_quiet_mode tool");
+    mcp_server.AddTool(
+        "self.robot.set_quiet_mode",
+        "Silence autonomous speech, sleep talk and snoring temporarily. "
+        "Does not disable manual conversation, wake words, or Web tests. "
+        "minutes=0 cancels; 1..1440 schedules a temporary quiet period. "
+        "Only call on an explicit user request.",
+        PropertyList({Property("minutes", kPropertyTypeInteger, 30, 0, 1440)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            const int minutes = properties["minutes"].value<int>();
+            const bool saved = stackchan::stage1::quiet_mode::SetMinutes(minutes);
+            mclog::tagInfo(_tag, "set_quiet_mode: minutes={} saved={}", minutes, saved);
+            return saved;
         });
 
     mclog::tagInfo(_tag, "add robot.create_reminder tool");
