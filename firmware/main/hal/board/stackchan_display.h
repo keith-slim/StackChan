@@ -91,5 +91,6 @@ public:
 
     void LvglLock();
     void LvglUnlock();
+    esp_lcd_panel_io_handle_t GetPanelIOForSd() const { return panel_io_; }
     lv_disp_t* GetLvglDisplay();
 };

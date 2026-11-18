@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <mutex>
 #include "stackchan_camera.h"
+#include "stackchan/storage/cores3_sd.h"
 #include "hal_bridge.h"
 #include <hal/hal.h>
 
@@ -236,6 +237,21 @@ public:
         vTaskDelay(pdMS_TO_TICKS(10));
         WriteReg(0x02, 0b00000111);
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    void SetSdPower(bool enabled)
+    {
+        // CoreS3: AW9523 P0.4 is SD_EN. Preserve every unrelated expander pin.
+        constexpr uint8_t bit = 1U << 4;
+        const uint8_t state = ReadReg(0x02);
+        const uint8_t direction = ReadReg(0x04);
+        if (enabled) {
+            WriteReg(0x02, state | bit); // preload output high
+            WriteReg(0x04, direction & ~bit); // output
+        } else {
+            WriteReg(0x02, state & ~bit);
+            WriteReg(0x04, direction | bit); // return to input (board default)
+        }
     }
 
     void ResetIli9342()
@@ -566,7 +582,7 @@ private:
     {
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num      = GPIO_NUM_37;
-        buscfg.miso_io_num      = GPIO_NUM_NC;
+        buscfg.miso_io_num      = GPIO_NUM_35; // SD MISO; LCD DC is switched by CoreS3 SD library
         buscfg.sclk_io_num      = GPIO_NUM_36;
         buscfg.quadwp_io_num    = GPIO_NUM_NC;
         buscfg.quadhd_io_num    = GPIO_NUM_NC;
@@ -685,6 +701,15 @@ public:
         InitializeFt6336();
         InitializeSpi();
         InitializeIli9342Display();
+        // Register only: SD is never mounted during board initialization.
+        stackchan::sd::Configure({
+            .display_io = static_cast<StackChanAvatarDisplay*>(display_)->GetPanelIOForSd(),
+            .power_context = aw9523_,
+            .set_power = [](void* ctx, bool on) {
+                static_cast<Aw9523*>(ctx)->SetSdPower(on);
+                return true;
+            },
+        });
         InitializeCamera();
         StartTouchpadTimer();
         GetBacklight()->RestoreBrightness();
