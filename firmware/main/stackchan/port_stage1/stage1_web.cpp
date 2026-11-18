@@ -504,17 +504,22 @@ esp_err_t TriggerVoiceTest(httpd_req_t* req) {
 }
 
 void Start() {
-    // Never start during boot/audio initialization. Called once from the
-    // already-running StackChan update task, only after Xiaozhi is idle.
-    if (attempted.exchange(true)) return;
+    // Called from the StackChan update task after boot, only when Xiaozhi is
+    // idle. Low heap at the first attempt must not disable settings forever.
+    if (attempted.load()) return;
+    static uint32_t last_attempt_ms = 0;
+    const uint32_t now = GetHAL().millis();
+    if (last_attempt_ms && uint32_t(now - last_attempt_ms) < 30000) return;
+    last_attempt_ms = now;
     const size_t free_bytes = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     ESP_LOGI(TAG, "deferred start: internal_free=%u largest=%u",
              static_cast<unsigned>(free_bytes), static_cast<unsigned>(largest));
     if (free_bytes < MIN_FREE_INTERNAL || largest < MIN_LARGEST_INTERNAL) {
-        ESP_LOGW(TAG, "web disabled: insufficient internal heap; avatar/audio unaffected");
+        ESP_LOGW(TAG, "web start deferred: insufficient internal heap; will retry while idle");
         return;
     }
+    if (attempted.exchange(true)) return;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 4096;
@@ -524,6 +529,7 @@ void Start() {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "port 80 start failed: %s", esp_err_to_name(err));
         server = nullptr;
+        attempted.store(false);
         return;
     }
     httpd_uri_t page{};
@@ -550,6 +556,7 @@ void Start() {
         ESP_LOGE(TAG, "URI registration failed");
         httpd_stop(server);
         server = nullptr;
+        attempted.store(false);
         return;
     }
     ESP_LOGI(TAG, "ready: port=80 internal_free=%u largest=%u",
