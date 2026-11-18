@@ -218,6 +218,21 @@ void Hal::xiaozhi_mcp_init()
             return true;
         });
 
+    // Explicit voice sleep command reuses stage-1's timed nap/night
+    // sleep state; it does not modify the separate quiet-mode setting.
+    mclog::tagInfo(_tag, "add robot.request_sleep tool");
+    mcp_server.AddTool(
+        "self.robot.request_sleep",
+        "Queue a manual nap or night sleep after the current spoken reply. "
+        "Only call on an explicit user request such as '寝て良いよ'. "
+        "This is not the temporary quiet mode.",
+        std::vector<Property>{},
+        [](const PropertyList&) -> ReturnValue {
+            const bool queued = stackchan::stage1::RequestSleep();
+            mclog::tagInfo(_tag, "request_sleep: queued={}", queued);
+            return queued;
+        });
+
     mclog::tagInfo(_tag, "add robot.set_quiet_mode tool");
     mcp_server.AddTool(
         "self.robot.set_quiet_mode",

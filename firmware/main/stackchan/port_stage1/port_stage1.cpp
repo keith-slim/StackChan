@@ -38,6 +38,8 @@ std::atomic<bool> manual_motion{false};
 std::atomic<bool> manual_led{false};
 std::atomic<bool> owns_auto{false};
 std::atomic<int> queued_cue{-1};
+std::atomic<bool> manual_sleep_requested{false};
+std::atomic<uint32_t> manual_sleep_requested_at{0};
 // LVGL is owned by Update(). Head pad/voice tasks only set these flags.
 std::atomic<uint8_t> wake_intents{0}; // touch=1, wake word=2
 std::atomic<bool> sleep_wake_eligible{false};
@@ -861,6 +863,7 @@ void Start() {
     wake_sequence_active.store(false);
     manual_motion.store(false); manual_led.store(false);
     queued_cue.store(-1); owns_auto.store(false);
+    manual_sleep_requested.store(false);
     // Re-enable stage-1 runtime for the controlled audio/WebSocket A/B test.
     // Keep the scene redraw rate limit in place.
     enabled.store(true);
@@ -894,6 +897,7 @@ void Stop() {
     r = Runtime{};
     queued_cue.store(-1);
     owns_auto.store(false);
+    manual_sleep_requested.store(false);
     wake_intents.store(0); sleep_wake_eligible.store(false);
     wake_sequence_active.store(false);
 }
@@ -968,6 +972,13 @@ bool IsIdleServoMotionBlocked() {
     return owns_auto.load() ||
            (until != 0 && static_cast<int32_t>(GetHAL().millis() - until) < 0);
 }
+bool RequestSleep() {
+    if (!enabled.load()) return false;
+    manual_sleep_requested_at.store(GetHAL().millis());
+    manual_sleep_requested.store(true);
+    ESP_LOGI(LOG_TAG, "manual sleep queued until conversation playback completes");
+    return true;
+}
 bool RequestCue(const char* id) {
     if (!id || !enabled.load() || owns_auto.load()) return false;
     for (int i = 0; i < static_cast<int>(Cue::Count); ++i) {
@@ -1037,6 +1048,22 @@ void Update(StackChan& sc) {
     const bool pose_standby = standby || accepted_wake || wake_sequence_active.load();
     State state = r.schedule.Step({now,minute,valid,pose_standby,event,esp_random(),
                                    voice::IsBusy() || VoicePending()});
+    // Keep S3's explicit "寝て良いよ" separate from temporary quiet mode.
+    // Never turn off the face/neck while the Live reply is still speaking.
+    if (manual_sleep_requested.load()) {
+        if (static_cast<uint32_t>(now - manual_sleep_requested_at.load()) > 60000) {
+            manual_sleep_requested.store(false);
+            ESP_LOGW(LOG_TAG, "manual sleep request expired before standby");
+        } else if (valid && standby && !event && !accepted_wake &&
+                   !wake_sequence_active.load() && !voice::IsBusy() &&
+                   !VoicePending() && wake_intents.load() == 0 &&
+                   !r.cue_active && r.conversation_pose == ConversationPose::None &&
+                   r.schedule.RequestSleep(now, minute, true)) {
+            manual_sleep_requested.store(false);
+            state = r.schedule.Step({now,minute,true,true,false,esp_random(),false});
+            ESP_LOGI(LOG_TAG, "manual sleep started: phase=%d", static_cast<int>(state.phase));
+        }
+    }
     if (!status_logged || now - last_status_log_at >= 60000) {
         ESP_LOGI(LOG_TAG, "runtime phase=%d kind=%d standby=%d clock_valid=%d minute=%u auto=%d",
                  static_cast<int>(state.phase), static_cast<int>(state.kind),

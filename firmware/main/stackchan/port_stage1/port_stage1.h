@@ -31,6 +31,7 @@ void NotifyManualLed();     // External commands take ownership of the LEDs.
 bool IsAutonomousSceneActive();
 bool IsIdleServoMotionBlocked(); // Under LVGL lock: active scenes + first 3s of each skit.
 bool RequestCue(const char* id); // Validated named action; future Live integration.
+bool RequestSleep(); // Queue manual sleep until active speech/conversation drains.
 void Update(StackChan& stackchan);
 } // namespace stage1
 } // namespace stackchan

@@ -154,6 +154,31 @@ int main()
     assert(naps.Step({640000, 500, true, true, false, 0, true}).phase == Phase::NapWake);
     assert(naps.Step({640001, 500, true, true, false, 0, false}).phase == Phase::Awake);
 
+    // An explicit spoken nap is allowed even if random naps are disabled.
+    Clock manual;
+    Config manual_cfg{};
+    manual_cfg.theatre = false;
+    manual_cfg.naps = false;
+    manual_cfg.nap_sleep_min_minutes = 1;
+    manual_cfg.nap_sleep_max_minutes = 1;
+    assert(manual.SetConfig(manual_cfg));
+    assert(step(manual, 1, 500).phase == Phase::Awake);
+    assert(!manual.RequestSleep(2, 500, false));
+    assert(manual.RequestSleep(2, 500, true));
+    assert(step(manual, 2, 500).phase == Phase::NapYawn);
+    assert(step(manual, 3502, 500).phase == Phase::NapSleep);
+    assert(step(manual, 63502, 500).phase == Phase::NapWake);
+    assert(step(manual, 66302, 500).phase == Phase::Awake);
+
+    // A manual night request reuses the existing sleep state instead of
+    // changing the bedtime schedule or the quiet-mode suppression flag.
+    manual.Reset();
+    assert(step(manual, 1, 1400, false).phase == Phase::NightTemporary);
+    assert(manual.RequestSleep(2, 1400, true));
+    assert(step(manual, 2, 1400).phase == Phase::NightSleep);
+    assert(manual.RequestWake(WakeReason::Touch, 3));
+    assert(step(manual, 3, 1400, false).phase == Phase::NightWake);
+
     // No accidental startled wake while already awake.
     assert(!naps.RequestWake(WakeReason::Touch, 700000));
 }

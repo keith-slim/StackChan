@@ -78,6 +78,20 @@ public:
         }
         return false;
     }
+    // An explicit spoken sleep request reuses the existing nap/night
+    // phases. Automatic-nap enablement does not block a manual request.
+    // The caller must wait for conversation audio to drain before invoking.
+    bool RequestSleep(uint32_t ms, uint16_t minute, bool clock_valid) {
+        if (!clock_valid || minute >= 1440) return false;
+        if (IsDay(minute, cfg_)) {
+            if (phase_ == Phase::NapSleep || phase_ == Phase::NapYawn) return true;
+            Enter(Phase::NapYawn, ms); // existing yawn then timed sleep
+        } else {
+            if (phase_ == Phase::NightSleep) return true;
+            Enter(Phase::NightSleep, ms); // reuse night face and lighting
+        }
+        return true;
+    }
     void Reset() {
         phase_ = Phase::Boot;
         kind_ = Kind::None;
