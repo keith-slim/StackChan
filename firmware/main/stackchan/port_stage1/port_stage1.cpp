@@ -340,15 +340,6 @@ struct Runtime {
         quiet_mark->Render(mouth);
     }
 
-    static void MoveRelative(stackchan::motion::Motion& motion,
-                             const uitk::Vector2i& origin,
-                             int yaw_delta, int pitch_delta, int speed) {
-        const auto yaw_limit = motion.yawServo().getAngleLimit();
-        const auto pitch_limit = motion.pitchServo().getAngleLimit();
-        motion.moveWithSpeed(uitk::clamp(origin.x + yaw_delta, yaw_limit.x, yaw_limit.y),
-                             uitk::clamp(origin.y + pitch_delta, pitch_limit.x, pitch_limit.y),
-                             speed);
-    }
     static bool Sleeping(Phase p) {
         return p == Phase::NapSleep || p == Phase::NightSleep;
     }
@@ -517,7 +508,7 @@ struct Runtime {
             if (motion_held) return;
             const auto origin = motion.getCurrentAngles();
             if (!own_neck) { saved_angles = origin; own_neck = true; }
-            MoveRelative(motion, origin, yaw_delta, pitch_delta, speed);
+            motion.moveRelativeFrom(origin, yaw_delta, pitch_delta, speed);
         };
         auto say = [&](const char* words) {
             // Existing StackChan has a visual speech bubble. Keep its
@@ -550,7 +541,7 @@ struct Runtime {
             if (!motion_held) {
                 if (!continuing) motion.stop();
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
-                MoveRelative(motion, saved_angles, 0, -35, 140);
+                motion.moveRelativeFrom(saved_angles, 0, -35, 140);
             }
             color(28,18,20);
             ESP_LOGI(LOG_TAG, "sleep action: drowsy");
@@ -563,7 +554,7 @@ struct Runtime {
             av.setEmotion(avatar::Emotion::Sleepy);
             if (!motion_held) {
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
-                MoveRelative(motion, saved_angles, 0, -85, 170);
+                motion.moveRelativeFrom(saved_angles, 0, -85, 170);
             }
             ESP_LOGI(LOG_TAG, "sleep action: yawn");
         } else if (Sleeping(next)) {
@@ -603,7 +594,7 @@ struct Runtime {
                 say(voice::Current() ? voice::Current()->timer : "よく寝た。そろそろ起きるね。");
             if (!motion_held) {
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
-                MoveRelative(motion, motion.getCurrentAngles(), 0, 150, 330);
+                motion.moveRelativeFrom(motion.getCurrentAngles(), 0, 150, 330);
             }
             color(90,80,65);
             ESP_LOGI(LOG_TAG, "S3 wake: reason=%d", static_cast<int>(last_wake_reason));
@@ -614,7 +605,7 @@ struct Runtime {
             say(voice::Current() ? voice::Current()->morning : "おはよう。今日もよろしくね。");
             if (!motion_held) {
                 if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
-                MoveRelative(motion, motion.getCurrentAngles(), 0, 90, 170);
+                motion.moveRelativeFrom(motion.getCurrentAngles(), 0, 90, 170);
             }
             color(65,48,28);
             ESP_LOGI(LOG_TAG, "S3 morning: sleepy face and greeting");
@@ -645,11 +636,11 @@ struct Runtime {
             wake_step = 1;
             if (phase == Phase::MorningWake)
                 sc.avatar().setEmotion(avatar::Emotion::Neutral);
-            MoveRelative(sc.motion(), saved_angles, 0, 35, 190);
+            sc.motion().moveRelativeFrom(saved_angles, 0, 35, 190);
         }
         if (elapsed >= 2050 && wake_step == 1) {
             wake_step = 2;
-            MoveRelative(sc.motion(), saved_angles, 0, 0, 180);
+            sc.motion().moveRelativeFrom(saved_angles, 0, 0, 180);
             // The final wake step already requests the saved position.
             // Avoid commanding that same pose again on scene release.
             restore_neck_on_release = false;
@@ -759,7 +750,7 @@ struct Runtime {
         auto preset = [&](int delta_yaw, int delta_pitch, int speed, avatar::Emotion face,
                           uint8_t r, uint8_t g, uint8_t b) {
             if (own_face) sc.avatar().setEmotion(face);
-            MoveRelative(motion, saved_angles, delta_yaw, delta_pitch, speed);
+            motion.moveRelativeFrom(saved_angles, delta_yaw, delta_pitch, speed);
             if (own_face && !led_held) {
                 own_led = true;
                 sc.leftNeonLight().setColor(r,g,b);
@@ -799,27 +790,27 @@ struct Runtime {
         if (cue == Cue::ShakeHead) {
             // Two complete left/right sweeps, then the exact starting target.
             if (cue_step == 0 && elapsed >= 420) {
-                MoveRelative(motion, saved_angles, 125, 0, 320);
+                motion.moveRelativeFrom(saved_angles, 125, 0, 320);
                 cue_step = 1;
             } else if (cue_step == 1 && elapsed >= 840) {
-                MoveRelative(motion, saved_angles, -125, 0, 320);
+                motion.moveRelativeFrom(saved_angles, -125, 0, 320);
                 cue_step = 2;
             } else if (cue_step == 2 && elapsed >= 1260) {
-                MoveRelative(motion, saved_angles, 125, 0, 320);
+                motion.moveRelativeFrom(saved_angles, 125, 0, 320);
                 cue_step = 3;
             } else if (cue_step == 3 && elapsed >= 1680) {
-                MoveRelative(motion, saved_angles, 0, 0, 300);
+                motion.moveRelativeFrom(saved_angles, 0, 0, 300);
                 cue_step = 4;
             }
         } else if (cue == Cue::Nod) {
             // A deeper nod than the previous -80 unit movement.
             if (cue_step == 0 && elapsed >= 650) {
-                MoveRelative(motion, saved_angles, 0, 0, 270);
+                motion.moveRelativeFrom(saved_angles, 0, 0, 270);
                 cue_step = 1;
             }
         } else if (cue_step == 0 && elapsed >= 400) {
             cue_step = 1;
-            if (cue == Cue::Happy) MoveRelative(motion, saved_angles, 90, 55, 170);
+            if (cue == Cue::Happy) motion.moveRelativeFrom(saved_angles, 90, 55, 170);
         }
         const uint32_t finish_ms =
             cue == Cue::ShakeHead ? 2400 :

@@ -112,11 +112,15 @@ public:
 
     void setTorqueEnabled(bool enabled) override
     {
+        // Record the last COMMAND, not a verified motor state: a UART packet
+        // can be applied even when its ACK is missing. Never retry every 200ms
+        // while idle just because a reply was not received.
+        if (_torque_command_known && _torque_commanded_enabled == enabled) return;
+        _torque_command_known = true;
         const int ack = _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
-        if (ack == 1) {
-            Servo::setTorqueEnabled(enabled);
-        } else {
-            mclog::tagWarn(_tag, "id: {} torque {} failed, ack: {}",
+        Servo::setTorqueEnabled(enabled);
+        if (ack != 1) {
+            mclog::tagWarn(_tag, "id: {} torque {} command unacknowledged, ack: {}",
                            _config.id, enabled ? "ON" : "OFF", ack);
         }
     }
@@ -178,6 +182,7 @@ private:
     Vector2i _runtime_raw_pos_limit;
     int _zero_pos      = 0;
     Mode _current_mode = Mode::Position;
+    bool _torque_command_known = false;
 
     static constexpr uint32_t kStallFeedbackIntervalMs = 50;
     static constexpr int kStallMinTargetDeltaRaw       = 8;

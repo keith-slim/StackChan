@@ -7,6 +7,7 @@
 #include <mooncake_log.h>
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
+#include <stackchan/motion/motion_math.h>
 #include <stackchan/port_stage1/port_stage1.h>
 #include <stackchan/port_stage1/quiet_mode.h>
 #include <apps/common/common.h>
@@ -133,7 +134,7 @@ void Hal::xiaozhi_mcp_init()
     mcp_server.AddTool(
         "self.robot.adjust_head_angles",
         "Move the head relative to its current position by a bounded 10-degree step. "
-        "yaw_delta: +10 right, -10 left; pitch_delta: +10 up, -10 down. "
+        "yaw_delta: +10 left, -10 right; pitch_delta: +10 up, -10 down. "
         "Each axis is clamped to the servo's current limits, including stall-protection limits. "
         "Only one axis may be moved per call.",
         PropertyList({Property("yaw_delta", kPropertyTypeInteger, 0, -10, 10),
@@ -156,21 +157,16 @@ void Hal::xiaozhi_mcp_init()
             stackchan::stage1::CancelForExternalChange(GetStackChan());
             stackchan::stage1::NotifyManualMotion();
 
-            if (yaw_delta != 0) {
-                auto& servo = motion.yawServo();
-                const auto limit = servo.getAngleLimit();
-                const int before = servo.getCurrentAngle();
-                const int target = uitk::clamp(before + yaw_delta * 10, limit.x, limit.y);
-                mclog::tagInfo(_tag, "relative yaw: {} -> {}, limits: {}..{}", before, target, limit.x, limit.y);
-                if (target != before) servo.moveWithSpeed(target, speed);
-            } else {
-                auto& servo = motion.pitchServo();
-                const auto limit = servo.getAngleLimit();
-                const int before = servo.getCurrentAngle();
-                const int target = uitk::clamp(before + pitch_delta * 10, limit.x, limit.y);
-                mclog::tagInfo(_tag, "relative pitch: {} -> {}, limits: {}..{}", before, target, limit.x, limit.y);
-                if (target != before) servo.moveWithSpeed(target, speed);
-            }
+            // Single-axis voice movement: no command is sent to the untouched axis.
+            const bool yaw_axis = yaw_delta != 0;
+            auto& servo = yaw_axis ? motion.yawServo() : motion.pitchServo();
+            const auto limit = servo.getAngleLimit();
+            const int before = servo.getCurrentAngle();
+            const int delta = (yaw_axis ? yaw_delta : pitch_delta) * 10;
+            const int target = stackchan::motion::clampRelativeAngle(before, delta, limit.x, limit.y);
+            mclog::tagInfo(_tag, "relative {}: {} -> {}, limits: {}..{}",
+                           yaw_axis ? "yaw" : "pitch", before, target, limit.x, limit.y);
+            if (target != before) servo.moveWithSpeed(target, speed);
             return true;
         });
 
