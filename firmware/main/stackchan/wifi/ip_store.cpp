@@ -70,7 +70,8 @@ bool LoadIpSettings(std::string_view ssid, IpSettings& out) {
     if (err == ESP_ERR_NVS_NOT_FOUND) return true;
     if (err != ESP_OK || length != sizeof(stored) ||
         stored.version != kFormatVersion ||
-        std::strlen(stored.ssid) != ssid.size() ||
+        std::memchr(stored.ssid, '\0', sizeof(stored.ssid)) !=
+            static_cast<const void*>(stored.ssid + ssid.size()) ||
         std::memcmp(stored.ssid, ssid.data(), ssid.size()) != 0 ||
         !ValidIpSettings(stored.config)) {
         ESP_LOGW(kTag, "Invalid saved IPv4 settings for the requested SSID");
