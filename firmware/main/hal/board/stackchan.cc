@@ -239,19 +239,21 @@ public:
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-    void SetSdPower(bool enabled)
+    bool SetSdPower(bool enabled)
     {
-        // CoreS3: AW9523 P0.4 is SD_EN. Preserve every unrelated expander pin.
+        // CoreS3: AW9523 P0.4 is SD_EN. Never alter unrelated expander bits.
         constexpr uint8_t bit = 1U << 4;
-        const uint8_t state = ReadReg(0x02);
-        const uint8_t direction = ReadReg(0x04);
+        uint8_t state = 0, direction = 0;
+        if (TryReadRegs(0x02, &state, 1) != ESP_OK ||
+            TryReadRegs(0x04, &direction, 1) != ESP_OK) return false;
+        const auto write = [this](uint8_t reg, uint8_t value) {
+            const uint8_t data[] = {reg, value};
+            return i2c_master_transmit(i2c_device_, data, sizeof(data), 100) == ESP_OK;
+        };
         if (enabled) {
-            WriteReg(0x02, state | bit); // preload output high
-            WriteReg(0x04, direction & ~bit); // output
-        } else {
-            WriteReg(0x02, state & ~bit);
-            WriteReg(0x04, direction | bit); // return to input (board default)
+            return write(0x02, state | bit) && write(0x04, direction & ~bit);
         }
+        return write(0x02, state & ~bit) && write(0x04, direction | bit);
     }
 
     void ResetIli9342()
@@ -706,8 +708,7 @@ public:
             .display_io = static_cast<StackChanAvatarDisplay*>(display_)->GetPanelIOForSd(),
             .power_context = aw9523_,
             .set_power = [](void* ctx, bool on) {
-                static_cast<Aw9523*>(ctx)->SetSdPower(on);
-                return true;
+                return static_cast<Aw9523*>(ctx)->SetSdPower(on);
             },
         });
         InitializeCamera();

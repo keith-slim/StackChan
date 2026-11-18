@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
@@ -88,8 +89,8 @@ public:
         previous_dc_ = before < 0 ? 0 : before;
         if (gpio_set_direction(GPIO_NUM_35, GPIO_MODE_INPUT) != ESP_OK) return;
         pin_switched_ = true;
+        power_attempted_ = true;
         if (!config.set_power(config.power_context, true)) return;
-        powered_ = true;
         vTaskDelay(pdMS_TO_TICKS(10));
         sdmmc_host_t host = SDSPI_HOST_DEFAULT();
         host.slot = SPI3_HOST;
@@ -113,7 +114,8 @@ public:
             const esp_err_t err = esp_vfs_fat_sdcard_unmount(kMount, card_);
             if (err != ESP_OK) ESP_LOGE(kTag, "SD unmount error: %s", esp_err_to_name(err));
         }
-        if (powered_) config.set_power(config.power_context, false);
+        if (power_attempted_ && !config.set_power(config.power_context, false))
+            ESP_LOGW(kTag, "SD power disable failed");
         if (pin_switched_) {
             // Set the LCD D/C latch before changing the pad back to output.
             gpio_set_level(GPIO_NUM_35, previous_dc_);
@@ -128,7 +130,7 @@ private:
     std::unique_lock<std::mutex> guard_;
     bool display_locked_ = false;
     bool pin_switched_ = false;
-    bool powered_ = false;
+    bool power_attempted_ = false;
     bool mounted_ = false;
     int previous_dc_ = 0;
     sdmmc_card_t* card_ = nullptr;

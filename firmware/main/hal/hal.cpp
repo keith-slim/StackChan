@@ -7,6 +7,8 @@
 #include <memory>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
+#include <esp_system.h>
+#include "stackchan/storage/nvs_snapshot.h"
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string_view _tag = "HAL";
@@ -33,6 +35,13 @@ void Hal::init()
     ESP_ERROR_CHECK(ret);
 
     xiaozhi_board_init();
+    // The display/SD shared-bus controller is ready here; settings consumers
+    // have not yet started. Restore only a truly empty NVS partition.
+    if (stackchan::sd::RestoreNvsIfEmpty()) {
+        mclog::tagInfo(_tag, "NVS recovered from SD; restarting to reload all settings");
+        esp_restart();
+        return;
+    }
     xiaozhi_mcp_init();
     head_touch_init();
     io_expander_init();
@@ -40,6 +49,17 @@ void Hal::init()
     imu_init();
     servo_init();
     lvgl_init();
+    // Low-priority periodic snapshots capture NVS writes from ALL existing
+    // namespaces without editing the many independent settings call sites.
+    const BaseType_t backup_task = xTaskCreate([](void*) {
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(60000));
+            if (!hal_bridge::is_xiaozhi_ready() || hal_bridge::is_xiaozhi_idle()) {
+                stackchan::sd::BackupNvsIfChanged();
+            }
+        }
+    }, "sd_nvs_backup", 6144, nullptr, 1, nullptr);
+    if (backup_task != pdPASS) mclog::tagError(_tag, "SD NVS backup task creation failed");
 }
 
 /* -------------------------------------------------------------------------- */
