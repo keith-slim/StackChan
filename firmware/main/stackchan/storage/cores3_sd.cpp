@@ -145,6 +145,18 @@ private:
 
 bool write_config_locked(const std::string& text) {
     if (!is_json_object(text) || text.size() > kMaxFileBytes) return false;
+    // A blank, mounted SD must be usable on the FIRST settings snapshot.
+    // Build the backup directory even when no earlier config generation exists.
+    // Never format the card, and do not invent a previous generation file.
+    if (mkdir(kBackupDir, 0775) != 0 && errno != EEXIST) {
+        ESP_LOGW(kTag, "Could not create %s: %s", kBackupDir, std::strerror(errno));
+        return false;
+    }
+    struct stat backup_dir{};
+    if (stat(kBackupDir, &backup_dir) != 0 || !S_ISDIR(backup_dir.st_mode)) {
+        ESP_LOGW(kTag, "Backup path is not a directory: %s", kBackupDir);
+        return false;
+    }
     const std::string stage = std::string(kConfig) + ".stage";
     const std::string rollback = std::string(kConfig) + ".rollback";
     if (!verified_write(stage, text)) {
@@ -155,10 +167,6 @@ bool write_config_locked(const std::string& text) {
     std::string current;
     const bool has_original = read_locked(kConfig, current);
     const bool original_valid = has_original && is_json_object(current);
-    if (original_valid && mkdir(kBackupDir, 0775) != 0 && errno != EEXIST) {
-        std::remove(stage.c_str());
-        return false;
-    }
     if (has_original) {
         if (std::remove(rollback.c_str()) != 0 && errno != ENOENT) {
             std::remove(stage.c_str());
