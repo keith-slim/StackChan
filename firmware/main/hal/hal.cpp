@@ -14,6 +14,7 @@
 #include <freertos/task.h>
 #include "board/hal_bridge.h"
 #include "stackchan/storage/nvs_snapshot.h"
+#include "stackchan/wifi/wifi_web.h"
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string_view _tag = "HAL";
@@ -239,6 +240,9 @@ static void _stackchan_update_task(void* param)
             }
         }
 
+        // Apply a saved Wi-Fi change after the HTTP response and only while
+        // conversation processing is idle; reuse this task (no new stack).
+        stackchan::wifi::web::ApplyPendingIfIdle();
         tools::update_reminders();
 
         // Wait until activation, audio startup, and at least 30 seconds of runtime.
