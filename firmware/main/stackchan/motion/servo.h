@@ -95,6 +95,7 @@ public:
      */
     virtual void setTorqueEnabled(bool enabled)
     {
+        _torque_commanded_enabled = enabled;
     }
     virtual bool getTorqueEnabled()
     {
@@ -174,6 +175,8 @@ protected:
     bool _snap_to_target_on_rest      = false;
     bool _auto_torque_release_enabled = true;
     bool _auto_angle_sync_enabled     = true;
+    // Track commands instead of polling the servo while idle with torque off.
+    bool _torque_commanded_enabled    = false;
 
     void apply_default_spring_options();
     void update_angle_anim_target(int angle);

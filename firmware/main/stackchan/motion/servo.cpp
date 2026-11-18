@@ -58,7 +58,7 @@ void Servo::update()
     // Auto release torque on rest. Throttle hardware status queries too,
     // not just torque writes: a disconnected servo otherwise incurs a UART
     // timeout on almost every 20ms update, even when nothing is moving.
-    else if (_auto_torque_release_enabled &&
+    else if (_auto_torque_release_enabled && _torque_commanded_enabled &&
              GetHAL().millis() - _last_torque_check_tick > 200) {
         _last_torque_check_tick = GetHAL().millis();
         if (!isMoving() && getTorqueEnabled()) {
@@ -113,6 +113,9 @@ void Servo::update_angle_anim_target(int angle)
     if (_auto_angle_sync_enabled) {
         _angle_anim.teleport(getCurrentAngle());  // Use current angle as start
     }
+    // Initialization and auto-release leave the actuator torque OFF.
+    // A position register write alone does not re-enable it.
+    setTorqueEnabled(true);
     _angle_anim             = angle;  // Apply new target
     _snap_to_target_on_rest = true;
 }

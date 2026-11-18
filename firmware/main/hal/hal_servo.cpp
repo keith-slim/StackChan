@@ -112,9 +112,13 @@ public:
 
     void setTorqueEnabled(bool enabled) override
     {
-        Servo::setTorqueEnabled(enabled);
-        _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
-        // mclog::tagInfo(_tag, "id: {} set torque: {}", _id, enabled);
+        const int ack = _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
+        if (ack == 1) {
+            Servo::setTorqueEnabled(enabled);
+        } else {
+            mclog::tagWarn(_tag, "id: {} torque {} failed, ack: {}",
+                           _config.id, enabled ? "ON" : "OFF", ack);
+        }
     }
 
     bool getTorqueEnabled() override
