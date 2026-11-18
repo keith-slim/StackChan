@@ -204,6 +204,10 @@ bool BuildSnapshot(std::string& out) {
         cJSON_AddStringToObject(row,"value",item.value.c_str());
         cJSON_AddItemToArray(entries,row);
     }
+    // All source values are now owned by cJSON; free their temporary copies
+    // before building the two serialized representations and validation copy.
+    const size_t expected_items = items.size();
+    std::vector<Item>().swap(items);
     char* payload=cJSON_PrintUnformatted(entries);
     if(!payload){cJSON_Delete(root);return false;}
     const std::string checksum=Checksum(payload);
@@ -214,10 +218,6 @@ bool BuildSnapshot(std::string& out) {
     if(!serialized)return false;
     out.assign(serialized);
     cJSON_free(serialized);
-    // The verification pass parses the same entries into another container.
-    // Release the original NVS copies first to avoid holding both at once.
-    const size_t expected_items = items.size();
-    std::vector<Item>().swap(items);
     // Do not publish an incomplete snapshot if a cJSON allocation failed.
     std::vector<Item> confirmed;
     return ParseSnapshot(out,confirmed) && confirmed.size()==expected_items;
