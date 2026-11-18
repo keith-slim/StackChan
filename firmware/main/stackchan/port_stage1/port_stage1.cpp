@@ -9,6 +9,7 @@
 #include "avatar_config.h"
 #include "voice_settings.h"
 #include "voice_client.h"
+#include <application.h>
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
 #include <lvgl.h>
@@ -128,16 +129,9 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         next_snore_at = next_talk_at = 0;
         active_sleep_voice = SleepVoiceKind::None;
     }
-    // Touch wake uses the existing 12800 conversation socket and does not
-    // require the optional 8002 speech-server host. If legacy voice is not
-    // configured, preserve the old disabled behavior for every other scene.
+    // All autonomous speech now uses the existing 12800 Xiaozhi transport.
+    // No second host/port is required or consulted.
     if (!config) return;
-    if (!config->host[0]) {
-        if (entered && (state.phase == Phase::NapWake || state.phase == Phase::NightWake) &&
-            state.wake_reason == WakeReason::Touch)
-            voice::Request(*config, "touch", config->touch);
-        return;
-    }
     if (entered) {
         switch (state.phase) {
         case Phase::NightMessage:
@@ -150,7 +144,10 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         case Phase::NightWake:
             switch (state.wake_reason) {
             case WakeReason::Touch: voice::Request(*config, "touch", config->touch); break;
-            case WakeReason::Word: voice::Request(*config, "wake_word", config->wake_word); break;
+            case WakeReason::Word:
+                // Application owns the real wake-word greeting before it starts
+                // microphone capture; do not queue a duplicate here.
+                break;
             case WakeReason::Timer: voice::Request(*config, "timer", config->timer); break;
             default: break;
             }
@@ -796,12 +793,24 @@ void Start() {
     // Re-enable stage-1 runtime for the controlled audio/WebSocket A/B test.
     // Keep the scene redraw rate limit in place.
     enabled.store(true);
+    // Called from the Xiaozhi main event task before regular wake-word audio.
+    // One atomic wake intent drives the existing avatar action; the callback
+    // returns only the configured utterance, not an HTTP endpoint.
+    Application::GetInstance().SetWakeWordAnnouncementProvider([]() -> std::string {
+        if (!enabled.load() || !sleep_wake_eligible.load() ||
+            wake_sequence_active.load() || wake_intents.load() != 0) return {};
+        const auto* settings = voice::Current();
+        if (!settings || !settings->wake_word[0]) return {};
+        if (!RequestWakeWord()) return {};
+        return settings->wake_word;
+    });
     status_logged = false;
     last_status_log_at = 0;
     ESP_LOGI(LOG_TAG, "runtime started enabled=true");
 }
 void Stop() {
     enabled.store(false);
+    Application::GetInstance().SetWakeWordAnnouncementProvider({});
     voice::Cancel();
     voice::Stop();
     r.ClearVisuals();
