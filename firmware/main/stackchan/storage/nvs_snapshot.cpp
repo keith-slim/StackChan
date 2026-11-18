@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <set>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -243,7 +243,6 @@ bool ParseSnapshot(const std::string& text,std::vector<Item>& items) {
         ok=serialized && Checksum(serialized)==checksum->valuestring;
         cJSON_free(serialized);
     }
-    std::set<std::pair<std::string,std::string>> seen;
     if(ok) {
         cJSON* row=nullptr;
         cJSON_ArrayForEach(row,entries) {
@@ -255,9 +254,27 @@ bool ParseSnapshot(const std::string& text,std::vector<Item>& items) {
                !cJSON_IsNumber(type)||!cJSON_IsString(value)) {ok=false;break;}
             Item item{ns->valuestring,key->valuestring,value->valuestring,
                       static_cast<nvs_type_t>(type->valueint)};
-            if(!ValidName(item.ns)||!ValidName(item.key)||!ValidValue(item)||
-               !seen.insert({item.ns,item.key}).second) {ok=false;break;}
+            if(!ValidName(item.ns)||!ValidName(item.key)||!ValidValue(item)) {ok=false;break;}
             items.push_back(std::move(item));
+        }
+    }
+    if(ok) {
+        // Compare existing entries by index. Unlike a set of (namespace,key)
+        // strings, this does not allocate another copy of every key, and
+        // it leaves the original NVS restore order untouched.
+        std::vector<size_t> order(items.size());
+        std::iota(order.begin(),order.end(),0);
+        std::sort(order.begin(),order.end(),[&](size_t a,size_t b) {
+            return items[a].ns == items[b].ns
+                ? items[a].key < items[b].key : items[a].ns < items[b].ns;
+        });
+        for(size_t i=1;i<order.size();++i) {
+            const Item& previous=items[order[i-1]];
+            const Item& current=items[order[i]];
+            if(previous.ns == current.ns && previous.key == current.key) {
+                ok=false;
+                break;
+            }
         }
     }
     cJSON_Delete(root);
