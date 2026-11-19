@@ -913,7 +913,9 @@ void DreamRemarkTick(StackChan& sc, const State& state, uint32_t now, bool inter
         return;
     }
     if (voice::IsBusy()) {
-        dream_remark.due_at = 0;
+        // The timer greeting is allowed to finish; any later speech during
+        // the two-second remark pause takes priority and cancels the remark.
+        if (dream_remark.due_at != 0) CancelDreamRemark();
         return;
     }
     // Wait for the actual subtitle bubble to disappear, not just the PCM
