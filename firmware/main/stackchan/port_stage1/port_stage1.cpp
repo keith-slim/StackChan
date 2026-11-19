@@ -169,7 +169,14 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
     if (quiet_mode::Active()) {
         pending_scene_voice = SceneVoice::None;
         next_snore_at = next_talk_at = 0;
-        if (!voice::IsBusy()) active_sleep_voice = SleepVoiceKind::None;
+        if (active_sleep_voice != SleepVoiceKind::None) {
+            // S3 quiet mode interrupts the current sleep sound as well as
+            // suppressing future snores / dream utterances. Never abort
+            // normal conversation or greetings (Cancel only handles sleep).
+            voice::Cancel();
+            avatar_dream::EndTalk();
+            active_sleep_voice = SleepVoiceKind::None;
+        }
         return;
     }
     if (entered) {
@@ -262,6 +269,8 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
                           "\n見ている夢は「%s」です。この夢に合った寝言にしてください。", name);
         }
         if (voice::Request(*config, "sleep_talk", prompt)) {
+            ESP_LOGI(LOG_TAG, "[SPEECH] kind=sleep_talk phase=requested dream=%s",
+                     avatar_dream::Name(motif) ? avatar_dream::Name(motif) : "なし");
             active_sleep_voice = SleepVoiceKind::Talk;
             next_talk_at = 0;
             return;
