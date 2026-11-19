@@ -25,6 +25,7 @@ void NotifyExternalSpeech(); // Caller holds LVGL lock: protect newer subtitles.
 bool RequestWakeTouch();    // Screen click or head pad press.
 bool RequestWakeWord();     // Xiaozhi voice activation/connection.
 bool IsWakeSequenceActive(); // Do not let a status/emotion reset erase its face.
+bool IsNightBedtimeMessageActive(); // Bedtime TTS's trailing neutral must not abort the sleep sequence.
 void CancelForExternalChange(StackChan& stackchan, const char* source = "unknown"); // Under LVGL lock.
 void NotifyManualMotion();  // External commands take ownership of the neck.
 void NotifyManualLed();     // External commands take ownership of the LEDs.
