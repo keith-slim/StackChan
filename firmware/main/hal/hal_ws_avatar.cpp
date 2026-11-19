@@ -28,6 +28,7 @@
 #include "utils/secret_logic/secret_logic.h"
 #include "utils/local_network/local_avatar_client.h"
 #include "utils/local_network/local_network_protocol.h"
+#include "utils/psram_allocator.h"
 
 static std::string _tag = "WS-Avatar";
 
@@ -181,7 +182,7 @@ public:
 
     void processMessages()
     {
-        std::vector<ReceivedMessage> messages;
+        std::vector<ReceivedMessage, stackchan::memory::PsramAllocator<ReceivedMessage>> messages;
         {
             std::lock_guard<std::mutex> lock(_mutex);
             while (!_msg_queue.empty()) {
@@ -484,7 +485,8 @@ private:
     int _call_response_connection = -1;
     int _call_end_connection      = -1;
     std::mutex _mutex;
-    std::queue<ReceivedMessage> _msg_queue;
+    std::queue<ReceivedMessage,
+               std::deque<ReceivedMessage, stackchan::memory::PsramAllocator<ReceivedMessage>>> _msg_queue;
     size_t _queued_bytes = 0;
     std::mutex _send_mutex;
 
