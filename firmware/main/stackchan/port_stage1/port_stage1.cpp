@@ -696,7 +696,7 @@ struct Runtime {
                 rest->Render(startled_wake ? AvatarRestPose::Startled :
                              asleep ? AvatarRestPose::Sleeping : AvatarRestPose::Yawning,
                              sleep_sound != 0, mouth, s.phase_elapsed_ms,
-                             sleep_sound == 2);
+                             sleep_sound != 0);
             }
         } else rest.reset();
         if (s.phase == Phase::NapSleep || (s.phase == Phase::Theatre &&
