@@ -5,7 +5,7 @@ enum class AvatarCloudSymbol { Construction, Mask };
 // 昼寝の夢とマイク復旧で、同じ雲と小さな線部品を共用する。
 class AvatarDreamFace {
 public:
-    static constexpr unsigned MOTIF_COUNT=9; // 犬・猫を含む夢の絵柄数。抽選と描画で共用する。
+    static constexpr unsigned MOTIF_COUNT=10; // 犬・猫・車を含むS3の夢の絵柄数。抽選と描画で共用する。
     static constexpr uint32_t DREAM_MIN_INTERVAL_MS=15000;
     static constexpr uint32_t DREAM_MAX_INTERVAL_MS=60000;
     static constexpr uint32_t DREAM_DISPLAY_MS=10000;
