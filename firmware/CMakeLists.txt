@@ -13,7 +13,7 @@ add_definitions(-DFIRMWARE_VERSION=\"${PROJECT_VER}\")
 # LVGL's built-in TLSF pool is allocated in PSRAM rather than in static
 # internal DRAM. Reuse the tested PSRAM pool hook from xiaozhi-esp32.
 # This is a compile-time LVGL setting, not a runtime LVGL object allocator.
-add_compile_definitions(LV_MEM_POOL_INCLUDE=\"\${CMAKE_CURRENT_SOURCE_DIR}/../xiaozhi-esp32/main/display/lvgl_psram_pool.h\")
+add_compile_definitions(LV_MEM_POOL_INCLUDE=\"${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi-esp32/main/display/lvgl_psram_pool.h\")
 
 # Add this line to disable the specific warning
 add_compile_options(-Wno-missing-field-initializers)
