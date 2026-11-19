@@ -126,6 +126,20 @@ enum class SceneVoice : uint8_t { None, Bedtime, Morning, Touch, Timer };
 SceneVoice pending_scene_voice = SceneVoice::None;
 Phase pending_scene_phase = Phase::Boot;
 uint32_t pending_scene_since = 0;
+// S3 timed-nap wake: the last actually shown dream is remembered only until
+// its optional, short post-wake remark. No extra worker or permanent task.
+struct DreamRemark {
+    avatar_dream::Motif motif = avatar_dream::Motif::None;
+    bool timer_requested = false;
+    uint32_t selected_at = 0;
+    uint32_t due_at = 0;
+};
+DreamRemark dream_remark{};
+std::atomic<bool> dream_remark_cancel_requested{false};
+void CancelDreamRemark() {
+    dream_remark = {};
+    dream_remark_cancel_requested.store(false);
+}
 bool VoicePending() { return pending_scene_voice != SceneVoice::None; }
 // Intervals and prompts follow the S3 nap settings; no permanent task.
 uint32_t VoiceDelay(uint16_t lo, uint16_t hi) {
@@ -210,6 +224,9 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         }
         if (tag && phrase && !voice::IsBusy() &&
             voice::Request(*config, tag, phrase)) {
+            if (pending_scene_voice == SceneVoice::Timer &&
+                dream_remark.motif != avatar_dream::Motif::None)
+                dream_remark.timer_requested = true;
             pending_scene_voice = SceneVoice::None;
         } else if (static_cast<uint32_t>(now - pending_scene_since) > 15000) {
             ESP_LOGW(LOG_TAG, "[SPEECH] kind=%s phase=timed_out_waiting_for_idle",
@@ -456,6 +473,9 @@ struct Runtime {
         avatar_dream::End();
     }
     void Release(StackChan& sc, bool restore) {
+        // Also covers explicit activity/gesture interruptions which do not
+        // pass through Begin(), so night sleep never leaves the LCD dark.
+        RestoreNightBacklight();
         if (own_speech) { sc.avatar().clearSpeech(); own_speech = false; }
         ClearVisuals();
         wake_sequence_active.store(false);
@@ -862,6 +882,59 @@ struct Runtime {
     }
 };
 Runtime r;
+void DreamRemarkTick(StackChan& sc, const State& state, uint32_t now, bool interrupted_by_user) {
+    if (dream_remark.motif == avatar_dream::Motif::None) return;
+    const bool greeting = Application::GetInstance().IsAnnouncementActive();
+    const bool allowed_phase = state.phase == Phase::NapWake || state.phase == Phase::Awake;
+    const bool in_conversation = !idle.load() && !greeting;
+    if (!allowed_phase || interrupted_by_user || in_conversation ||
+        r.cue_active || r.conversation_pose != ConversationPose::None ||
+        manual_sleep_requested.load() || quiet_mode::Active() ||
+        dream_remark_cancel_requested.exchange(false)) {
+        ESP_LOGI(LOG_TAG, "dream remark canceled: interrupted or new activity");
+        CancelDreamRemark();
+        return;
+    }
+    // The timed wake's normal announcement is always first. If the
+    // configured greeting cannot start, do not leave a remark queued.
+    if (!dream_remark.timer_requested) {
+        if (state.phase != Phase::NapWake ||
+            static_cast<uint32_t>(now - dream_remark.selected_at) > 15000)
+            CancelDreamRemark();
+        return;
+    }
+    if (voice::IsBusy()) {
+        dream_remark.due_at = 0;
+        return;
+    }
+    // Wait for the actual subtitle bubble to disappear, not just the PCM
+    // stream to finish, and then keep the full two-second S3 pause.
+    const auto& bubble = sc.avatar().getKeyElements().speechBubble;
+    if (bubble && bubble->getVisible()) {
+        dream_remark.due_at = 0;
+        return;
+    }
+    if (!dream_remark.due_at) {
+        dream_remark.due_at = now + 2000;
+        return;
+    }
+    if (static_cast<int32_t>(now - dream_remark.due_at) < 0) return;
+    const char* words = avatar_dream::Remark(dream_remark.motif);
+    const auto* cfg = voice::Current();
+    if (!words || !cfg) {
+        CancelDreamRemark();
+        return;
+    }
+    if (voice::Request(*cfg, "dream_remark", words)) {
+        ESP_LOGI(LOG_TAG, "[SPEECH] kind=dream_remark phase=requested motif=%s",
+                 avatar_dream::Name(dream_remark.motif));
+        CancelDreamRemark();
+    } else if (static_cast<uint32_t>(now - dream_remark.due_at) > 15000) {
+        ESP_LOGW(LOG_TAG, "dream remark abandoned: voice unavailable");
+        CancelDreamRemark();
+    }
+}
+}
 }
 
 void Start() {
@@ -870,6 +943,7 @@ void Start() {
     voice::Init();
     next_snore_at = next_talk_at = 0;
     pending_scene_voice = SceneVoice::None;
+    CancelDreamRemark();
     r = Runtime{};
     const Config config = LoadConfig();
     if (!r.schedule.SetConfig(config)) {
@@ -913,6 +987,7 @@ void Stop() {
     voice::Cancel();
     pending_scene_voice = SceneVoice::None;
     voice::Stop();
+    CancelDreamRemark();
     r.RestoreNightBacklight();
     r.ClearVisuals();
     r = Runtime{};
@@ -945,14 +1020,20 @@ void NotifyExternalSpeech() {
 }
 bool RequestWakeTouch() {
     if (!enabled.load()) return false;
-    if (wake_sequence_active.load()) return true; // consume repeated contact
+    if (wake_sequence_active.load()) {
+        dream_remark_cancel_requested.store(true);
+        return true; // consume repeated contact
+    }
     if (!sleep_wake_eligible.load()) return false;
     wake_intents.fetch_or(1);
     return true;
 }
 bool RequestWakeWord() {
     if (!enabled.load()) return false;
-    if (wake_sequence_active.load()) return true;
+    if (wake_sequence_active.load()) {
+        dream_remark_cancel_requested.store(true);
+        return true;
+    }
     if (!sleep_wake_eligible.load()) return false;
     wake_intents.fetch_or(2);
     return true;
@@ -963,6 +1044,7 @@ bool IsWakeSequenceActive() {
 void CancelForExternalChange(StackChan& sc) {
     if (!enabled.load()) return;
     r.EndConversation(sc);
+    CancelDreamRemark();
     r.RestoreNightBacklight();
     r.Release(sc, true);
     r.cue_active = false;
@@ -971,10 +1053,11 @@ void CancelForExternalChange(StackChan& sc) {
     r.schedule.Reset();
     interrupted.store(true); // Reset idle deadlines even if the caller is a touch event.
 }
-void NotifyManualMotion() { manual_motion.store(true); interrupted.store(true); }
-void NotifyManualLed() { manual_led.store(true); interrupted.store(true); }
+void NotifyManualMotion() { manual_motion.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true); }
+void NotifyManualLed() { manual_led.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true); }
 void SetConversationPose(StackChan& sc, ConversationPose pose) {
     if (!enabled.load() || !sc.hasAvatar()) return;
+    CancelDreamRemark();
     r.BeginConversation(sc, pose, GetHAL().millis());
 }
 void BeginListeningComplete(StackChan& sc) {
@@ -1025,6 +1108,7 @@ void Update(StackChan& sc) {
                                   (wake_bits & 1) ? WakeReason::Touch : WakeReason::None;
     const bool accepted_wake = requested != WakeReason::None &&
                                 r.schedule.RequestWake(requested, now);
+    if (requested != WakeReason::None) dream_remark_cancel_requested.store(true);
     if (accepted_wake || wake_sequence_active.load()) event = false;
     if (manual_motion.exchange(false)) {
         r.motion_held = true;
@@ -1099,8 +1183,23 @@ void Update(StackChan& sc) {
                  static_cast<int>(state.phase), static_cast<int>(state.kind), standby);
     }
     const Phase old_phase = r.phase;
+    // Snapshot the last *displayed* motif before Begin() discards the old
+    // dream scene. Never link a non-timer wake or an unshown motif.
+    if (old_phase == Phase::NapSleep && state.phase == Phase::NapWake &&
+        state.wake_reason == WakeReason::Timer) {
+        CancelDreamRemark();
+        const auto dream = avatar_dream::Last();
+        if (dream != avatar_dream::Motif::None && !quiet_mode::Active() &&
+            voice::Current() && voice::Current()->timer[0] &&
+            esp_random() % 100 < 30) {
+            dream_remark.motif = dream;
+            dream_remark.selected_at = now;
+            ESP_LOGI(LOG_TAG, "dream remark selected: motif=%s", avatar_dream::Name(dream));
+        }
+    }
     r.Begin(sc, state.phase, state.kind, now);
     VoiceTick(old_phase, state, now);
+    DreamRemarkTick(sc, state, now, event && !Application::GetInstance().IsAnnouncementActive());
     r.TickNightBacklight(now);
     if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||
         state.phase == Phase::MorningWake)
