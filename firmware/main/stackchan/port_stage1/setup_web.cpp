@@ -53,9 +53,7 @@ bool AllowedBrightness(int value) {
     return false;
 }
 bool MatchAi(const XiaozhiConfig_t& actual, const XiaozhiConfig_t& expected) {
-    return actual.idleShutdownTimeSeconds == expected.idleShutdownTimeSeconds &&
-        actual.allowShutdownWhenCharging == expected.allowShutdownWhenCharging &&
-        actual.idleRandomMovementLevel == expected.idleRandomMovementLevel &&
+    return actual.idleRandomMovementLevel == expected.idleRandomMovementLevel &&
         actual.startAiAgentOnBoot == expected.startAiAgentOnBoot;
 }
 void AddBool(cJSON* root, const char* key, bool value) {
@@ -74,8 +72,6 @@ esp_err_t Read(httpd_req_t* request) {
     cJSON_AddStringToObject(root, "timezone", timezone.c_str());
 
     const auto ai = hal.getXiaozhiConfig();
-    cJSON_AddNumberToObject(root, "idle_shutdown_seconds", ai.idleShutdownTimeSeconds);
-    AddBool(root, "allow_shutdown_charging", ai.allowShutdownWhenCharging);
     cJSON_AddNumberToObject(root, "idle_movement", ai.idleRandomMovementLevel);
     AddBool(root, "start_ai_on_boot", ai.startAiAgentOnBoot);
 
@@ -105,8 +101,7 @@ esp_err_t Read(httpd_req_t* request) {
     // A partial cJSON tree caused by low heap must never look like a valid
     // settings response: otherwise the browser might save missing defaults.
     constexpr const char* required[] = {
-        "brightness", "volume", "timezone", "idle_shutdown_seconds",
-        "allow_shutdown_charging", "idle_movement", "start_ai_on_boot",
+        "brightness", "volume", "timezone", "idle_movement", "start_ai_on_boot",
         "app_visibility_loaded", "account_username", "device_name",
         "firmware_version", "mac", "battery", "charging", "sd_pending"
     };
@@ -180,28 +175,17 @@ esp_err_t Write(httpd_req_t* request) {
             saved = GetHAL().getTimezone() == timezone;
         }
     } else if (valid &&
-        (std::strcmp(field, "idle_shutdown_seconds") == 0 ||
-         std::strcmp(field, "allow_shutdown_charging") == 0 ||
-         std::strcmp(field, "idle_movement") == 0 ||
+        (std::strcmp(field, "idle_movement") == 0 ||
          std::strcmp(field, "start_ai_on_boot") == 0)) {
         auto ai = GetHAL().getXiaozhiConfig();
-        if (std::strcmp(field, "idle_shutdown_seconds") == 0) {
-            int seconds = 0;
-            valid = Number(value, 0, 3600, 300, seconds);
-            if (valid) ai.idleShutdownTimeSeconds = static_cast<uint32_t>(seconds);
-        } else if (std::strcmp(field, "idle_movement") == 0) {
+        if (std::strcmp(field, "idle_movement") == 0) {
             int level = 0;
             valid = Number(value, 0, 3, 1, level);
             if (valid) ai.idleRandomMovementLevel = static_cast<uint8_t>(level);
         } else {
             bool enabled = false;
             valid = Boolean(value, enabled);
-            if (valid) {
-                if (std::strcmp(field, "start_ai_on_boot") == 0)
-                    ai.startAiAgentOnBoot = enabled;
-                else
-                    ai.allowShutdownWhenCharging = enabled;
-            }
+            if (valid) ai.startAiAgentOnBoot = enabled;
         }
         if (valid) {
             GetHAL().setXiaozhiConfig(ai);
