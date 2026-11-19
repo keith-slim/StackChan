@@ -416,6 +416,9 @@ struct Runtime {
         if (pose == ConversationPose::None) { EndConversation(sc); return; }
         if (conversation_pose == pose) return;
         if (!conversation_saved) {
+            if (phase == Phase::NightSleep || phase == Phase::NightTemporary)
+                ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] reset source=conversation_pose phase=%d pose=%d",
+                         static_cast<int>(phase), static_cast<int>(pose));
             RestoreNightBacklight();
             Release(sc, true);
             cue_active = false;
@@ -1013,6 +1016,7 @@ bool SetConfig(const Config& config) {
     if (!ValidConfig(config)) return false;
     if (!SaveConfig(config)) return false;
     if (!r.schedule.SetConfig(config)) return false;
+    if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=config_save");
     interrupted.store(true);
     ESP_LOGI(LOG_TAG, "stage-1 config saved and applied");
     return true;
@@ -1020,9 +1024,15 @@ bool SetConfig(const Config& config) {
 void OnStandby(bool ready) {
     idle.store(ready);
     if (!ready && !wake_sequence_active.load()) voice::Cancel();
-    if (!ready) interrupted.store(true);
+    if (!ready) {
+        if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=standby_off");
+        interrupted.store(true);
+    }
 }
-void NotifyActivity() { interrupted.store(true); }
+void NotifyActivity(const char* source) {
+    if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=activity:%s", source ? source : "unknown");
+    interrupted.store(true);
+}
 void NotifyExternalSpeech() {
     // Xiaozhi owns the speech bubble once any ASR/system/TTS text arrives.
     // The end of a wake animation must never delete a newer subtitle.
@@ -1051,8 +1061,13 @@ bool RequestWakeWord() {
 bool IsWakeSequenceActive() {
     return wake_sequence_active.load() || wake_intents.load() != 0;
 }
-void CancelForExternalChange(StackChan& sc) {
+void CancelForExternalChange(StackChan& sc, const char* source) {
     if (!enabled.load()) return;
+    if (r.phase == Phase::NightSleep || r.phase == Phase::NightTemporary ||
+        r.phase == Phase::NightDrowsy || r.phase == Phase::NightMessage ||
+        r.phase == Phase::NightYawn || r.phase == Phase::NightPending)
+        ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] reset source=external:%s phase=%d standby=%d",
+                 source ? source : "unknown", static_cast<int>(r.phase), idle.load());
     r.EndConversation(sc);
     CancelDreamRemark();
     r.RestoreNightBacklight();
@@ -1063,8 +1078,14 @@ void CancelForExternalChange(StackChan& sc) {
     r.schedule.Reset();
     interrupted.store(true); // Reset idle deadlines even if the caller is a touch event.
 }
-void NotifyManualMotion() { manual_motion.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true); }
-void NotifyManualLed() { manual_led.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true); }
+void NotifyManualMotion() {
+    if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=manual_motion");
+    manual_motion.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true);
+}
+void NotifyManualLed() {
+    if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=manual_led");
+    manual_led.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true);
+}
 void SetConversationPose(StackChan& sc, ConversationPose pose) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     CancelDreamRemark();
@@ -1129,6 +1150,11 @@ void Update(StackChan& sc) {
     }
     if (manual_led.exchange(false)) r.led_held = true;
     if (event && (r.own_face || r.cue_active)) {
+        if (r.phase == Phase::NightSleep || r.phase == Phase::NightTemporary ||
+            r.phase == Phase::NightDrowsy || r.phase == Phase::NightMessage ||
+            r.phase == Phase::NightYawn || r.phase == Phase::NightPending)
+            ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] reset source=interrupt phase=%d standby=%d wake_bits=%u",
+                     static_cast<int>(r.phase), idle.load(), static_cast<unsigned>(wake_bits));
         r.Release(sc, true); // explicit LED/neck ownership is respected by Release
         r.cue_active = false;
         r.phase = Phase::Boot;
