@@ -448,6 +448,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     // Map emotion string to stackchan::Emotion
     if (strcmp(emotion, "neutral") == 0) {
+        if (is_sleeping_) avatar.setSpeech("");
         is_sleeping_ = false;
         avatar.setEmotion(Emotion::Neutral);
     } else if (strcmp(emotion, "happy") == 0) {
@@ -1067,6 +1068,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     if (is_idle) {
         // STANDBY is the normal recovery point, even after an explicit
         // sleepy expression removed both idle modifiers.
+        if (is_sleeping_) avatar.setSpeech("");
         is_sleeping_ = false;
         ReconcileIdleModifiers(true);
         _is_xiaozhi_idle = true;
@@ -1075,10 +1077,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         _is_xiaozhi_idle = false;
     }
 
-    // Clear sleep state
-    if (is_sleeping_) {
-        avatar.setSpeech("");
-    }
     // The startup announcement is not user activity: keep the night/nap
     // scheduler's standby state until normal playback has finished.
     if (!standalone_speech) stackchan::stage1::OnStandby(is_idle);
