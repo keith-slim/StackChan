@@ -13,6 +13,7 @@
 #include <string>
 #include <cstdint>
 #include <stackchan/avatar/avatar/elements/emotion.h>
+#include <hal/utils/psram_allocator.h>
 
 class StackChanAvatarDisplay : public LvglDisplay {
 private:
@@ -29,7 +30,7 @@ private:
     uint8_t idle_motion_level_          = 2;
 
     // 字幕キュー
-    std::deque<std::string> subtitle_queue_;
+    std::deque<std::string, stackchan::memory::PsramAllocator<std::string>> subtitle_queue_;
     bool subtitle_memory_sampled_ = false; // One allocation snapshot per response.
     lv_timer_t* subtitle_timer_ = nullptr;
     uint32_t subtitle_until_ms_ = 0;
