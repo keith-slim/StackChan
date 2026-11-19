@@ -143,7 +143,7 @@ static void _head_touch_update_task(void* param)
             const bool consumed = gesture == HeadPetGesture::Press &&
                                   stackchan::stage1::RequestWakeTouch();
             if (!consumed && !stackchan::stage1::IsWakeSequenceActive()) {
-                stackchan::stage1::NotifyActivity();
+                stackchan::stage1::NotifyActivity("head_pad");
                 GetHAL().onHeadPetGesture.emit(gesture);
             }
         }
