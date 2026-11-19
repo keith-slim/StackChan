@@ -20,7 +20,9 @@ namespace {
 constexpr const char* TAG = "STAGE1-WEB";
 httpd_handle_t server = nullptr;
 std::atomic<bool> attempted{false};
-constexpr size_t MIN_FREE_INTERNAL = 18000;
+// HTTPD task stack is allocated in PSRAM; retain headroom for lwIP and kernel objects.
+constexpr size_t MIN_FREE_INTERNAL = 12000;
+constexpr size_t MIN_FREE_PSRAM = 16384;
 constexpr size_t MIN_LARGEST_INTERNAL = 5500;
 
 constexpr char PAGE[] = R"STAGE1PAGE(<!doctype html><html lang="ja"><head>
@@ -763,21 +765,31 @@ void Start() {
     last_attempt_ms = now;
     const size_t free_bytes = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    ESP_LOGI(TAG, "deferred start: internal_free=%u largest=%u",
-             static_cast<unsigned>(free_bytes), static_cast<unsigned>(largest));
-    if (free_bytes < MIN_FREE_INTERNAL || largest < MIN_LARGEST_INTERNAL) {
-        ESP_LOGW(TAG, "web start deferred: insufficient internal heap; will retry while idle");
+    const size_t psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG, "deferred start: internal_free=%u largest=%u psram=%u",
+             static_cast<unsigned>(free_bytes), static_cast<unsigned>(largest),
+             static_cast<unsigned>(psram));
+    if (free_bytes < MIN_FREE_INTERNAL || largest < MIN_LARGEST_INTERNAL ||
+        psram < MIN_FREE_PSRAM) {
+        ESP_LOGW(TAG, "web start deferred: insufficient heap; will retry while idle");
         return;
     }
     if (attempted.exchange(true)) return;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 4096;
+    // IDF 6.1 supports allocating the HTTP server task stack from PSRAM.
+    // Keep the HTTPD/lwIP kernel and DMA-only allocations on their default heaps.
+    config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     config.max_uri_handlers = 11;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "port 80 start failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "port 80 start failed: %s (internal=%u largest=%u psram=%u)",
+                 esp_err_to_name(err),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         server = nullptr;
         attempted.store(false);
         return;
@@ -825,8 +837,9 @@ void Start() {
         attempted.store(false);
         return;
     }
-    ESP_LOGI(TAG, "ready: port=80 internal_free=%u largest=%u",
+    ESP_LOGI(TAG, "ready: port=80 internal_free=%u largest=%u psram=%u",
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
 }
 }
