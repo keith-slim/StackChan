@@ -349,6 +349,15 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     DisplayLockGuard lock(this);
 
+    // A failed snore/sleep-talk announcement can report an error emotion after
+    // the announcement has already been cleared. That error is not a wake
+    // request: leave NapSleep, its face, and the sleep timer untouched.
+    if (strcmp(emotion, "cancel") == 0 &&
+        stackchan::stage1::IsNapSleepActive()) {
+        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored sleep audio error emotion=cancel");
+        return true;
+    }
+
     // The bedtime announcement finishes before Xiaozhi restores its neutral
     // emotion. Keep the scheduled NightMessage -> NightYawn -> NightSleep
     // sequence intact; ordinary emotions still use the existing path.
@@ -856,6 +865,15 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     auto& motion = stackchan.motion();
 
     DisplayLockGuard lock(this);
+
+    // Alert(ERROR) after a failed snore/sleep-talk connection is not user
+    // activity. Do not call OnStandby(false) or reset the nap scheduler.
+    // Normal conversation error handling remains unchanged outside NapSleep.
+    if (strcmp(status, Lang::Strings::ERROR) == 0 &&
+        stackchan::stage1::IsNapSleepActive()) {
+        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored sleep audio error status");
+        return;
+    }
 
     speech_conversation_running_ =
         strcmp(status, Lang::Strings::LISTENING) == 0 ||
