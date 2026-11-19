@@ -119,13 +119,6 @@ bool SaveConfig(const Config& cfg) {
     return err == ESP_OK;
 }
 
-uint32_t next_snore_at = 0, next_talk_at = 0;
-enum class SleepVoiceKind : uint8_t { None, Snore, Talk };
-SleepVoiceKind active_sleep_voice = SleepVoiceKind::None;
-enum class SceneVoice : uint8_t { None, Bedtime, Morning, Touch, Timer };
-SceneVoice pending_scene_voice = SceneVoice::None;
-Phase pending_scene_phase = Phase::Boot;
-uint32_t pending_scene_since = 0;
 // S3 timed-nap wake: the last actually shown dream is remembered only until
 // its optional, short post-wake remark. No extra worker or permanent task.
 struct DreamRemark {
@@ -140,152 +133,75 @@ void CancelDreamRemark() {
     dream_remark = {};
     dream_remark_cancel_requested.store(false);
 }
-bool VoicePending() { return pending_scene_voice != SceneVoice::None; }
-// Intervals and prompts follow the S3 nap settings; no permanent task.
-uint32_t VoiceDelay(uint16_t lo, uint16_t hi) {
-    const uint32_t span = static_cast<uint32_t>(hi - lo) + 1;
-    return (static_cast<uint32_t>(lo) + esp_random() % span) * 1000;
-}
+bool VoicePending() { return voice::Pending(); }
+// The scene chooses the utterance and dream context; voice_client owns
+// queueing, audio lifecycle, completion/retry timing, and error rearming.
 void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
     const auto* config = voice::Current();
     const bool entered = old_phase != state.phase;
-    if (entered && old_phase == Phase::NapSleep) {
-        // Wake/scene changes must invalidate the old sound before announcing.
-        voice::Cancel();
-    }
-    if (entered && (old_phase == Phase::NapSleep || state.phase == Phase::NapSleep)) {
-        next_snore_at = next_talk_at = 0;
-        active_sleep_voice = SleepVoiceKind::None;
-    }
     if (entered) {
-        pending_scene_voice = SceneVoice::None;
-        pending_scene_phase = state.phase;
-        pending_scene_since = now;
+        if (old_phase == Phase::NapSleep) voice::LeaveNap();
+        voice::SceneChanged(state.phase, now);
     }
-    // All autonomous speech uses the existing 12800 Xiaozhi transport.
-    // Quiet mode suppresses only background utterances. Keep the normal
-    // conversation/wake-word transport and existing visuals untouched.
     if (!config) return;
     if (quiet_mode::Active()) {
-        pending_scene_voice = SceneVoice::None;
-        next_snore_at = next_talk_at = 0;
-        if (active_sleep_voice != SleepVoiceKind::None) {
-            // S3 quiet mode interrupts the current sleep sound as well as
-            // suppressing future snores / dream utterances. Never abort
-            // normal conversation or greetings (Cancel only handles sleep).
-            voice::Cancel();
-            avatar_dream::EndTalk();
-            active_sleep_voice = SleepVoiceKind::None;
-        }
+        if (voice::SleepActive()) avatar_dream::EndTalk();
+        voice::Quiet();
         return;
     }
     if (entered) {
         switch (state.phase) {
         case Phase::NightMessage:
-            if (config->bedtime[0]) pending_scene_voice = SceneVoice::Bedtime;
+            if (config->bedtime[0]) voice::QueueScene(voice::Kind::Bedtime);
             break;
         case Phase::MorningWake:
-            if (config->morning[0]) pending_scene_voice = SceneVoice::Morning;
+            if (config->morning[0]) voice::QueueScene(voice::Kind::Morning);
             break;
         case Phase::NapWake:
         case Phase::NightWake:
-            switch (state.wake_reason) {
-            case WakeReason::Touch:
-                if (config->touch[0]) pending_scene_voice = SceneVoice::Touch;
-                break;
-            case WakeReason::Word:
-                // Application owns the real wake-word greeting before it starts
-                // microphone capture; do not queue a duplicate here.
-                break;
-            case WakeReason::Timer:
-                if (config->timer[0]) pending_scene_voice = SceneVoice::Timer;
-                break;
-            default: break;
-            }
+            if (state.wake_reason == WakeReason::Touch && config->touch[0])
+                voice::QueueScene(voice::Kind::Touch);
+            else if (state.wake_reason == WakeReason::Timer && config->timer[0])
+                voice::QueueScene(voice::Kind::Timer);
+            // Wake-word speech belongs to Xiaozhi; never queue a duplicate.
             break;
         case Phase::NapSleep:
-            next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
-            next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
+            voice::EnterNap(*config, now);
             break;
         default: break;
         }
     }
-    // If quiet expired during a nap, schedule fresh delays rather than
-    // speaking immediately from overdue timers or remaining silent forever.
-    if (state.phase == Phase::NapSleep &&
-        next_snore_at == 0 && next_talk_at == 0 &&
-        active_sleep_voice == SleepVoiceKind::None) {
-        next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
-        next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
-    }
-    if (pending_scene_voice != SceneVoice::None &&
-        state.phase == pending_scene_phase) {
-        const char* tag = nullptr;
-        const char* phrase = nullptr;
-        switch (pending_scene_voice) {
-        case SceneVoice::Bedtime: tag="bedtime"; phrase=config->bedtime; break;
-        case SceneVoice::Morning: tag="morning"; phrase=config->morning; break;
-        case SceneVoice::Touch: tag="touch"; phrase=config->touch; break;
-        case SceneVoice::Timer: tag="timer"; phrase=config->timer; break;
-        default: break;
-        }
-        if (tag && phrase && !voice::IsBusy() &&
-            voice::Request(*config, tag, phrase)) {
-            if (pending_scene_voice == SceneVoice::Timer &&
-                dream_remark.motif != avatar_dream::Motif::None)
-                dream_remark.timer_requested = true;
-            pending_scene_voice = SceneVoice::None;
-        } else if (static_cast<uint32_t>(now - pending_scene_since) > 15000) {
-            ESP_LOGW(LOG_TAG, "[SPEECH] kind=%s phase=timed_out_waiting_for_idle",
-                     tag ? tag : "unknown");
-            pending_scene_voice = SceneVoice::None;
-        }
-    }
+    if (voice::TickScene(*config, state.phase, now) &&
+        dream_remark.motif != avatar_dream::Motif::None)
+        dream_remark.timer_requested = true;
     if (state.phase != Phase::NapSleep) return;
 
-    // Completion means WebSocket TTS playback has drained; only then
-    // rearm that particular sleep sound's own interval.
-    if (active_sleep_voice != SleepVoiceKind::None) {
-        if (voice::IsBusy()) return;
-        if (active_sleep_voice == SleepVoiceKind::Talk)
-            avatar_dream::EndTalk();
-        if (active_sleep_voice == SleepVoiceKind::Snore)
-            next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
-        else
-            next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
-        active_sleep_voice = SleepVoiceKind::None;
-    }
-    if (voice::IsBusy()) return; // Neither sleep sound may overlap any audio.
-    // Match S3's priority: a ready dream utterance takes the snore slot first.
-    if (next_talk_at && static_cast<int32_t>(now - next_talk_at) >= 0) {
-        // Freeze the motif that is *currently visible*, as the S3 version
-        // does. Never attach a dream that was shown earlier in the nap.
+    // During a nap, completion or send failure rearms the same voice kind.
+    voice::ResumeNap(*config, now);
+    if (voice::SleepActive() && voice::IsBusy()) return;
+    if (voice::FinishSleepIfIdle(*config, now) == voice::Kind::SleepTalk)
+        avatar_dream::EndTalk();
+    if (voice::IsBusy()) return;
+
+    // Dream utterances take priority and are tied to the currently visible motif.
+    if (voice::Due(voice::Kind::SleepTalk, now)) {
         const auto motif = avatar_dream::BeginTalk();
         char prompt[513];
         std::snprintf(prompt, sizeof(prompt), "%s", config->sleep_talk_prompt);
         if (const char* name = avatar_dream::Name(motif)) {
             const size_t used = std::strlen(prompt);
             std::snprintf(prompt + used, sizeof(prompt) - used,
-                          "\n見ている夢は「%s」です。この夢に合った寝言にしてください。", name);
+                          "\\n見ている夢は「%s」です。この夢に合った寝言にしてください。", name);
         }
-        if (voice::Request(*config, "sleep_talk", prompt)) {
+        if (voice::RequestSleep(voice::Kind::SleepTalk, *config, prompt, now)) {
             ESP_LOGI(LOG_TAG, "[SPEECH] kind=sleep_talk phase=requested dream=%s",
                      avatar_dream::Name(motif) ? avatar_dream::Name(motif) : "なし");
-            active_sleep_voice = SleepVoiceKind::Talk;
-            next_talk_at = 0;
             return;
         }
         avatar_dream::EndTalk();
-        next_talk_at = now + VoiceDelay(config->talk_min, config->talk_max);
     }
-    if (next_snore_at && static_cast<int32_t>(now - next_snore_at) >= 0) {
-        if (voice::Request(*config, "snore", config->snore)) {
-            active_sleep_voice = SleepVoiceKind::Snore;
-            next_snore_at = 0;
-            return;
-        }
-        next_snore_at = now + VoiceDelay(config->snore_min, config->snore_max);
-    }
+    if (voice::Due(voice::Kind::Snore, now))
+        voice::RequestSleep(voice::Kind::Snore, *config, config->snore, now);
 }
 uint32_t last_status_log_at = 0;
 bool status_logged = false;
@@ -954,8 +870,7 @@ void Start() {
     // Start after the StackChanAvatarDisplay has attached its avatar.
     quiet_mode::Init();
     voice::Init();
-    next_snore_at = next_talk_at = 0;
-    pending_scene_voice = SceneVoice::None;
+    voice::Reset();
     CancelDreamRemark();
     r = Runtime{};
     const Config config = LoadConfig();
@@ -998,7 +913,7 @@ void Stop() {
     enabled.store(false);
     Application::GetInstance().SetWakeWordAnnouncementProvider({});
     voice::Cancel();
-    pending_scene_voice = SceneVoice::None;
+    voice::Reset();
     voice::Stop();
     CancelDreamRemark();
     r.RestoreNightBacklight();
