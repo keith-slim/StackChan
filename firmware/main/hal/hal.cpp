@@ -314,8 +314,6 @@ XiaozhiConfig_t Hal::getXiaozhiConfig()
 {
     auto bridge_config = hal_bridge::get_xiaozhi_config();
     return XiaozhiConfig_t{
-        .idleShutdownTimeSeconds   = bridge_config.idleShutdownTimeSeconds,
-        .allowShutdownWhenCharging = bridge_config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = bridge_config.idleRandomMovementLevel,
         .startAiAgentOnBoot        = bridge_config.startAiAgentOnBoot,
     };
@@ -324,8 +322,6 @@ XiaozhiConfig_t Hal::getXiaozhiConfig()
 void Hal::setXiaozhiConfig(XiaozhiConfig_t config)
 {
     hal_bridge::set_xiaozhi_config({
-        .idleShutdownTimeSeconds   = config.idleShutdownTimeSeconds,
-        .allowShutdownWhenCharging = config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = config.idleRandomMovementLevel,
         .startAiAgentOnBoot        = config.startAiAgentOnBoot,
     });
