@@ -126,6 +126,10 @@ static void _head_touch_update_task(void* param)
 
     GestureRecognizer recognizer;
     HeadPetGesture gesture;
+    // A one-sample capacitive spike must not wake the sleeping avatar.
+    // Only the sleep path is debounced; awake pet gestures are unchanged.
+    uint8_t sleep_touch_samples = 0;
+    bool suppress_until_release = false;
 
     vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -135,17 +139,34 @@ static void _head_touch_update_task(void* param)
         si12t_parse_touch_result_to(touch_result, data.intensity);
         data.timestamp = xTaskGetTickCount();
 
-        // Update and fire event
+        // Update recognizer even while sleeping, so an old press/release is
+        // never replayed as a normal pet gesture after waking.
         gesture = recognizer.update(data);
-        if (gesture != HeadPetGesture::None) {
-            // S3: consume the pad Press during sleep and preserve the usual
-            // polling delay. No pet actions run during the wake animation.
-            const bool consumed = gesture == HeadPetGesture::Press &&
-                                  stackchan::stage1::RequestWakeTouch();
-            if (!consumed && !stackchan::stage1::IsWakeSequenceActive()) {
-                stackchan::stage1::NotifyActivity("head_pad");
-                GetHAL().onHeadPetGesture.emit(gesture);
+        const bool touched = data.is_touched();
+        if (stackchan::stage1::IsSleepWakeEligible()) {
+            suppress_until_release = true;
+            if (touched) {
+                if (sleep_touch_samples < 3) ++sleep_touch_samples;
+                if (sleep_touch_samples == 3) {
+                    // Three consecutive 50 ms polls distinguish a held
+                    // intentional touch from a brief capacitive glitch.
+                    stackchan::stage1::RequestWakeTouch("head_pad");
+                    ++sleep_touch_samples; // enqueue only once per hold
+                }
+            } else {
+                sleep_touch_samples = 0;
             }
+        } else if (suppress_until_release) {
+            // Do not forward the release of a sleep/wake touch to the normal
+            // pet handler. That release could reset the new wake scene.
+            if (!touched) {
+                suppress_until_release = false;
+                sleep_touch_samples = 0;
+            }
+        } else if (gesture != HeadPetGesture::None &&
+                   !stackchan::stage1::IsWakeSequenceActive()) {
+            stackchan::stage1::NotifyActivity("head_pad");
+            GetHAL().onHeadPetGesture.emit(gesture);
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
