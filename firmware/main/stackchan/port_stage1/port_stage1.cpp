@@ -946,7 +946,6 @@ void DreamRemarkTick(StackChan& sc, const State& state, uint32_t now, bool inter
     }
 }
 }
-}
 
 void Start() {
     // Start after the StackChanAvatarDisplay has attached its avatar.
