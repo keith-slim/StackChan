@@ -137,12 +137,13 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
         .io_handle      = panel_io_,
         .panel_handle   = panel_,
         .control_handle = nullptr,
-        // Keep the SPI/DMA panel path: draw in PSRAM, stage one 8-line
-        // region at a time in internal DMA memory. Matching sizes avoid
-        // chunking a single LVGL flush into several SPI transactions.
+        // The CoreS3 ILI9342E uses SPI DMA. Allocate the single 8-line
+        // draw buffer in DMA-capable internal RAM so the SPI driver does not
+        // need to allocate a temporary DMA-compatible copy for each flush.
+        // LVGL's separate 512KB heap remains in PSRAM.
         .buffer_size    = static_cast<uint32_t>(width_ * 8),
         .double_buffer  = false,
-        .trans_size     = static_cast<uint32_t>(width_ * 8),
+        .trans_size     = 0,
         .hres           = static_cast<uint32_t>(width_),
         .vres           = static_cast<uint32_t>(height_),
         .monochrome     = false,
@@ -155,8 +156,8 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
         .color_format = LV_COLOR_FORMAT_RGB565,
         .flags =
             {
-                .buff_dma     = 0,
-                .buff_spiram  = 1,
+                .buff_dma     = 1,
+                .buff_spiram  = 0,
                 .sw_rotate    = 0,
                 .swap_bytes   = 1,
                 .full_refresh = 0,
