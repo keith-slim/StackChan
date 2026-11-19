@@ -1038,13 +1038,14 @@ void NotifyExternalSpeech() {
     // The end of a wake animation must never delete a newer subtitle.
     r.own_speech = false;
 }
-bool RequestWakeTouch() {
+bool RequestWakeTouch(const char* source) {
     if (!enabled.load()) return false;
     if (wake_sequence_active.load()) {
         dream_remark_cancel_requested.store(true);
         return true; // consume repeated contact
     }
     if (!sleep_wake_eligible.load()) return false;
+    ESP_LOGI(LOG_TAG, "[SLEEP_DIAG] wake_request source=%s kind=touch", source ? source : "unknown");
     wake_intents.fetch_or(1);
     return true;
 }
@@ -1060,6 +1061,9 @@ bool RequestWakeWord() {
 }
 bool IsWakeSequenceActive() {
     return wake_sequence_active.load() || wake_intents.load() != 0;
+}
+bool IsSleepWakeEligible() {
+    return sleep_wake_eligible.load();
 }
 bool IsNightBedtimeMessageActive() {
     return enabled.load() && r.phase == Phase::NightMessage;
