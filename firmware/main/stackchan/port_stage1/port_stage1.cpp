@@ -931,8 +931,7 @@ bool SetConfig(const Config& config) {
     if (!ValidConfig(config)) return false;
     if (!SaveConfig(config)) return false;
     if (!r.schedule.SetConfig(config)) return false;
-    if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=config_save");
-    interrupted.store(true);
+    // Saving settings is not user activity; keep the current scene intact.
     ESP_LOGI(LOG_TAG, "stage-1 config saved and applied");
     return true;
 }
