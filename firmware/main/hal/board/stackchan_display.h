@@ -30,6 +30,7 @@ private:
 
     // 字幕キュー
     std::deque<std::string> subtitle_queue_;
+    bool subtitle_memory_sampled_ = false; // One allocation snapshot per response.
     lv_timer_t* subtitle_timer_ = nullptr;
     uint32_t subtitle_until_ms_ = 0;
     bool subtitle_displaying_ = false;
