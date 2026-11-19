@@ -300,6 +300,11 @@ struct Runtime {
     uint32_t last_draw_at = 0;
     bool motion_held = false;
     bool sleep_home_pending = false; // Re-home after an in-progress manual move.
+    // S3 night sleep keeps its face visible for 3 s, then turns off only the
+    // backlight. Never persist this transient brightness to NVS.
+    bool night_light_armed = false, night_light_off = false;
+    uint32_t night_light_due = 0;
+    uint8_t night_light_original = 0;
     bool led_held = false;
     bool own_face = false;
     bool own_led = false;
@@ -340,6 +345,22 @@ struct Runtime {
         quiet_mark->Render(mouth);
     }
 
+    void RestoreNightBacklight() {
+        if (night_light_off) {
+            GetHAL().setBackLightBrightness(night_light_original, false);
+            ESP_LOGI(LOG_TAG, "night sleep backlight restored: %u", night_light_original);
+        }
+        night_light_armed = night_light_off = false;
+        night_light_due = 0;
+    }
+    void TickNightBacklight(uint32_t now) {
+        if (!night_light_armed || night_light_off || phase != Phase::NightSleep ||
+            static_cast<int32_t>(now - night_light_due) < 0) return;
+        // Ensure the sleeping face is visible for the full grace period.
+        GetHAL().setBackLightBrightness(0, false);
+        night_light_off = true;
+        ESP_LOGI(LOG_TAG, "night sleep backlight off (3s after sleep face)");
+    }
     static bool Sleeping(Phase p) {
         return p == Phase::NapSleep || p == Phase::NightSleep;
     }
@@ -369,6 +390,7 @@ struct Runtime {
         if (pose == ConversationPose::None) { EndConversation(sc); return; }
         if (conversation_pose == pose) return;
         if (!conversation_saved) {
+            RestoreNightBacklight();
             Release(sc, true);
             cue_active = false;
             queued_cue.store(-1);
@@ -466,6 +488,7 @@ struct Runtime {
     }
     void Begin(StackChan& sc, Phase next, Kind next_kind, uint32_t now) {
         if (phase == next && kind == next_kind) return;
+        if (next != Phase::NightSleep) RestoreNightBacklight();
         // Preserve the pre-automation face/pose across a multi-step night/nap scene.
         const bool continuing = own_face && Auto(next);
         if (own_speech) { sc.avatar().clearSpeech(); own_speech = false; }
@@ -479,6 +502,12 @@ struct Runtime {
         phase = next;
         kind = next_kind;
         phase_at = now;
+        if (next == Phase::NightSleep) {
+            night_light_original = GetHAL().getBackLightBrightness();
+            night_light_armed = true;
+            night_light_off = false;
+            night_light_due = now + 3000; // S3 NIGHT_SLEEP_BACKLIGHT_DELAY_MS
+        }
         if (!Auto(next)) return;
         if (!continuing) saved_emotion = sc.avatar().getEmotion();
         if (next == Phase::Theatre && !continuing) {
@@ -884,6 +913,7 @@ void Stop() {
     voice::Cancel();
     pending_scene_voice = SceneVoice::None;
     voice::Stop();
+    r.RestoreNightBacklight();
     r.ClearVisuals();
     r = Runtime{};
     queued_cue.store(-1);
@@ -933,6 +963,7 @@ bool IsWakeSequenceActive() {
 void CancelForExternalChange(StackChan& sc) {
     if (!enabled.load()) return;
     r.EndConversation(sc);
+    r.RestoreNightBacklight();
     r.Release(sc, true);
     r.cue_active = false;
     queued_cue.store(-1); // New explicit motion must not be followed by a stale gesture.
@@ -1070,6 +1101,7 @@ void Update(StackChan& sc) {
     const Phase old_phase = r.phase;
     r.Begin(sc, state.phase, state.kind, now);
     VoiceTick(old_phase, state, now);
+    r.TickNightBacklight(now);
     if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||
         state.phase == Phase::MorningWake)
         r.TickWake(sc, state.phase_elapsed_ms);
