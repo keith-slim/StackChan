@@ -10,6 +10,9 @@
 #include <apps/apps.h>
 #include <hal/hal.h>
 #include <hal/hal_toggles.h>
+#include <cJSON.h>
+#include <esp_heap_caps.h>
+#include <cstdlib>
 
 using namespace mooncake;
 using namespace smooth_ui_toolkit;
@@ -19,6 +22,19 @@ extern "C" void app_main(void)
     // Setup logger
     mclog::set_level(mclog::level_info);
     mclog::set_time_format(mclog::time_format_unix_milliseconds);
+
+    // Put dynamically built JSON trees and serialized JSON in PSRAM, including
+    // Web settings and protocol payloads. Initialize hooks once before HAL
+    // starts any tasks that use cJSON. Match cJSON's free hook to the default
+    // heap allocator so both PSRAM and fallback allocations are released.
+    static cJSON_Hooks json_hooks{
+        [](size_t size) -> void* {
+            void* memory = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            return memory != nullptr ? memory : std::malloc(size);
+        },
+        [](void* memory) { std::free(memory); },
+    };
+    cJSON_InitHooks(&json_hooks);
 
     // HAL init
     GetHAL().init();
