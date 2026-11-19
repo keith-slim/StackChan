@@ -10,11 +10,6 @@ endif()
 set(PROJECT_VER "1.6.2")
 add_definitions(-DFIRMWARE_VERSION=\"${PROJECT_VER}\")
 
-# LVGL's built-in TLSF pool is allocated in PSRAM rather than in static
-# internal DRAM. Reuse the tested PSRAM pool hook from xiaozhi-esp32.
-# This is a compile-time LVGL setting, not a runtime LVGL object allocator.
-add_compile_definitions(LV_MEM_POOL_INCLUDE=\"${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi-esp32/main/display/lvgl_psram_pool.h\")
-
 # Add this line to disable the specific warning
 add_compile_options(-Wno-missing-field-initializers)
 
@@ -37,3 +32,19 @@ set(ENV{GIT_CONFIG_VALUE_0} "false")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(stack-chan)
+
+# Only the LVGL component needs the PSRAM allocator hook. A project-wide
+# definition would not reliably reach managed components in every IDF build.
+idf_build_get_property(_stackchan_components BUILD_COMPONENTS)
+set(_stackchan_lvgl_hook_found FALSE)
+foreach(_stackchan_component IN LISTS _stackchan_components)
+    if(_stackchan_component STREQUAL "lvgl__lvgl" OR _stackchan_component STREQUAL "lvgl")
+        idf_component_get_property(_stackchan_lvgl_target ${_stackchan_component} COMPONENT_LIB)
+        target_compile_definitions(${_stackchan_lvgl_target} PRIVATE
+            LV_MEM_POOL_INCLUDE=\"${CMAKE_CURRENT_SOURCE_DIR}/xiaozhi-esp32/main/display/lvgl_psram_pool.h\")
+        set(_stackchan_lvgl_hook_found TRUE)
+    endif()
+endforeach()
+if(NOT _stackchan_lvgl_hook_found)
+    message(FATAL_ERROR "LVGL component not found: PSRAM pool hook cannot be configured")
+endif()
