@@ -29,7 +29,7 @@ static void _imu_task(void* param)
 
             if (motion_detector->isShakeDetected()) {
                 mclog::tagInfo(_tag, "Shake Detected!");
-                stackchan::stage1::NotifyActivity();
+                stackchan::stage1::NotifyActivity("imu_shake");
                 GetHAL().onImuMotionEvent.emit(ImuMotionEvent::Shake);
             }
             // if (motion_detector->isPickUpDetected()) {
