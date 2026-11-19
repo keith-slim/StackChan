@@ -273,7 +273,7 @@ void StackChanAvatarDisplay::SetupUI()
         // S3: a screen tap during sleep wakes the avatar first. It must
         // not toggle the Xiaozhi chat state on the same touch.
         if (stackchan::stage1::RequestWakeTouch()) return;
-        stackchan::stage1::NotifyActivity();
+        stackchan::stage1::NotifyActivity("screen_click");
         static uint32_t last_toggle_tick = 0;
         const uint32_t now               = GetHAL().millis();
         if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
@@ -358,7 +358,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     // wake word. Do not erase the S3 startled wake animation in that window.
     if (!stackchan::stage1::IsWakeSequenceActive() &&
         !Application::GetInstance().IsAnnouncementActive())
-        stackchan::stage1::CancelForExternalChange(stackchan);
+        stackchan::stage1::CancelForExternalChange(stackchan, "display_external_change");
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
     auto& avatar = stackchan.avatar();
@@ -663,7 +663,7 @@ void StackChanAvatarDisplay::SetChatMessage(
             avatar::Emotion inferred;
             if (stackchan::stage1::SpeechEmotionFromText(content, inferred) &&
                 stackchan.avatar().getEmotion() != inferred) {
-                stackchan::stage1::CancelForExternalChange(stackchan);
+                stackchan::stage1::CancelForExternalChange(stackchan, "display_external_change");
                 if (!speech_emotion_active_) {
                     speech_emotion_before_ = stackchan.avatar().getEmotion();
                     speech_emotion_active_ = true;
@@ -870,7 +870,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // reset an active night/nap scene just because its speech socket opens.
     if (strcmp(status, Lang::Strings::STANDBY) != 0 && !wake_visual &&
         !standalone_speech)
-        stackchan::stage1::CancelForExternalChange(stackchan);
+        stackchan::stage1::CancelForExternalChange(stackchan, "display_external_change");
     if (strcmp(status, Lang::Strings::STANDBY) != 0)
         startup_hint_text_.clear();
 
