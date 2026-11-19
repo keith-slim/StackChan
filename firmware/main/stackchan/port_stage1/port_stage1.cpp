@@ -1065,6 +1065,9 @@ bool IsWakeSequenceActive() {
 bool IsSleepWakeEligible() {
     return sleep_wake_eligible.load();
 }
+bool IsNapSleepActive() {
+    return enabled.load() && r.phase == Phase::NapSleep;
+}
 bool IsNightBedtimeMessageActive() {
     return enabled.load() && r.phase == Phase::NightMessage;
 }
