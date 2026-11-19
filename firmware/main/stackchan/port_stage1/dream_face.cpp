@@ -58,7 +58,7 @@ AvatarDreamFace::AvatarDreamFace(lv_obj_t *parent)
         lv_obj_set_style_line_rounded(detail,true,0);
     }
     fill_=lv_obj_create(root_);lv_obj_remove_style_all(fill_);
-    // 動物の顔も既存の塗り部品へ直接描き、画像バッファや常駐オブジェクトを増やさない。
+    // 犬・猫・車も既存の塗り部品へ直接描き、画像バッファや常駐オブジェクトを増やさない。
     lv_obj_add_event_cb(fill_,DrawIllustration,LV_EVENT_DRAW_MAIN,this);
     lv_obj_set_clickable(fill_,false);lv_obj_set_scrollable(fill_,false);
     lv_obj_set_style_bg_opa(fill_,LV_OPA_COVER,0);lv_obj_set_style_radius(fill_,LV_RADIUS_CIRCLE,0);
@@ -103,7 +103,7 @@ void AvatarDreamFace::Render(uint32_t elapsed_ms)
         return;
     }
     if(!Reached(elapsed_ms,next_dream_ms_))return;
-    const unsigned next=esp_random()%MOTIF_COUNT; // 従来の7種類とゴールデンレトリバー・猫から選ぶ。
+    const unsigned next=esp_random()%MOTIF_COUNT; // S3と同じ10種類の夢から選ぶ。
     dream_visible_=true;hide_dream_ms_=elapsed_ms+DREAM_DISPLAY_MS;next_dream_ms_=elapsed_ms+RandomDreamInterval();
     lv_obj_set_hidden(root_,false);
     avatar_dream::Observe(next); // 睡眠中に実際に表示した絵柄だけを寝言へ渡す。
@@ -320,7 +320,7 @@ void AvatarDreamFace::DrawIllustration(lv_event_t *event)
         stroke({{18,17},{18,21}},0x6b4530);
         rounded(15,14,21,18,3,0x4b3023);
         stroke({{3,13},{3,18}},0xe2af69);stroke({{33,13},{33,18}},0xe2af69);
-    }else{
+    }else if(self->motif_index_==8){
         // 小さな雲でもやさしく見えるよう、三角耳・丸い瞳・桃色の頬のシンプルな猫にする。
         triangle(5,1,5,18,17,10,0xbb9c82);triangle(31,1,31,18,19,10,0xbb9c82);
         triangle(6,3,6,16,15,10,0xfff0df);triangle(30,3,30,16,21,10,0xfff0df);
@@ -334,6 +334,15 @@ void AvatarDreamFace::DrawIllustration(lv_event_t *event)
         triangle(16,19,20,19,18,21,0xe38b9b);
         stroke({{1,18},{8,19}},0xbda28f);stroke({{1,22},{8,21}},0xbda28f);
         stroke({{28,19},{35,18}},0xbda28f);stroke({{28,21},{35,22}},0xbda28f);
+    }else{
+        // S3's car motif reuses the existing fill and LVGL drawing layer.
+        rounded(9,6,27,17,5,0x5da9e9,0x2e6f9e);
+        rounded(11,8,17,14,1,0xc9efff,0x6ba7c8);rounded(19,8,25,14,1,0xc9efff,0x6ba7c8);
+        rounded(2,13,34,23,4,0x5da9e9,0x2e6f9e);
+        rounded(6,20,14,28,4,0x30333a);rounded(22,20,30,28,4,0x30333a);
+        rounded(9,23,11,25,1,0xc7d0d9);rounded(25,23,27,25,1,0xc7d0d9);
+        rounded(30,15,34,19,2,0xffdf6b);rounded(2,16,5,19,1,0xf3f6fa);
+        stroke({{18,8},{18,22}},0x2e6f9e);stroke({{3,23},{33,23}},0x224f72);
     }
 }
 void AvatarDreamFace::RenderStatus(AvatarCloudSymbol symbol)
