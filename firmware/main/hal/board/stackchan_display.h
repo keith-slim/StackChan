@@ -23,6 +23,7 @@ private:
     int idle_motion_modifier_id_        = -1;
     int idle_expression_modifier_id_    = -1;
     int blink_modifier_id_              = -1;
+    lv_timer_t* idle_recovery_timer_       = nullptr;
     bool is_sleeping_                   = false;
     using SubtitleText = std::basic_string<char, std::char_traits<char>,
                                            stackchan::memory::PsramAllocator<char>>;
@@ -57,6 +58,7 @@ private:
     bool speech_conversation_running_ = false; // LISTENING/SPEAKING, not actual sleep.
     stackchan::avatar::Emotion speech_emotion_before_ = stackchan::avatar::Emotion::Neutral;
 
+    void ReconcileIdleModifiers(bool idle);
     void AdvanceSubtitle();
     void AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary);
     void BeginSubtitleReview();
