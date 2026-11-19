@@ -8,6 +8,7 @@
 #include <stackchan/port_stage1/port_stage1.h>
 #include <stackchan/port_stage1/speech_emotion.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
@@ -426,6 +427,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 void StackChanAvatarDisplay::ResetSubtitleQueue()
 {
     subtitle_queue_.clear();
+    subtitle_memory_sampled_ = false;
     subtitle_displaying_ = false;
     subtitle_reviewing_ = false;
     subtitle_preview_shown_ = false;
@@ -680,6 +682,16 @@ void StackChanAvatarDisplay::SetChatMessage(
             subtitle_prestart_queued_ = true;
         }
 
+        // Diagnostic only: sample the first text packet's parsing/queueing
+        // allocations. No changes to allocator, containers, or TTS timing.
+        const bool measure_memory = !subtitle_memory_sampled_;
+        const size_t internal_before = measure_memory
+            ? heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : 0;
+        const size_t largest_before = measure_memory
+            ? heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : 0;
+        const size_t psram_before = measure_memory
+            ? heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : 0;
+
         std::string incoming(content);
         std::replace(incoming.begin(), incoming.end(), '\n', ' ');
         std::replace(incoming.begin(), incoming.end(), '\r', ' ');
@@ -692,6 +704,20 @@ void StackChanAvatarDisplay::SetChatMessage(
         // any unread remainder, never the complete answer a second time.
         for (const auto& segment : segments) {
             if (!segment.empty()) subtitle_queue_.push_back(segment);
+        }
+        if (measure_memory) {
+            subtitle_memory_sampled_ = true;
+            ESP_LOGI(TAG,
+                     "[MEM_SUBTITLE] first_packet bytes=%u parts=%u "
+                     "internal=%u->%u largest=%u->%u psram=%u->%u",
+                     static_cast<unsigned>(incoming.size()),
+                     static_cast<unsigned>(subtitle_queue_.size()),
+                     static_cast<unsigned>(internal_before),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                     static_cast<unsigned>(largest_before),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                     static_cast<unsigned>(psram_before),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         }
 
         // If PCM is already playing, display the first queued phrase now,
