@@ -1,4 +1,5 @@
 #include "stage1_clock.h"
+#include "dream_context.h"
 #include <cassert>
 
 using namespace stackchan::stage1;
@@ -181,4 +182,30 @@ int main()
 
     // No accidental startled wake while already awake.
     assert(!naps.RequestWake(WakeReason::Touch, 700000));
+
+    // The sleep-talk prompt must use only a dream actually visible at the
+    // moment of admission, not the motif that was visible earlier.
+    using namespace avatar_dream;
+    static_assert(COUNT == 10, "S3 includes the car dream");
+    Begin();
+    Observe(static_cast<unsigned>(Motif::Car));
+    assert(Visible() == Motif::Car);
+    assert(BeginTalk() == Motif::Car);
+    Observe(static_cast<unsigned>(Motif::Pudding));
+    assert(TalkMotif() == Motif::Car); // drawing cannot replace a frozen motif
+    EndTalk();
+    assert(!TalkLocked());
+    assert(Visible() == Motif::None);
+    assert(Last() == Motif::Car); // available for a timer-wake remark
+    assert(Remark(Motif::Car) != nullptr);
+    assert(End() == Motif::Car);
+    assert(Last() == Motif::None); // never leak into a subsequent nap
+
+    Begin();
+    Observe(static_cast<unsigned>(Motif::Cat));
+    Hide();
+    assert(BeginTalk() == Motif::None); // past dreams must not shape sleep talk
+    EndTalk();
+    assert(End() == Motif::Cat); // the last displayed dream can inform a remark
+    assert(End() == Motif::None);
 }
