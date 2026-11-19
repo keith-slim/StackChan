@@ -26,6 +26,7 @@ bool RequestWakeTouch(const char* source = "unknown"); // Screen click or head p
 bool RequestWakeWord();     // Xiaozhi voice activation/connection.
 bool IsWakeSequenceActive(); // Do not let a status/emotion reset erase its face.
 bool IsSleepWakeEligible(); // Read-only sleep phase flag for head-pad debounce.
+bool IsNapSleepActive(); // Under LVGL lock: preserve nap on background audio error.
 bool IsNightBedtimeMessageActive(); // Bedtime TTS's trailing neutral must not abort the sleep sequence.
 void CancelForExternalChange(StackChan& stackchan, const char* source = "unknown"); // Under LVGL lock.
 void NotifyManualMotion();  // External commands take ownership of the neck.
