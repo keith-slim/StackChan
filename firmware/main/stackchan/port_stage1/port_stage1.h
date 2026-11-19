@@ -22,9 +22,10 @@ void NotifyActivity(const char* source = "unknown"); // Can be called from touch
 void NotifyExternalSpeech(); // Caller holds LVGL lock: protect newer subtitles.
 // Input handlers only enqueue a wake intent; LVGL and servo work stays
 // serialized in Update(). true means that the sleep-touch was consumed.
-bool RequestWakeTouch();    // Screen click or head pad press.
+bool RequestWakeTouch(const char* source = "unknown"); // Screen click or head pad press.
 bool RequestWakeWord();     // Xiaozhi voice activation/connection.
 bool IsWakeSequenceActive(); // Do not let a status/emotion reset erase its face.
+bool IsSleepWakeEligible(); // Read-only sleep phase flag for head-pad debounce.
 bool IsNightBedtimeMessageActive(); // Bedtime TTS's trailing neutral must not abort the sleep sequence.
 void CancelForExternalChange(StackChan& stackchan, const char* source = "unknown"); // Under LVGL lock.
 void NotifyManualMotion();  // External commands take ownership of the neck.
