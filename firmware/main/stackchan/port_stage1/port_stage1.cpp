@@ -191,7 +191,7 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         if (const char* name = avatar_dream::Name(motif)) {
             const size_t used = std::strlen(prompt);
             std::snprintf(prompt + used, sizeof(prompt) - used,
-                          "\\n見ている夢は「%s」です。この夢に合った寝言にしてください。", name);
+                          "\n見ている夢は「%s」です。この夢に合った寝言にしてください。", name);
         }
         if (voice::RequestSleep(voice::Kind::SleepTalk, *config, prompt, now)) {
             ESP_LOGI(LOG_TAG, "[SPEECH] kind=sleep_talk phase=requested dream=%s",
