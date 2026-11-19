@@ -349,6 +349,15 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     DisplayLockGuard lock(this);
 
+    // The bedtime announcement finishes before Xiaozhi restores its neutral
+    // emotion. Keep the scheduled NightMessage -> NightYawn -> NightSleep
+    // sequence intact; ordinary emotions still use the existing path.
+    if (strcmp(emotion, "neutral") == 0 &&
+        stackchan::stage1::IsNightBedtimeMessageActive()) {
+        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored bedtime trailing neutral");
+        return true;
+    }
+
     // Startup speech opens the same WebSocket but is not a wake-word event.
     // Its neutral CONNECTING/IDLE UI update must not reset a sleep/nap scene.
     if (Application::GetInstance().IsAnnouncementActive() &&
