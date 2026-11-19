@@ -106,6 +106,12 @@ public:
         return gesture;
     }
 
+    void reset()
+    {
+        current_state = TouchState::IDLE;
+        initial_position = 0;
+    }
+
     void set_config(const TouchConfig& cfg)
     {
         config = cfg;
@@ -127,14 +133,9 @@ static void _head_touch_update_task(void* param)
 
     GestureRecognizer recognizer;
     HeadPetGesture gesture;
-    // A one-sample capacitive spike must not wake the sleeping avatar.
-    // Only the sleep path is debounced; awake pet gestures are unchanged.
-    uint8_t sleep_touch_samples = 0;
+    // Sleeping head contact wakes only on the existing pet swipe gesture.
+    // Keep the post-wake release out of the normal pet handler.
     bool suppress_until_release = false;
-    // Diagnostic-only snapshot of a sleep touch candidate. SI12T OUTPUT1 is
-    // a packed 2-bit-per-channel result, not an analog capacitance reading.
-    uint8_t sleep_touch_raw[3] = {};
-    uint32_t sleep_touch_started = 0;
     bool sleep_diag_read_failed = false;
 
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -142,67 +143,40 @@ static void _head_touch_update_task(void* param)
     while (1) {
         // Read data
         const esp_err_t read_result = si12t_read_touch_result(si12t, &touch_result);
-        if (stackchan::stage1::IsSleepWakeEligible() && read_result != ESP_OK) {
-            if (!sleep_diag_read_failed)
-                ESP_LOGW("HEAD_TOUCH_DIAG", "sleep read_error=%s (touch data may be stale)",
+        if (read_result != ESP_OK) {
+            if (stackchan::stage1::IsSleepWakeEligible() && !sleep_diag_read_failed)
+                ESP_LOGW("HEAD_TOUCH_DIAG", "sleep read_error=%s; discarded stale sample",
                          esp_err_to_name(read_result));
             sleep_diag_read_failed = true;
-        } else if (read_result == ESP_OK) {
-            sleep_diag_read_failed = false;
+            // A failed I2C read must never count as a fresh touch or a
+            // swipe. Discard the partial gesture, without synthesizing a
+            // release event for the existing awake pet behavior.
+            recognizer.reset();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
         }
+        sleep_diag_read_failed = false;
         si12t_parse_touch_result_to(touch_result, data.intensity);
         data.timestamp = xTaskGetTickCount();
 
-        // Update recognizer even while sleeping, so an old press/release is
-        // never replayed as a normal pet gesture after waking.
+        // Keep tracking the same gesture while asleep and awake; only its
+        // destination differs. A touch alone never wakes the head sensor.
         gesture = recognizer.update(data);
         const bool touched = data.is_touched();
         if (stackchan::stage1::IsSleepWakeEligible()) {
             suppress_until_release = true;
-            if (touched) {
-                if (sleep_touch_samples == 0) {
-                    sleep_touch_started = data.timestamp;
-                    ESP_LOGI("HEAD_TOUCH_DIAG",
-                             "sleep touch_start raw=0x%02x ch=%u,%u,%u threshold=1 sensitivity=LOW/3",
-                             touch_result, data.intensity[0], data.intensity[1], data.intensity[2]);
-                }
-                if (sleep_touch_samples < 3) {
-                    sleep_touch_raw[sleep_touch_samples] = touch_result;
-                    ++sleep_touch_samples;
-                }
-                if (sleep_touch_samples == 3) {
-                    // Diagnostic snapshot only: keep the existing wake rule.
-                    const bool accepted = stackchan::stage1::RequestWakeTouch("head_pad");
-                    ESP_LOGI("HEAD_TOUCH_DIAG",
-                             "sleep wake_check accepted=%d samples=3 duration_ticks=%lu raw=0x%02x,0x%02x,0x%02x ch=%u,%u,%u",
-                             accepted, static_cast<unsigned long>(data.timestamp - sleep_touch_started),
-                             sleep_touch_raw[0], sleep_touch_raw[1], sleep_touch_raw[2],
-                             data.intensity[0], data.intensity[1], data.intensity[2]);
-                    ++sleep_touch_samples; // enqueue only once per hold
-                }
-            } else {
-                if (sleep_touch_samples != 0) {
-                    ESP_LOGI("HEAD_TOUCH_DIAG",
-                             "sleep touch_end samples=%u duration_ticks=%lu raw=0x%02x ch=%u,%u,%u",
-                             sleep_touch_samples, static_cast<unsigned long>(data.timestamp - sleep_touch_started),
-                             touch_result, data.intensity[0], data.intensity[1], data.intensity[2]);
-                }
-                sleep_touch_samples = 0;
+            if (gesture == HeadPetGesture::SwipeForward ||
+                gesture == HeadPetGesture::SwipeBackward) {
+                const bool accepted = stackchan::stage1::RequestWakeTouch("head_pet_swipe");
+                ESP_LOGI("HEAD_TOUCH_DIAG",
+                         "sleep swipe_wake accepted=%d direction=%s raw=0x%02x ch=%u,%u,%u",
+                         accepted, gesture == HeadPetGesture::SwipeForward ? "forward" : "backward",
+                         touch_result, data.intensity[0], data.intensity[1], data.intensity[2]);
             }
         } else if (suppress_until_release) {
-            if (sleep_touch_samples != 0) {
-                ESP_LOGI("HEAD_TOUCH_DIAG",
-                         "sleep phase_exit samples=%u duration_ticks=%lu raw=0x%02x touched=%d",
-                         sleep_touch_samples, static_cast<unsigned long>(data.timestamp - sleep_touch_started),
-                         touch_result, touched);
-                sleep_touch_samples = 0;
-            }
-            // Do not forward the release of a sleep/wake touch to the normal
-            // pet handler. That release could reset the new wake scene.
-            if (!touched) {
-                suppress_until_release = false;
-                sleep_touch_samples = 0;
-            }
+            // Do not replay the swipe or release used to wake the avatar as
+            // an ordinary pet gesture that could reset its wake animation.
+            if (!touched) suppress_until_release = false;
         } else if (gesture != HeadPetGesture::None &&
                    !stackchan::stage1::IsWakeSequenceActive()) {
             stackchan::stage1::NotifyActivity("head_pad");
