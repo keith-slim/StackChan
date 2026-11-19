@@ -7,7 +7,7 @@ class AvatarRestFace {
 public:
     explicit AvatarRestFace(lv_obj_t *parent);
     ~AvatarRestFace();
-    void Render(AvatarRestPose pose, bool speaking, uint8_t mouth, uint32_t elapsed_ms=0, bool hide_sleep_bubble=false);
+    void Render(AvatarRestPose pose, bool speaking, uint8_t mouth, uint32_t elapsed_ms=0, bool hide_sleep_decorations=false);
     // 寝顔を短く残して鼻提灯だけをはじけさせ、次の顔へつなぐ。
     void RenderWakePop(uint32_t sleep_elapsed_ms, uint32_t pop_elapsed_ms);
     // 寝顔・あくびの口に装飾を合わせるための参照。所有権は渡さない。
