@@ -208,6 +208,10 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
 {
     ESP_LOGI(TAG, "Destroying StackChanAvatarDisplay");
     stackchan::stage1::Stop(); // Remove scene children before LVGL / avatar teardown.
+    if (idle_recovery_timer_) {
+        lv_timer_delete(idle_recovery_timer_);
+        idle_recovery_timer_ = nullptr;
+    }
 
     if (preview_timer_ != nullptr) {
         esp_timer_stop(preview_timer_);
@@ -303,6 +307,26 @@ void StackChanAvatarDisplay::SetupUI()
     auto config        = hal_bridge::get_xiaozhi_config();
     idle_motion_level_ = config.idleRandomMovementLevel;
 
+    // Recover an idle display even if its final STANDBY callback was lost.
+    // LVGL timers execute under the LVGL task's existing display lock.
+    idle_recovery_timer_ = lv_timer_create([](lv_timer_t* timer) {
+        auto* self = static_cast<StackChanAvatarDisplay*>(lv_timer_get_user_data(timer));
+        if (!self || !GetStackChan().hasAvatar() ||
+            Application::GetInstance().GetDeviceState() != kDeviceStateIdle ||
+            Application::GetInstance().IsAnnouncementActive() ||
+            stackchan::stage1::IsConversationFaceActive() ||
+            stackchan::stage1::IsWakeSequenceActive() || self->is_sleeping_)
+            return;
+        auto& sc = GetStackChan();
+        if (self->speaking_modifier_id_ >= 0) {
+            sc.removeModifier(self->speaking_modifier_id_);
+            self->speaking_modifier_id_ = -1;
+            sc.avatar().mouth().setWeight(0);
+            ESP_LOGW(TAG, "[IDLE_RECOVERY] cleared stale speaking animation");
+        }
+        self->ReconcileIdleModifiers(true);
+    }, 2000, this);
+
     ESP_LOGI(TAG, "Avatar created and started");
 }
 
@@ -336,6 +360,35 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
         default:
             idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
             return;
+    }
+}
+
+void StackChanAvatarDisplay::ReconcileIdleModifiers(bool idle)
+{
+    auto& sc = GetStackChan();
+    if (!idle) {
+        if (idle_motion_modifier_id_ >= 0) {
+            sc.removeModifier(idle_motion_modifier_id_);
+            idle_motion_modifier_id_ = -1;
+        }
+        if (idle_expression_modifier_id_ >= 0) {
+            sc.removeModifier(idle_expression_modifier_id_);
+            idle_expression_modifier_id_ = -1;
+        }
+        return;
+    }
+    // The two modifiers have independent lifetimes (including when the
+    // configured motion level is zero). Never infer one from the other.
+    if (idle_motion_level_ > 0 &&
+        (idle_motion_modifier_id_ < 0 || !sc.getModifier(idle_motion_modifier_id_))) {
+        CreateIdleMotionModifier();
+        ESP_LOGI(TAG, "[IDLE_RECOVERY] random head motion registered");
+    }
+    if (idle_expression_modifier_id_ < 0 ||
+        !sc.getModifier(idle_expression_modifier_id_)) {
+        idle_expression_modifier_id_ =
+            sc.addModifier(std::make_unique<IdleExpressionModifier>());
+        ESP_LOGI(TAG, "[IDLE_RECOVERY] idle expression registered");
     }
 }
 
@@ -395,6 +448,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     // Map emotion string to stackchan::Emotion
     if (strcmp(emotion, "neutral") == 0) {
+        is_sleeping_ = false;
         avatar.setEmotion(Emotion::Neutral);
     } else if (strcmp(emotion, "happy") == 0) {
         avatar.setEmotion(Emotion::Happy);
@@ -416,12 +470,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
             is_sleeping_ = true;
 
             ESP_LOGW(TAG, "Stop idle motion");
-            if (idle_motion_modifier_id_ >= 0) {
-                stackchan.removeModifier(idle_motion_modifier_id_);
-                idle_motion_modifier_id_ = -1;
-                stackchan.removeModifier(idle_expression_modifier_id_);
-                idle_expression_modifier_id_ = -1;
-            }
+            ReconcileIdleModifiers(false);
             auto& motion = GetStackChan().motion();
             motion.pitchServo().moveWithSpeed(0, 80);
         }
@@ -1016,32 +1065,13 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         avatar.mouth().setWeight(0);
 
     if (is_idle) {
-        // Start idle motion
-        ESP_LOGW(TAG, "Start idle motion");
-        if (idle_motion_modifier_id_ < 0) {
-            if (idle_motion_level_ > 0) {
-                CreateIdleMotionModifier();
-            }
-            idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
-        }
-
+        // STANDBY is the normal recovery point, even after an explicit
+        // sleepy expression removed both idle modifiers.
+        is_sleeping_ = false;
+        ReconcileIdleModifiers(true);
         _is_xiaozhi_idle = true;
     } else {
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
-        }
-
-        // if (!is_listening) {
-        //     // Return to default pose
-        //     motion.pitchServo().moveWithSpeed(200, 350);
-        //     motion.yawServo().moveWithSpeed(0, 350);
-        // }
-
+        ReconcileIdleModifiers(false);
         _is_xiaozhi_idle = false;
     }
 
