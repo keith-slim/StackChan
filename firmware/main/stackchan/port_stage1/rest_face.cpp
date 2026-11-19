@@ -45,7 +45,7 @@ AvatarRestFace::AvatarRestFace(lv_obj_t *parent)
 
 AvatarRestFace::~AvatarRestFace() { lv_obj_delete(root_); }
 
-void AvatarRestFace::Render(AvatarRestPose pose, bool speaking, uint8_t mouth, uint32_t elapsed_ms, bool hide_sleep_bubble)
+void AvatarRestFace::Render(AvatarRestPose pose, bool speaking, uint8_t mouth, uint32_t elapsed_ms, bool hide_sleep_decorations)
 {
     // Original StackChan keeps its own avatar/legacy decorators visible.
     // A sleep/yawn pose is a *replacement*, not a transparent overlay;
@@ -106,9 +106,12 @@ void AvatarRestFace::Render(AvatarRestPose pose, bool speaking, uint8_t mouth, u
     lv_obj_set_style_radius(mouth_, sleep ? px(static_cast<int>(3 + 7 * opening)) : LV_RADIUS_CIRCLE, 0);
     lv_obj_set_pos(mouth_, cx - w / 2, cy + px(26) - h / 2);
     if (sleep) {
-        // 寝言の発話中は既存部品を隠すだけにし、終了時は呼吸位置へ戻して再表示する。
+        // Both snores and sleep-talk hide the nose bubble and drool while
+        // audio is playing. Restore the same sleep decorations afterwards.
         RenderBubble(opening);
-        if(bubble_)lv_obj_set_hidden(bubble_,hide_sleep_bubble);
+        if (bubble_) lv_obj_set_hidden(bubble_, hide_sleep_decorations);
+        lv_obj_set_hidden(drool_, hide_sleep_decorations);
+        lv_obj_set_hidden(drop_, hide_sleep_decorations);
         const int x = cx + w / 2 - px(4), y = cy + px(26) + h / 2 - px(1);
         drool_points_[0] = {0, 0}; drool_points_[1] = {static_cast<lv_value_precise_t>(px(1)), static_cast<lv_value_precise_t>(px(5))};
         drool_points_[2] = {0, static_cast<lv_value_precise_t>(px(10))}; drool_points_[3] = {static_cast<lv_value_precise_t>(px(1)), static_cast<lv_value_precise_t>(px(14))};
