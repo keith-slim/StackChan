@@ -24,14 +24,14 @@ private:
     int idle_expression_modifier_id_    = -1;
     int blink_modifier_id_              = -1;
     bool is_sleeping_                   = false;
+    using SubtitleText = std::basic_string<char, std::char_traits<char>,
+                                           stackchan::memory::PsramAllocator<char>>;
     // Only the local fallback hint is tracked, so its five-second timeout
     // cannot remove a newer live subtitle.
-    std::string startup_hint_text_;
+    SubtitleText startup_hint_text_;
     uint8_t idle_motion_level_          = 2;
 
     // Both deque nodes and subtitle text storage live in PSRAM.
-    using SubtitleText = std::basic_string<char, std::char_traits<char>,
-                                           stackchan::memory::PsramAllocator<char>>;
     std::deque<SubtitleText, stackchan::memory::PsramAllocator<SubtitleText>> subtitle_queue_;
     bool subtitle_memory_sampled_ = false; // One allocation snapshot per response.
     lv_timer_t* subtitle_timer_ = nullptr;
