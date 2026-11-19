@@ -510,7 +510,7 @@ void StackChanAvatarDisplay::AdvanceSubtitle()
         return;
     }
 
-    std::string text = std::move(subtitle_queue_.front());
+    auto text = std::move(subtitle_queue_.front());
     subtitle_queue_.pop_front();
     auto& stackchan = GetStackChan();
     if (!stackchan.hasAvatar()) {
@@ -544,7 +544,7 @@ void StackChanAvatarDisplay::AdvanceLiveSubtitle(uint32_t played_ms, bool at_phr
         if (static_cast<int32_t>(played_ms - target) < 0) return;
     }
 
-    std::string text = std::move(subtitle_queue_.front());
+    auto text = std::move(subtitle_queue_.front());
     subtitle_queue_.pop_front();
     GetStackChan().avatar().setSpeech(text.c_str());
 
@@ -703,7 +703,7 @@ void StackChanAvatarDisplay::SetChatMessage(
         // Live playback consumes this queue; post-speech review shows only
         // any unread remainder, never the complete answer a second time.
         for (const auto& segment : segments) {
-            if (!segment.empty()) subtitle_queue_.push_back(segment);
+            if (!segment.empty()) subtitle_queue_.emplace_back(segment.data(), segment.size());
         }
         if (measure_memory) {
             subtitle_memory_sampled_ = true;
