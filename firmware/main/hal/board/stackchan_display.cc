@@ -272,7 +272,7 @@ void StackChanAvatarDisplay::SetupUI()
     avatar->getPanel()->onClick().connect([]() {
         // S3: a screen tap during sleep wakes the avatar first. It must
         // not toggle the Xiaozhi chat state on the same touch.
-        if (stackchan::stage1::RequestWakeTouch()) return;
+        if (stackchan::stage1::RequestWakeTouch("screen_click")) return;
         stackchan::stage1::NotifyActivity("screen_click");
         static uint32_t last_toggle_tick = 0;
         const uint32_t now               = GetHAL().millis();
