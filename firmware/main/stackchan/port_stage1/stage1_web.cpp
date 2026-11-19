@@ -153,9 +153,9 @@ Webとの接続が切れた場合は新しいIPアドレスから開き直して
 <section id="device" class="card"><h2>デバイス設定</h2>
 <div id="setupDeviceFields"></div>
 <small>明るさ・音量は本体と同じ値を保存して反映します。タイムゾーンも本体SETUPと同じ選択肢です。</small></section>
-<section id="aiSetup" class="card"><h2>AI・省電力設定</h2>
+<section id="aiSetup" class="card"><h2>AI設定</h2>
 <div id="setupAiFields"></div>
-<small>本体SETUPの「General」「Power Saving」と共通の設定値です。保存後は次回の本体起動時に確実に適用されます。</small></section>
+<small>本体SETUPの「General」と共通の設定値です。保存後は次回の本体起動時に確実に適用されます。</small></section>
 <section id="appsSetup" class="card"><h2>アプリの表示・非表示</h2>
 <div id="setupAppFields"></div>
 <small>ランチャーのアイコン表示だけを変更します。AI自動起動とは別設定です。SETUPは非表示になりません。</small></section>
@@ -458,8 +458,6 @@ async function setupLoad(){
   setupField(device,'timezone','タイムゾーン',setupTz,d.timezone);
   setupField(ai,'idle_movement','待機中のランダム動作',[[0,'なし'],[1,'少なめ'],[2,'普通'],[3,'多め']],d.idle_movement);
   setupField(ai,'start_ai_on_boot','起動時にAIを自動開始',[[false,'無効'],[true,'有効']],d.start_ai_on_boot);
-  setupField(ai,'idle_shutdown_seconds','無操作時の自動電源OFF',Array.from({length:13},(_,i)=>[i*300,i===0?'オフ':i*5+'分']),d.idle_shutdown_seconds);
-  setupField(ai,'allow_shutdown_charging','充電中の自動電源OFF',[[false,'許可しない'],[true,'許可する']],d.allow_shutdown_charging);
   if(d.app_visibility_loaded){
    for(let i=0;i<setupAppNames.length;i++){
     const [key,label]=setupAppNames[i];
