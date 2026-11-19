@@ -687,7 +687,7 @@ struct Runtime {
             else {
                 const uint8_t sleep_sound =
                     s.phase == Phase::NapSleep ? voice::SleepSoundPlaying() : 0;
-                // S3: snores keep the nose bubble; sleep talk hides it.
+                // Both snores and sleep talk hide the nose bubble and drool during playback.
                 // Use a short visual mouth cycle only while audio is playing.
                 const uint8_t mouth = sleep_sound
                     ? static_cast<uint8_t>(30 + 45 * (1.0f + std::sin(
