@@ -1061,6 +1061,9 @@ bool RequestWakeWord() {
 bool IsWakeSequenceActive() {
     return wake_sequence_active.load() || wake_intents.load() != 0;
 }
+bool IsNightBedtimeMessageActive() {
+    return enabled.load() && r.phase == Phase::NightMessage;
+}
 void CancelForExternalChange(StackChan& sc, const char* source) {
     if (!enabled.load()) return;
     if (r.phase == Phase::NightSleep || r.phase == Phase::NightTemporary ||
