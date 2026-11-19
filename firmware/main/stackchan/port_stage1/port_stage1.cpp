@@ -1052,11 +1052,17 @@ bool RequestCue(const char* id) {
 void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
-    // Clear stale mode marks immediately, including when the update takes
-    // an early return for manual cues or conversation overlays.
-    if (!quiet_mode::Active() || !idle.load() || voice::IsBusy() ||
-        VoicePending() || r.conversation_pose != ConversationPose::None ||
-        wake_sequence_active.load()) r.SyncQuietMark(sc, false);
+    // While sleeping, the quiet mark is part of the rest face and must not
+    // disappear just because an announcement/transport becomes busy.
+    // Explicit wake and conversation still control their own overlay.
+    const bool quiet_sleep = quiet_mode::Active() &&
+                             Runtime::Sleeping(r.phase) &&
+                             !wake_sequence_active.load();
+    if (!quiet_sleep &&
+        (!quiet_mode::Active() || !idle.load() || voice::IsBusy() ||
+         VoicePending() || r.conversation_pose != ConversationPose::None ||
+         wake_sequence_active.load()))
+        r.SyncQuietMark(sc, false);
     bool event = interrupted.exchange(false);
     const uint8_t wake_bits = wake_intents.exchange(0);
     const WakeReason requested = (wake_bits & 2) ? WakeReason::Word :
@@ -1176,13 +1182,18 @@ void Update(StackChan& sc) {
         r.ApplyTheatreFace(sc, state);
         r.last_draw_at = now;
     }
-    // A mode indicator, never an audio control: show in quiet standby, hide
-    // during manual conversation, queued greetings and active playback.
+    // During sleep, keep the quiet decoration attached to the rest face
+    // regardless of speech/transport activity. Outside sleep retain the
+    // original rule: hide during conversation, actions and playback.
     // Render after face updates so it follows the real mouth position.
-    r.SyncQuietMark(sc, quiet_mode::Active() && standby &&
-        !r.cue_active && r.conversation_pose == ConversationPose::None &&
-        !voice::IsBusy() && !VoicePending() && !r.own_speech &&
-        !wake_sequence_active.load());
+    const bool quiet_active = quiet_mode::Active();
+    const bool sleeping_quiet = quiet_active && Runtime::Sleeping(state.phase) &&
+                                !wake_sequence_active.load();
+    r.SyncQuietMark(sc, sleeping_quiet ||
+        (quiet_active && standby && !r.cue_active &&
+         r.conversation_pose == ConversationPose::None &&
+         !voice::IsBusy() && !VoicePending() && !r.own_speech &&
+         !wake_sequence_active.load()));
 }
 
 } // namespace stackchan::stage1
