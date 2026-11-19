@@ -1,4 +1,5 @@
 #include "voice_client.h"
+#include "quiet_mode.h"
 #include <application.h>
 #include <esp_log.h>
 #include <esp_random.h>
@@ -56,6 +57,18 @@ void Cancel() {
 bool Request(const Settings& config, const char* kind, const char* text) {
     (void)config;
     if (!kind || !text || !text[0] || std::strlen(text) > 512) return false;
+    // Only autonomous announcements are silenced. Touch/wake-word and
+    // explicitly requested speech must continue to work in quiet mode.
+    const bool autonomous = std::strcmp(kind, "snore") == 0 ||
+                            std::strcmp(kind, "sleep_talk") == 0 ||
+                            std::strcmp(kind, "dream_remark") == 0 ||
+                            std::strcmp(kind, "bedtime") == 0 ||
+                            std::strcmp(kind, "morning") == 0 ||
+                            std::strcmp(kind, "timer") == 0;
+    if (autonomous && quiet_mode::Active()) {
+        ESP_LOGI(TAG, "[SPEECH] kind=%s phase=suppressed_quiet", kind);
+        return false;
+    }
     const bool queued = Application::GetInstance().RequestAnnouncement(kind, text);
     ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s transport=ws12800",
              kind, queued ? "requested" : "busy_or_unavailable");
