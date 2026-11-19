@@ -358,6 +358,16 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
         return true;
     }
 
+    // A snore/sleep-talk TTS can restore neutral AFTER the announcement
+    // transport has been cleared. It is not an external wake action.
+    // The explicit wake sequence still takes precedence.
+    if (strcmp(emotion, "neutral") == 0 &&
+        stackchan::stage1::IsNapSleepActive() &&
+        !stackchan::stage1::IsWakeSequenceActive()) {
+        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored nap trailing neutral");
+        return true;
+    }
+
     // The bedtime announcement finishes before Xiaozhi restores its neutral
     // emotion. Keep the scheduled NightMessage -> NightYawn -> NightSleep
     // sequence intact; ordinary emotions still use the existing path.
@@ -906,7 +916,15 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // without clearing unread subtitles or restarting the speech transport.
     if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
         strcmp(status, Lang::Strings::STANDBY) == 0) {
-        if (speech_emotion_active_) {
+        if (stackchan::stage1::IsNapSleepActive() &&
+            !stackchan::stage1::IsWakeSequenceActive()) {
+            // Auto sleep voice is not a conversation. Restore the sleep face
+            // rather than a pre-reply neutral expression on STANDBY.
+            avatar.setEmotion(Emotion::Sleepy);
+            if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
+                blink->resyncEyeWeights();
+            ESP_LOGI(TAG, "[SLEEP_DIAG] restored nap face after speech");
+        } else if (speech_emotion_active_) {
             avatar.setEmotion(speech_emotion_before_);
             if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
                 blink->resyncEyeWeights();
