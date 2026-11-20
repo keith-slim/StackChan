@@ -329,10 +329,10 @@ void StackChanAvatarDisplay::SetupUI()
     idle_recovery_timer_ = lv_timer_create([](lv_timer_t* timer) {
         auto* self = static_cast<StackChanAvatarDisplay*>(lv_timer_get_user_data(timer));
         if (!self || !GetStackChan().hasAvatar()) return;
-        const auto state = CurrentIdleState(
+        const auto decision = stackchan::idle_lifecycle::Resolve(CurrentIdleState(
             Application::GetInstance().GetDeviceState() == kDeviceStateIdle,
-            self->is_sleeping_);
-        if (!stackchan::idle_lifecycle::AudioFinished(state)) return;
+            self->is_sleeping_));
+        if (!decision.audio_finished) return;
         if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_) {
             ESP_LOGW(TAG, "[IDLE_RECOVERY] completing missed speech end (mouth=%d subtitle=%d)",
                      self->speaking_modifier_id_ >= 0, self->subtitle_speaking_);
@@ -412,20 +412,19 @@ void StackChanAvatarDisplay::FinishSpeakingAnimation()
 
 void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
 {
-    auto state = CurrentIdleState(device_idle, is_sleeping_);
-    // A missed STANDBY must also release the listening/thinking face. Do this
-    // before enabling idle expressions so they cannot inherit hidden eyes.
-    if (stackchan::idle_lifecycle::AudioFinished(state) &&
-        state.conversation_active && !state.scene_active && !state.wake_active) {
-        stackchan::stage1::SetConversationPose(GetStackChan(),
-                                                stackchan::stage1::ConversationPose::None);
-        state = CurrentIdleState(device_idle, is_sleeping_);
+    auto decision = stackchan::idle_lifecycle::Resolve(
+        CurrentIdleState(device_idle, is_sleeping_));
+    // Restore the existing conversation face before enabling idle expressions.
+    if (decision.restore_conversation_face) {
+        stackchan::stage1::SetConversationPose(
+            GetStackChan(), stackchan::stage1::ConversationPose::None);
+        decision = stackchan::idle_lifecycle::Resolve(
+            CurrentIdleState(device_idle, is_sleeping_));
         ESP_LOGI(TAG, "[IDLE_RECOVERY] conversation face restored");
     }
-    // One policy controls the update cadence and idle modifiers in normal
-    // standby, nap/sleep, speech and missed-STANDBY recovery.
-    const bool normal_rate = stackchan::idle_lifecycle::AudioFinished(state);
-    const bool idle = stackchan::idle_lifecycle::AllowIdleModifiers(state);
+    // Shared policy controls update cadence, modifiers and Stage1 standby.
+    const bool normal_rate = decision.audio_finished;
+    const bool idle = decision.allow_idle_modifiers;
     // Keep Stage1's standby state in sync with recovered application idle.
     // A missing STANDBY must not leave quiet decorations or sleep scheduling
     // blocked; never signal standby while an announcement is active.
