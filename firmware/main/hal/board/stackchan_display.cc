@@ -428,7 +428,7 @@ void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
     // Keep Stage1's standby state in sync with recovered application idle.
     // A missing STANDBY must not leave quiet decorations or sleep scheduling
     // blocked; never signal standby while an announcement is active.
-    if (normal_rate && _is_xiaozhi_ready)
+    if (normal_rate && hal_bridge::is_xiaozhi_ready())
         stackchan::stage1::OnStandby(true);
     if (normal_rate && !_is_xiaozhi_idle.load())
         ESP_LOGI(TAG, "[IDLE_RECOVERY] normal StackChan update cadence restored");
@@ -990,7 +990,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
 
     auto& avatar = stackchan.avatar();
-    auto& motion = stackchan.motion();
 
     DisplayLockGuard lock(this);
 
@@ -1031,8 +1030,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     // Bridge the existing Xiaozhi state transitions to the S3 avatar only.
     // No new speech transport, microphone task or swipe gesture handler.
-    bool is_idle      = false;
-    bool is_listening = false;
+    bool is_idle = false;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         FinishSpeakingAnimation();
