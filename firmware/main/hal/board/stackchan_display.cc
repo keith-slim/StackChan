@@ -6,6 +6,7 @@
 #include "stackchan_display.h"
 #include <application.h>
 #include <stackchan/port_stage1/port_stage1.h>
+#include <stackchan/modifiers/idle_lifecycle.h>
 #include <stackchan/port_stage1/speech_emotion.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -32,6 +33,18 @@ using namespace stackchan::avatar;
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_material_symbols_30_4);
+
+namespace {
+stackchan::idle_lifecycle::State CurrentIdleState(bool device_idle, bool explicit_sleep)
+{
+    return {device_idle,
+            Application::GetInstance().IsAnnouncementActive(),
+            stackchan::stage1::IsAutonomousSceneActive(),
+            stackchan::stage1::IsConversationFaceActive(),
+            stackchan::stage1::IsWakeSequenceActive(),
+            explicit_sleep};
+}
+}
 
 // Have to register themes, so the asset apply can update the text font
 void StackChanAvatarDisplay::InitializeLcdThemes()
@@ -307,24 +320,22 @@ void StackChanAvatarDisplay::SetupUI()
     auto config        = hal_bridge::get_xiaozhi_config();
     idle_motion_level_ = config.idleRandomMovementLevel;
 
-    // Recover an idle display even if its final STANDBY callback was lost.
-    // LVGL timers execute under the LVGL task's existing display lock.
+    // Apply one idle/voice lifecycle policy after a missed STANDBY.
+    // LVGL timers run under the LVGL task's existing display lock.
     idle_recovery_timer_ = lv_timer_create([](lv_timer_t* timer) {
         auto* self = static_cast<StackChanAvatarDisplay*>(lv_timer_get_user_data(timer));
-        if (!self || !GetStackChan().hasAvatar() ||
-            Application::GetInstance().GetDeviceState() != kDeviceStateIdle ||
-            Application::GetInstance().IsAnnouncementActive() ||
-            stackchan::stage1::IsConversationFaceActive() ||
-            stackchan::stage1::IsWakeSequenceActive() || self->is_sleeping_)
-            return;
-        auto& sc = GetStackChan();
+        if (!self || !GetStackChan().hasAvatar()) return;
+        const auto state = CurrentIdleState(
+            Application::GetInstance().GetDeviceState() == kDeviceStateIdle,
+            self->is_sleeping_);
+        if (!stackchan::idle_lifecycle::AudioFinished(state)) return;
         if (self->speaking_modifier_id_ >= 0) {
-            sc.removeModifier(self->speaking_modifier_id_);
-            self->speaking_modifier_id_ = -1;
-            sc.avatar().mouth().setWeight(0);
+            self->FinishSpeakingAnimation();
             ESP_LOGW(TAG, "[IDLE_RECOVERY] cleared stale speaking animation");
         }
-        self->ReconcileIdleModifiers(true);
+        // Do not recreate normal idle motion while Stage1 owns a sleep,
+        // wake, conversation or theatre animation.
+        self->ReconcileIdleModifiers(stackchan::idle_lifecycle::AllowIdleModifiers(state));
     }, 2000, this);
 
     ESP_LOGI(TAG, "Avatar created and started");
@@ -361,6 +372,15 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
             idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
             return;
     }
+}
+
+void StackChanAvatarDisplay::FinishSpeakingAnimation()
+{
+    if (speaking_modifier_id_ < 0) return;
+    auto& stackchan = GetStackChan();
+    stackchan.removeModifier(speaking_modifier_id_);
+    speaking_modifier_id_ = -1;
+    stackchan.avatar().mouth().setWeight(0);
 }
 
 void StackChanAvatarDisplay::ReconcileIdleModifiers(bool idle)
@@ -994,11 +1014,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             subtitle_preview_shown_ = false;
             BeginSubtitleReview();
         }
-        if (speaking_modifier_id_ >= 0) {
-            stackchan.removeModifier(speaking_modifier_id_);
-            avatar.mouth().setWeight(0);
-            speaking_modifier_id_ = -1;
-        }
+        FinishSpeakingAnimation();
 
         GetHAL().setRgbColor(0, 0, 50, 0);
         GetHAL().refreshRgb();
@@ -1011,12 +1027,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         }
         _is_xiaozhi_ready = true;
 
-        if (speaking_modifier_id_ >= 0) {
-            // Stop speaking
-            stackchan.removeModifier(speaking_modifier_id_);
-            avatar.mouth().setWeight(0);
-            speaking_modifier_id_ = -1;
-        }
+        FinishSpeakingAnimation();
 
         is_idle = true;
 
@@ -1070,7 +1081,8 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         // sleepy expression removed both idle modifiers.
         if (is_sleeping_) avatar.setSpeech("");
         is_sleeping_ = false;
-        ReconcileIdleModifiers(true);
+        const auto state = CurrentIdleState(true, is_sleeping_);
+        ReconcileIdleModifiers(stackchan::idle_lifecycle::AllowIdleModifiers(state));
         _is_xiaozhi_idle = true;
     } else {
         ReconcileIdleModifiers(false);
