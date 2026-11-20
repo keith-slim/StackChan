@@ -223,7 +223,7 @@ struct Runtime {
             f.setRotation(rotation);
         }
     };
-    bool theatre_face_saved = false;
+    bool scene_face_saved = false;
     FeaturePose saved_left, saved_right, saved_mouth;
     // The S3 conversation face owns only visuals; stage-1 still owns
     // scheduling, servo actions, sleep and the existing chat/audio flow.
@@ -414,12 +414,12 @@ struct Runtime {
             startled_face_active = false;
         }
         if (own_face && restore) sc.avatar().setEmotion(saved_emotion);
-        if (theatre_face_saved && restore) {
+        if (scene_face_saved && restore) {
             saved_left.Restore(sc.avatar().leftEye());
             saved_right.Restore(sc.avatar().rightEye());
             saved_mouth.Restore(sc.avatar().mouth());
         }
-        theatre_face_saved = false;
+        scene_face_saved = false;
         if (own_led && !led_held && restore) {
             sc.leftNeonLight().setColor(0,0,0);
             sc.rightNeonLight().setColor(0,0,0);
@@ -458,11 +458,13 @@ struct Runtime {
         }
         if (!Auto(next)) return;
         if (!continuing) saved_emotion = sc.avatar().getEmotion();
-        if (next == Phase::Theatre && !continuing) {
+        // All autonomous scenes can alter eye/mouth geometry, not only theatre.
+        // Preserve it once across the entire nap/night/wake sequence.
+        if (!continuing) {
             saved_left = FeaturePose::Capture(sc.avatar().leftEye());
             saved_right = FeaturePose::Capture(sc.avatar().rightEye());
             saved_mouth = FeaturePose::Capture(sc.avatar().mouth());
-            theatre_face_saved = true;
+            scene_face_saved = true;
         }
         own_face = true;
         owns_auto.store(true);
@@ -719,6 +721,12 @@ struct Runtime {
         // A live conversation owns the face/LED; gestures only move the neck.
         own_face = idle.load();
         saved_emotion = sc.avatar().getEmotion();
+        if (own_face) {
+            saved_left = FeaturePose::Capture(sc.avatar().leftEye());
+            saved_right = FeaturePose::Capture(sc.avatar().rightEye());
+            saved_mouth = FeaturePose::Capture(sc.avatar().mouth());
+            scene_face_saved = true;
+        }
         auto& motion = sc.motion();
         saved_angles = motion.getCurrentAngles();
         own_neck = true;
