@@ -133,8 +133,8 @@ static void _head_touch_update_task(void* param)
 
     GestureRecognizer recognizer;
     HeadPetGesture gesture;
-    // Sleeping head contact wakes only on the existing pet swipe gesture.
-    // Keep the post-wake release out of the normal pet handler.
+    // Do not deliver head-pad gestures during sleep or replay a gesture
+    // that began during sleep after another wake source becomes active.
     bool suppress_until_release = false;
     bool sleep_diag_read_failed = false;
 
@@ -159,23 +159,14 @@ static void _head_touch_update_task(void* param)
         si12t_parse_touch_result_to(touch_result, data.intensity);
         data.timestamp = xTaskGetTickCount();
 
-        // Keep tracking the same gesture while asleep and awake; only its
-        // destination differs. A touch alone never wakes the head sensor.
+        // The normal pet gesture still works while awake; sleep never
+        // accepts a head-pad gesture as a wake request.
         gesture = recognizer.update(data);
         const bool touched = data.is_touched();
         if (stackchan::stage1::IsSleepWakeEligible()) {
             suppress_until_release = true;
-            if (gesture == HeadPetGesture::SwipeForward ||
-                gesture == HeadPetGesture::SwipeBackward) {
-                const bool accepted = stackchan::stage1::RequestWakeTouch("head_pet_swipe");
-                ESP_LOGI("HEAD_TOUCH_DIAG",
-                         "sleep swipe_wake accepted=%d direction=%s raw=0x%02x ch=%u,%u,%u",
-                         accepted, gesture == HeadPetGesture::SwipeForward ? "forward" : "backward",
-                         touch_result, data.intensity[0], data.intensity[1], data.intensity[2]);
-            }
         } else if (suppress_until_release) {
-            // Do not replay the swipe or release used to wake the avatar as
-            // an ordinary pet gesture that could reset its wake animation.
+            // Discard the rest of a gesture that started during sleep.
             if (!touched) suppress_until_release = false;
         } else if (gesture != HeadPetGesture::None &&
                    !stackchan::stage1::IsWakeSequenceActive()) {
