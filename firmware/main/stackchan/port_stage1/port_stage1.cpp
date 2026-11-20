@@ -291,18 +291,19 @@ struct Runtime {
         quiet_mark->Render(mouth);
     }
 
-    // The weather badge stays visible across ordinary face changes. Hide all
-    // weather decorations while the actual speech bubble is visible so the
-    // badge, scarf and heat effects cannot overlap its contents. Using the
-    // bubble itself also covers subtitle review after audio playback ends.
+    // The weather badge does not overlap the speech bubble and stays visible.
+    // Only the face-level temperature decoration (scarf or heat drops) yields
+    // while the actual bubble is visible, including subtitle review after
+    // audio playback ends.
     void SyncWeather(StackChan& sc, uint32_t now, bool suppress_comfort) {
         auto appearance = environment::ReadAppearance();
         const auto& bubble = sc.avatar().getKeyElements().speechBubble;
-        if (!appearance.visible || (bubble && bubble->getVisible())) {
+        if (!appearance.visible) {
             weather_face.reset();
             return;
         }
-        if (suppress_comfort) appearance.comfort = weather::Comfort::None;
+        if (suppress_comfort || (bubble && bubble->getVisible()))
+            appearance.comfort = weather::Comfort::None;
         if (!weather_face)
             weather_face = std::make_unique<AvatarWeatherFace>(lv_screen_active());
         weather_face->Render(appearance, now);
@@ -1253,8 +1254,8 @@ void Update(StackChan& sc) {
          !wake_sequence_active.load()));
     // Normal Xiaozhi conversation speech is not a Stage-1 announcement, so
     // voice::IsBusy() alone cannot identify it. Hide temperature comfort
-    // overlays for every non-idle device state. SyncWeather separately hides
-    // every weather decoration whenever the speech bubble is actually shown.
+    // overlays for every non-idle device state. SyncWeather also suppresses
+    // only the overlapping temperature decoration while a bubble is shown.
     const bool xiaozhi_busy =
         Application::GetInstance().GetDeviceState() != kDeviceStateIdle;
     r.SyncWeather(sc, now, xiaozhi_busy || r.own_face || Runtime::Sleeping(state.phase) ||
