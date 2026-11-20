@@ -401,6 +401,8 @@ struct Runtime {
         avatar_dream::End();
     }
     void Release(StackChan& sc, bool restore) {
+        // Releasing a sleep scene must restore other LED owners as well.
+        GetHAL().setSleepRgbBlackout(false);
         // Also covers explicit activity/gesture interruptions which do not
         // pass through Begin(), so night sleep never leaves the LCD dark.
         RestoreNightBacklight();
@@ -446,7 +448,11 @@ struct Runtime {
             waking_from_sleep = Sleeping(phase);
             last_sleep_elapsed = now - phase_at;
         }
-        if (!Sleeping(next)) sleep_home_pending = false;
+        if (!Sleeping(next)) {
+            sleep_home_pending = false;
+            // A continuous sleep-to-wake sequence does not pass Release().
+            if (Sleeping(phase)) GetHAL().setSleepRgbBlackout(false);
+        }
         phase = next;
         kind = next_kind;
         phase_at = now;
@@ -550,6 +556,7 @@ struct Runtime {
             led_held = false;
             sc.leftNeonLight().setColor(0, 0, 0);
             sc.rightNeonLight().setColor(0, 0, 0);
+            GetHAL().setSleepRgbBlackout(true);
             ESP_LOGI(LOG_TAG, "sleep action: settled; LEDs off");
             if (next == Phase::NapSleep) avatar_dream::Begin();
         } else if (next == Phase::NapWake || next == Phase::NightWake) {
