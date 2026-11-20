@@ -1249,7 +1249,13 @@ void Update(StackChan& sc) {
          r.conversation_pose == ConversationPose::None &&
          !voice::IsBusy() && !VoicePending() && !r.own_speech &&
          !wake_sequence_active.load()));
-    r.SyncWeather(now, r.own_face || Runtime::Sleeping(state.phase) ||
+    // Normal Xiaozhi conversation speech is not a Stage-1 announcement, so
+    // voice::IsBusy() alone cannot identify it. Hide temperature comfort
+    // overlays for every non-idle device state while retaining the weather
+    // badge; restore them automatically when Xiaozhi returns to idle.
+    const bool xiaozhi_busy =
+        Application::GetInstance().GetDeviceState() != kDeviceStateIdle;
+    r.SyncWeather(now, xiaozhi_busy || r.own_face || Runtime::Sleeping(state.phase) ||
                        voice::IsBusy() || VoicePending());
 }
 
