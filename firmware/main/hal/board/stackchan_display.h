@@ -58,6 +58,7 @@ private:
     bool speech_conversation_running_ = false; // LISTENING/SPEAKING, not actual sleep.
     stackchan::avatar::Emotion speech_emotion_before_ = stackchan::avatar::Emotion::Neutral;
 
+    void FinishSpeakingAnimation();
     void ReconcileIdleModifiers(bool idle);
     void AdvanceSubtitle();
     void AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary);
