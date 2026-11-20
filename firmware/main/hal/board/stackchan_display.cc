@@ -333,8 +333,7 @@ void StackChanAvatarDisplay::SetupUI()
             Application::GetInstance().GetDeviceState() == kDeviceStateIdle,
             self->is_sleeping_);
         if (!stackchan::idle_lifecycle::AudioFinished(state)) return;
-        if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_ ||
-            self->speech_emotion_active_) {
+        if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_) {
             ESP_LOGW(TAG, "[IDLE_RECOVERY] completing missed speech end (mouth=%d subtitle=%d)",
                      self->speaking_modifier_id_ >= 0, self->subtitle_speaking_);
             self->FinishSpeakingAnimation();
