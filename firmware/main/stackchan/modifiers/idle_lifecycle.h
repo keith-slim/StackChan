@@ -19,16 +19,23 @@ struct State {
     bool explicit_sleep;
 };
 
-inline bool AudioFinished(const State& state)
-{
-    return state.device_idle && !state.announcement_active;
-}
+// Add future idle/scene/decoration decisions here rather than duplicating
+// state checks in normal status callbacks and missed-STANDBY recovery.
+struct Decision {
+    bool audio_finished;
+    bool restore_conversation_face;
+    bool allow_idle_modifiers;
+};
 
-inline bool AllowIdleModifiers(const State& state)
+inline Decision Resolve(const State& state)
 {
-    return AudioFinished(state) && !state.scene_active &&
-           !state.conversation_active && !state.wake_active &&
-           !state.explicit_sleep;
+    const bool finished = state.device_idle && !state.announcement_active;
+    const bool restore_conversation =
+        finished && state.conversation_active &&
+        !state.scene_active && !state.wake_active;
+    return {finished, restore_conversation,
+            finished && !state.scene_active && !state.conversation_active &&
+            !state.wake_active && !state.explicit_sleep};
 }
 
 } // namespace stackchan::idle_lifecycle
