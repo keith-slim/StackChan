@@ -60,7 +60,6 @@ private:
 
     void FinishSpeakingAnimation();
     void ReconcileIdleLifecycle(bool device_idle);
-    void ReconcileIdleModifiers(bool idle);
     void AdvanceSubtitle();
     void AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary);
     void BeginSubtitleReview();
