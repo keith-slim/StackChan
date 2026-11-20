@@ -23,6 +23,7 @@
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 
 using namespace stackchan;
@@ -35,6 +36,9 @@ LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_material_symbols_30_4);
 
 namespace {
+// Read by the StackChan update task and written under the display lock.
+static std::atomic_bool _is_xiaozhi_idle{false};
+
 stackchan::idle_lifecycle::State CurrentIdleState(bool device_idle, bool explicit_sleep)
 {
     return {device_idle,
@@ -334,9 +338,9 @@ void StackChanAvatarDisplay::SetupUI()
                      self->speaking_modifier_id_ >= 0, self->subtitle_speaking_);
             self->FinishSpeakingAnimation();
         }
-        // Do not recreate normal idle motion while Stage1 owns a sleep,
-        // wake, conversation or theatre animation.
-        self->ReconcileIdleModifiers(stackchan::idle_lifecycle::AllowIdleModifiers(state));
+        // Restore both idle modifiers and the StackChan update cadence.
+        // The normal STANDBY callback uses this same reconciliation.
+        self->ReconcileIdleLifecycle(true);
     }, 2000, this);
 
     ESP_LOGI(TAG, "Avatar created and started");
@@ -389,6 +393,18 @@ void StackChanAvatarDisplay::FinishSpeakingAnimation()
     stackchan.removeModifier(speaking_modifier_id_);
     speaking_modifier_id_ = -1;
     stackchan.avatar().mouth().setWeight(0);
+}
+
+void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
+{
+    const auto state = CurrentIdleState(device_idle, is_sleeping_);
+    ReconcileIdleModifiers(stackchan::idle_lifecycle::AllowIdleModifiers(state));
+    // Motion animations advance by a fixed 20ms per update; a stale
+    // conversation-rate delay makes normal random movement visibly slow.
+    const bool normal_rate = stackchan::idle_lifecycle::AudioFinished(state);
+    if (normal_rate && !_is_xiaozhi_idle.load())
+        ESP_LOGI(TAG, "[IDLE_RECOVERY] normal StackChan update cadence restored");
+    _is_xiaozhi_idle.store(normal_rate);
 }
 
 void StackChanAvatarDisplay::ReconcileIdleModifiers(bool idle)
@@ -929,14 +945,13 @@ void StackChanAvatarDisplay::SetTheme(Theme* theme)
 
 #include <hal/board/hal_bridge.h>
 static bool _is_xiaozhi_ready = false;
-static bool _is_xiaozhi_idle  = false;
 bool hal_bridge::is_xiaozhi_ready()
 {
     return _is_xiaozhi_ready;
 }
 bool hal_bridge::is_xiaozhi_idle()
 {
-    return _is_xiaozhi_idle;
+    return _is_xiaozhi_idle.load();
 }
 
 void StackChanAvatarDisplay::SetStatus(const char* status)
@@ -1079,12 +1094,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         // sleepy expression removed both idle modifiers.
         if (is_sleeping_) avatar.setSpeech("");
         is_sleeping_ = false;
-        const auto state = CurrentIdleState(true, is_sleeping_);
-        ReconcileIdleModifiers(stackchan::idle_lifecycle::AllowIdleModifiers(state));
-        _is_xiaozhi_idle = true;
+        ReconcileIdleLifecycle(true);
     } else {
-        ReconcileIdleModifiers(false);
-        _is_xiaozhi_idle = false;
+        ReconcileIdleLifecycle(false);
     }
 
     // The startup announcement is not user activity: keep the night/nap
