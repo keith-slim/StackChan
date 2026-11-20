@@ -425,10 +425,10 @@ void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
     // Shared policy controls update cadence, modifiers and Stage1 standby.
     const bool normal_rate = decision.audio_finished;
     const bool idle = decision.allow_idle_modifiers;
-    // Keep Stage1's standby state in sync with recovered application idle.
-    // A missing STANDBY must not leave quiet decorations or sleep scheduling
-    // blocked; never signal standby while an announcement is active.
-    if (normal_rate && hal_bridge::is_xiaozhi_ready())
+    // An actual application idle state is sufficient to restore Stage1.
+    // Requiring an earlier STANDBY callback would defeat missed-STANDBY
+    // recovery and leave the nap scheduler stuck in non-standby.
+    if (normal_rate)
         stackchan::stage1::OnStandby(true);
     if (normal_rate && !_is_xiaozhi_idle.load())
         ESP_LOGI(TAG, "[IDLE_RECOVERY] normal StackChan update cadence restored");
