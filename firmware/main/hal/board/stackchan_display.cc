@@ -426,6 +426,11 @@ void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
     // standby, nap/sleep, speech and missed-STANDBY recovery.
     const bool normal_rate = stackchan::idle_lifecycle::AudioFinished(state);
     const bool idle = stackchan::idle_lifecycle::AllowIdleModifiers(state);
+    // Keep Stage1's standby state in sync with recovered application idle.
+    // A missing STANDBY must not leave quiet decorations or sleep scheduling
+    // blocked; never signal standby while an announcement is active.
+    if (normal_rate && _is_xiaozhi_ready)
+        stackchan::stage1::OnStandby(true);
     if (normal_rate && !_is_xiaozhi_idle.load())
         ESP_LOGI(TAG, "[IDLE_RECOVERY] normal StackChan update cadence restored");
     _is_xiaozhi_idle.store(normal_rate);
@@ -1096,9 +1101,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         ReconcileIdleLifecycle(false);
     }
 
-    // The startup announcement is not user activity: keep the night/nap
-    // scheduler's standby state until normal playback has finished.
-    if (!standalone_speech) stackchan::stage1::OnStandby(is_idle);
+    // Non-standby transitions still interrupt ordinary idle activity.
+    // Standby restoration is shared with the missed-STANDBY recovery above.
+    // Startup/standalone speech must not interrupt the sleep scheduler.
+    if (!standalone_speech && !is_idle) stackchan::stage1::OnStandby(false);
 }
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)
