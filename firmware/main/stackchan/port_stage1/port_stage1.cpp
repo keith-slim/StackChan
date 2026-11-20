@@ -291,12 +291,14 @@ struct Runtime {
         quiet_mark->Render(mouth);
     }
 
-    // The weather badge stays visible across ordinary face changes. Comfort
-    // decorations yield to conversation, actions and sleep faces to avoid
-    // covering their more important expression.
-    void SyncWeather(uint32_t now, bool suppress_comfort) {
+    // The weather badge stays visible across ordinary face changes. Hide all
+    // weather decorations while the actual speech bubble is visible so the
+    // badge, scarf and heat effects cannot overlap its contents. Using the
+    // bubble itself also covers subtitle review after audio playback ends.
+    void SyncWeather(StackChan& sc, uint32_t now, bool suppress_comfort) {
         auto appearance = environment::ReadAppearance();
-        if (!appearance.visible) {
+        const auto& bubble = sc.avatar().getKeyElements().speechBubble;
+        if (!appearance.visible || (bubble && bubble->getVisible())) {
             weather_face.reset();
             return;
         }
@@ -1147,7 +1149,7 @@ void Update(StackChan& sc) {
     if (r.cue_active) {
         r.SyncQuietMark(sc, false);
         r.TickCue(sc, now);
-        r.SyncWeather(now, true);
+        r.SyncWeather(sc, now, true);
         return;
     }
     // Explicit conversation state always wins over idle skits and sleep
@@ -1155,7 +1157,7 @@ void Update(StackChan& sc) {
     if (r.conversation_pose != ConversationPose::None) {
         r.SyncQuietMark(sc, false);
         r.DrawConversation(sc, now);
-        r.SyncWeather(now, true);
+        r.SyncWeather(sc, now, true);
         return;
     }
 
@@ -1251,12 +1253,12 @@ void Update(StackChan& sc) {
          !wake_sequence_active.load()));
     // Normal Xiaozhi conversation speech is not a Stage-1 announcement, so
     // voice::IsBusy() alone cannot identify it. Hide temperature comfort
-    // overlays for every non-idle device state while retaining the weather
-    // badge; restore them automatically when Xiaozhi returns to idle.
+    // overlays for every non-idle device state. SyncWeather separately hides
+    // every weather decoration whenever the speech bubble is actually shown.
     const bool xiaozhi_busy =
         Application::GetInstance().GetDeviceState() != kDeviceStateIdle;
-    r.SyncWeather(now, xiaozhi_busy || r.own_face || Runtime::Sleeping(state.phase) ||
-                       voice::IsBusy() || VoicePending());
+    r.SyncWeather(sc, now, xiaozhi_busy || r.own_face || Runtime::Sleeping(state.phase) ||
+                           voice::IsBusy() || VoicePending());
 }
 
 } // namespace stackchan::stage1
