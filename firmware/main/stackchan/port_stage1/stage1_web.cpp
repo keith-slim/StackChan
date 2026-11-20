@@ -205,6 +205,15 @@ Webとの接続が切れた場合は新しいIPアドレスから開き直して
 <small>明るさ・音量は本体と同じ値を保存して反映します。タイムゾーンも本体SETUPと同じ選択肢です。</small></section>
 <section id="aiSetup" class="card"><h2>AI設定</h2>
 <div id="setupAiFields"></div>
+<h3>接続先AIサーバー</h3>
+<div class="setup-row"><label>サーバーURL
+<input id="setupServerUrl" type="url" maxlength="192" autocomplete="off"
+ placeholder="http://192.168.1.254:12800" required></label>
+<button id="setupServerSave" type="button" disabled>保存</button></div>
+<small>サーバーの基底URLを指定します。保存時にOTA設定URLと会話WebSocket URLを同じ接続先へ更新します。
+パスは入力せず、例のようにスキーム・ホスト・ポートだけを指定してください。認証トークンは変更しません。
+反映には本体の再起動が必要です。</small>
+<p id="setupServerStatus" class="status"></p>
 <small>本体SETUPの「General」と共通の設定値です。保存後は次回の本体起動時に確実に適用されます。</small></section>
 <section id="appsSetup" class="card"><h2>アプリの表示・非表示</h2>
 <div id="setupAppFields"></div>
@@ -541,6 +550,28 @@ async function setupSave(field,value,app){
    (result.reboot_required?'。AI設定の実動作への反映には再起動が必要です。':'。');
  }catch(e){setupStatus.textContent='保存失敗: '+e.message;}
 }
+const setupServerUrl=document.getElementById('setupServerUrl');
+const setupServerSave=document.getElementById('setupServerSave');
+const setupServerStatus=document.getElementById('setupServerStatus');
+setupServerSave.addEventListener('click',async()=>{
+ const value=setupServerUrl.value.trim();setupServerUrl.value=value;
+ if(!setupServerUrl.reportValidity())return;
+ if(!/^https?:\/\/[^\s/?#@]+\/?$/.test(value)){
+  setupServerStatus.textContent='http:// または https:// で始まる、パスなしのURLを入力してください。';return;
+ }
+ setupServerSave.disabled=true;setupServerStatus.textContent='NVSへ保存中…';
+ try{
+  const response=await fetch('/api/stage1/setup',{method:'POST',
+   headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({field:'server_base_url',value})});
+  if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
+  const result=await response.json();
+  await setupLoad();
+  setupServerStatus.textContent='保存しました。SDバックアップは非同期です。本体を再起動すると新しい接続先を使用します。';
+  if(!result.reboot_required)setupServerStatus.textContent+=' 再起動要求を確認できませんでした。';
+ }catch(e){setupServerStatus.textContent='保存失敗: '+e.message;}
+ finally{setupServerSave.disabled=false;}
+});
 function setupField(holder,field,label,options,value,app){
  const row=document.createElement('div');row.className='setup-row';
  const caption=document.createElement('label');caption.textContent=label;
@@ -590,6 +621,8 @@ async function setupLoad(){
   setupField(device,'timezone','タイムゾーン',setupTz,d.timezone);
   setupField(ai,'idle_movement','待機中のランダム動作',[[0,'なし'],[1,'少なめ'],[2,'普通'],[3,'多め']],d.idle_movement);
   setupField(ai,'start_ai_on_boot','起動時にAIを自動開始',[[false,'無効'],[true,'有効']],d.start_ai_on_boot);
+  setupServerUrl.value=d.server_base_url||'';
+  setupServerSave.disabled=false;
   if(d.app_visibility_loaded){
    for(let i=0;i<setupAppNames.length;i++){
     const [key,label]=setupAppNames[i];

@@ -6,6 +6,8 @@
 #include <apps/common/common.h>
 #include <cJSON.h>
 #include <esp_log.h>
+#include <nvs.h>
+#include <sdkconfig.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -20,9 +22,18 @@ constexpr const char* kTimezones[] = {
     "CST-8", "JST-9", "AEST-10", "SBT-11", "NZST-12", "FJT-13", "LINT-14"
 };
 constexpr int kBrightness[] = {1, 15, 30, 45, 60, 75, 90, 100};
-constexpr size_t kMaxBody = 160;
+constexpr size_t kMaxBody = 384;
+constexpr size_t kMaxServerBase = 192;
+constexpr size_t kMaxEndpoint = 256;
+constexpr const char* kOtaNamespace = "wifi";
+constexpr const char* kOtaKey = "ota_url";
+constexpr const char* kWebsocketNamespace = "websocket";
+constexpr const char* kWebsocketKey = "url";
+constexpr const char* kOtaSuffix = "/xiaozhi/ota/";
+constexpr const char* kWebsocketSuffix = "/xiaozhi/ws";
 
 extern "C" bool stackchan_sd_nvs_backup_pending(void);
+extern "C" void stackchan_nvs_commit_observer(void);
 
 esp_err_t Reply(httpd_req_t* req, const char* status, const char* body) {
     httpd_resp_set_status(req, status);
@@ -59,6 +70,93 @@ bool MatchAi(const XiaozhiConfig_t& actual, const XiaozhiConfig_t& expected) {
 void AddBool(cJSON* root, const char* key, bool value) {
     cJSON_AddBoolToObject(root, key, value);
 }
+bool ReadStoredString(const char* name_space, const char* key,
+                      char* output, size_t capacity) {
+    if (!output || capacity == 0) return false;
+    output[0] = '\0';
+    nvs_handle_t handle = 0;
+    const esp_err_t opened = nvs_open(name_space, NVS_READONLY, &handle);
+    if (opened == ESP_ERR_NVS_NOT_FOUND) return true;
+    if (opened != ESP_OK) return false;
+    size_t length = capacity;
+    const esp_err_t read = nvs_get_str(handle, key, output, &length);
+    nvs_close(handle);
+    if (read == ESP_ERR_NVS_NOT_FOUND) {
+        output[0] = '\0';
+        return true;
+    }
+    if (read != ESP_OK) {
+        output[0] = '\0';
+        return false;
+    }
+    output[capacity - 1] = '\0';
+    return true;
+}
+bool ValidServerBase(const char* value) {
+    if (!value) return false;
+    const size_t length = std::strlen(value);
+    if (length < 8 || length > kMaxServerBase) return false;
+    const char* authority = nullptr;
+    if (std::strncmp(value, "http://", 7) == 0) authority = value + 7;
+    else if (std::strncmp(value, "https://", 8) == 0) authority = value + 8;
+    else return false;
+    if (!*authority || *authority == '/') return false;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(authority); *p; ++p) {
+        if (*p <= 0x20 || *p == 0x7f || *p == '"' || *p == '\\' ||
+            *p == '?' || *p == '#' || *p == '@') return false;
+        if (*p == '/' && p[1] != '\0') return false;
+    }
+    return true;
+}
+bool BuildServerEndpoints(const char* base, char* ota, size_t ota_capacity,
+                          char* websocket, size_t websocket_capacity) {
+    if (!ValidServerBase(base)) return false;
+    char normalized[kMaxServerBase + 1]{};
+    std::snprintf(normalized, sizeof(normalized), "%s", base);
+    const size_t length = std::strlen(normalized);
+    if (length && normalized[length - 1] == '/') normalized[length - 1] = '\0';
+    const char* authority = std::strstr(normalized, "://");
+    if (!authority) return false;
+    authority += 3;
+    const char* ws_scheme = std::strncmp(normalized, "https://", 8) == 0 ? "wss" : "ws";
+    const int ota_length = std::snprintf(ota, ota_capacity, "%s%s", normalized, kOtaSuffix);
+    const int websocket_length = std::snprintf(websocket, websocket_capacity, "%s://%s%s",
+                                               ws_scheme, authority, kWebsocketSuffix);
+    return ota_length > 0 && static_cast<size_t>(ota_length) < ota_capacity &&
+           websocket_length > 0 && static_cast<size_t>(websocket_length) < websocket_capacity;
+}
+bool ServerBaseFromOta(const char* ota, char* output, size_t capacity) {
+    if (!ota || !output || capacity == 0) return false;
+    const size_t length = std::strlen(ota);
+    const size_t suffix_length = std::strlen(kOtaSuffix);
+    if (length <= suffix_length || std::strcmp(ota + length - suffix_length, kOtaSuffix) != 0 ||
+        length - suffix_length >= capacity) return false;
+    std::memcpy(output, ota, length - suffix_length);
+    output[length - suffix_length] = '\0';
+    return ValidServerBase(output);
+}
+bool SaveServerEndpoints(const char* ota, const char* websocket) {
+    nvs_handle_t ota_handle = 0;
+    nvs_handle_t websocket_handle = 0;
+    esp_err_t error = nvs_open(kOtaNamespace, NVS_READWRITE, &ota_handle);
+    if (error == ESP_OK)
+        error = nvs_open(kWebsocketNamespace, NVS_READWRITE, &websocket_handle);
+    if (error == ESP_OK) error = nvs_set_str(ota_handle, kOtaKey, ota);
+    if (error == ESP_OK) error = nvs_set_str(websocket_handle, kWebsocketKey, websocket);
+    if (error == ESP_OK) error = nvs_commit(ota_handle);
+    if (error == ESP_OK) error = nvs_commit(websocket_handle);
+    if (websocket_handle) nvs_close(websocket_handle);
+    if (ota_handle) nvs_close(ota_handle);
+    if (error != ESP_OK) return false;
+    stackchan_nvs_commit_observer();
+    char confirmed_ota[kMaxEndpoint]{};
+    char confirmed_websocket[kMaxEndpoint]{};
+    return ReadStoredString(kOtaNamespace, kOtaKey, confirmed_ota, sizeof(confirmed_ota)) &&
+           ReadStoredString(kWebsocketNamespace, kWebsocketKey,
+                            confirmed_websocket, sizeof(confirmed_websocket)) &&
+           std::strcmp(confirmed_ota, ota) == 0 &&
+           std::strcmp(confirmed_websocket, websocket) == 0;
+}
 }  // namespace
 
 esp_err_t Read(httpd_req_t* request) {
@@ -74,6 +172,16 @@ esp_err_t Read(httpd_req_t* request) {
     const auto ai = hal.getXiaozhiConfig();
     cJSON_AddNumberToObject(root, "idle_movement", ai.idleRandomMovementLevel);
     AddBool(root, "start_ai_on_boot", ai.startAiAgentOnBoot);
+
+    char ota_url[kMaxEndpoint]{};
+    char server_base[kMaxServerBase + 1]{};
+    if (!ReadStoredString(kOtaNamespace, kOtaKey, ota_url, sizeof(ota_url))) {
+        cJSON_Delete(root);
+        return Reply(request, "500 Internal Server Error", "{\"error\":\"server setting unavailable\"}");
+    }
+    if (!ota_url[0]) std::snprintf(ota_url, sizeof(ota_url), "%s", CONFIG_OTA_URL);
+    if (!ServerBaseFromOta(ota_url, server_base, sizeof(server_base))) server_base[0] = '\0';
+    cJSON_AddStringToObject(root, "server_base_url", server_base);
 
     hal_toggles::ToggleStates states{};
     const bool loaded = hal_toggles::load_states(states);
@@ -102,6 +210,7 @@ esp_err_t Read(httpd_req_t* request) {
     // settings response: otherwise the browser might save missing defaults.
     constexpr const char* required[] = {
         "brightness", "volume", "timezone", "idle_movement", "start_ai_on_boot",
+        "server_base_url",
         "app_visibility_loaded", "account_username", "device_name",
         "firmware_version", "mac", "battery", "charging", "sd_pending"
     };
@@ -191,6 +300,16 @@ esp_err_t Write(httpd_req_t* request) {
             GetHAL().setXiaozhiConfig(ai);
             saved = MatchAi(GetHAL().getXiaozhiConfig(), ai);
             needs_restart = true; // Matches SETUP application's warm-reboot semantics.
+        }
+    } else if (valid && std::strcmp(field, "server_base_url") == 0) {
+        const char* base = cJSON_IsString(value) ? value->valuestring : nullptr;
+        char ota_url[kMaxEndpoint]{};
+        char websocket_url[kMaxEndpoint]{};
+        valid = BuildServerEndpoints(base, ota_url, sizeof(ota_url),
+                                     websocket_url, sizeof(websocket_url));
+        if (valid) {
+            saved = SaveServerEndpoints(ota_url, websocket_url);
+            needs_restart = true;
         }
     } else if (valid && std::strcmp(field, "app_visibility") == 0) {
         const cJSON* app_json = cJSON_GetObjectItemCaseSensitive(root, "app");
