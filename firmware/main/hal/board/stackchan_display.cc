@@ -398,17 +398,14 @@ void StackChanAvatarDisplay::FinishSpeakingAnimation()
 void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
 {
     const auto state = CurrentIdleState(device_idle, is_sleeping_);
-    ReconcileIdleModifiers(stackchan::idle_lifecycle::AllowIdleModifiers(state));
-    // Motion animations advance by a fixed 20ms per update; a stale
-    // conversation-rate delay makes normal random movement visibly slow.
+    // One policy controls the update cadence and idle modifiers in normal
+    // standby, nap/sleep, speech and missed-STANDBY recovery.
     const bool normal_rate = stackchan::idle_lifecycle::AudioFinished(state);
+    const bool idle = stackchan::idle_lifecycle::AllowIdleModifiers(state);
     if (normal_rate && !_is_xiaozhi_idle.load())
         ESP_LOGI(TAG, "[IDLE_RECOVERY] normal StackChan update cadence restored");
     _is_xiaozhi_idle.store(normal_rate);
-}
 
-void StackChanAvatarDisplay::ReconcileIdleModifiers(bool idle)
-{
     auto& sc = GetStackChan();
     if (!idle) {
         if (idle_motion_modifier_id_ >= 0) {
@@ -515,7 +512,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
             is_sleeping_ = true;
 
             ESP_LOGW(TAG, "Stop idle motion");
-            ReconcileIdleModifiers(false);
+            ReconcileIdleLifecycle(Application::GetInstance().GetDeviceState() == kDeviceStateIdle);
             auto& motion = GetStackChan().motion();
             motion.pitchServo().moveWithSpeed(0, 80);
         }
