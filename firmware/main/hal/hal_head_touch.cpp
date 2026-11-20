@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include <stackchan/port_stage1/port_stage1.h>
 #include "drivers/Si12T/Si12T.h"
 #include "board/hal_bridge.h"
 #include <mooncake_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_log.h>
 
 static const std::string_view _tag = "HAL-HeadTouch";
 
@@ -104,6 +106,12 @@ public:
         return gesture;
     }
 
+    void reset()
+    {
+        current_state = TouchState::IDLE;
+        initial_position = 0;
+    }
+
     void set_config(const TouchConfig& cfg)
     {
         config = cfg;
@@ -125,18 +133,44 @@ static void _head_touch_update_task(void* param)
 
     GestureRecognizer recognizer;
     HeadPetGesture gesture;
+    // Do not deliver head-pad gestures during sleep or replay a gesture
+    // that began during sleep after another wake source becomes active.
+    bool suppress_until_release = false;
+    bool sleep_diag_read_failed = false;
 
     vTaskDelay(pdMS_TO_TICKS(200));
 
     while (1) {
         // Read data
-        si12t_read_touch_result(si12t, &touch_result);
+        const esp_err_t read_result = si12t_read_touch_result(si12t, &touch_result);
+        if (read_result != ESP_OK) {
+            if (stackchan::stage1::IsSleepWakeEligible() && !sleep_diag_read_failed)
+                ESP_LOGW("HEAD_TOUCH_DIAG", "sleep read_error=%s; discarded stale sample",
+                         esp_err_to_name(read_result));
+            sleep_diag_read_failed = true;
+            // A failed I2C read must never count as a fresh touch or a
+            // swipe. Discard the partial gesture, without synthesizing a
+            // release event for the existing awake pet behavior.
+            recognizer.reset();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        sleep_diag_read_failed = false;
         si12t_parse_touch_result_to(touch_result, data.intensity);
         data.timestamp = xTaskGetTickCount();
 
-        // Update and fire event
+        // The normal pet gesture still works while awake; sleep never
+        // accepts a head-pad gesture as a wake request.
         gesture = recognizer.update(data);
-        if (gesture != HeadPetGesture::None) {
+        const bool touched = data.is_touched();
+        if (stackchan::stage1::IsSleepWakeEligible()) {
+            suppress_until_release = true;
+        } else if (suppress_until_release) {
+            // Discard the rest of a gesture that started during sleep.
+            if (!touched) suppress_until_release = false;
+        } else if (gesture != HeadPetGesture::None &&
+                   !stackchan::stage1::IsWakeSequenceActive()) {
+            stackchan::stage1::NotifyActivity("head_pad");
             GetHAL().onHeadPetGesture.emit(gesture);
         }
 

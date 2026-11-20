@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../port_stage1/port_stage1.h"
 #include <hal/hal.h>
 #include <cstdint>
 
@@ -32,6 +33,14 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
+        // Sleep/skits/conversation take priority over the legacy shake
+        // reaction. Clear a pre-existing reaction as well as new events;
+        // otherwise it can keep rotating the mouth and command goHome().
+        if (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive()) {
+            _event_shake = false;
+            if (_is_reacting) restore_state(stackchan);
+            return;
+        }
         uint32_t now = GetHAL().millis();
 
         // 收到晃动事件

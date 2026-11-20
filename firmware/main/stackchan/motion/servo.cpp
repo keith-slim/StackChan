@@ -55,13 +55,13 @@ void Servo::update()
         set_angle_impl(_angle_anim.end);
     }
 
-    // Auto release torque on rest
-    else if (_auto_torque_release_enabled && !isMoving()) {
-        if (GetHAL().millis() - _last_torque_check_tick > 200) {
-            if (getTorqueEnabled()) {
-                setTorqueEnabled(false);
-            }
-            _last_torque_check_tick = GetHAL().millis();
+    // Query movement only while torque is commanded ON. Once the motion
+    // finishes, release torque and leave the UART silent during standby.
+    else if (_auto_torque_release_enabled && _torque_commanded_enabled &&
+             GetHAL().millis() - _last_torque_check_tick > 200) {
+        _last_torque_check_tick = GetHAL().millis();
+        if (!isMoving()) {
+            setTorqueEnabled(false);
         }
     }
 }
@@ -94,7 +94,10 @@ int Servo::getCurrentAngle()
 
 bool Servo::isMoving()
 {
-    return _angle_anim.done() == false || is_moving_impl();
+    // Avoid a servo status read while idle or after torque has been released.
+    // Interpolation and its pending final write are tracked locally.
+    if (!_angle_anim.done() || _snap_to_target_on_rest) return true;
+    return _torque_commanded_enabled && is_moving_impl();
 }
 
 void Servo::apply_default_spring_options()
@@ -112,6 +115,9 @@ void Servo::update_angle_anim_target(int angle)
     if (_auto_angle_sync_enabled) {
         _angle_anim.teleport(getCurrentAngle());  // Use current angle as start
     }
+    // Initialization and auto-release leave the actuator torque OFF.
+    // A position register write alone does not re-enable it.
+    if (!_torque_commanded_enabled) setTorqueEnabled(true);
     _angle_anim             = angle;  // Apply new target
     _snap_to_target_on_rest = true;
 }

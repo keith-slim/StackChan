@@ -23,9 +23,15 @@ public:
 
     void init(lv_obj_t* parent, const lv_font_t* font = &lv_font_montserrat_16);
     uitk::lvgl_cpp::Container* getPanel() const;
+    void setEmotion(const Emotion& emotion) override;
+    void update() override;
 
 private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _pannel;
+    // Keep S3 emotion decorations separate from pet/IMU decorators so
+    // replacing an expression never destroys an unrelated reaction.
+    std::unique_ptr<Decorator> _s3_decoration_one;
+    std::unique_ptr<Decorator> _s3_decoration_two;
 };
 
 /**
@@ -66,6 +72,8 @@ public:
     void setWeight(int weight) override;
     void setRotation(int rotation) override;
     void setVisible(bool visible) override;
+    // Read-only LVGL reference for Stage1 quiet tape alignment.
+    lv_obj_t* getObject() const { return _mouth ? _mouth->get() : nullptr; }
 
 private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _mouth;
@@ -84,6 +92,7 @@ public:
     void clearSpeech() override;
     void setVisible(bool visible) override;
     void setTextFont(void* font) override;
+    std::vector<std::string> splitSubtitle(std::string_view text) const override;
     uint32_t getDisplayDurationMs() const override
     {
         return _display_duration_ms;

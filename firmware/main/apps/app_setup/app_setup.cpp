@@ -83,12 +83,6 @@ void AppSetup::onOpen()
                   _destroy_menu    = true;
                   _need_warm_reset = true;
                   _worker          = std::make_unique<XiaozhiGeneralWorker>();
-              }},
-             {"Power Saving",
-              [&]() {
-                  _destroy_menu    = true;
-                  _need_warm_reset = true;
-                  _worker          = std::make_unique<XiaozhiPowerSavingWorker>();
               }}},
         },
         {

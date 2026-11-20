@@ -4,7 +4,6 @@
 #include "stackchan_display.h"
 #include "application.h"
 #include "config.h"
-#include "power_save_timer.h"
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "settings.h"
@@ -19,6 +18,7 @@
 #include <algorithm>
 #include <mutex>
 #include "stackchan_camera.h"
+#include "stackchan/storage/cores3_sd.h"
 #include "hal_bridge.h"
 #include <hal/hal.h>
 
@@ -238,6 +238,23 @@ public:
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
+    bool SetSdPower(bool enabled)
+    {
+        // CoreS3: AW9523 P0.4 is SD_EN. Never alter unrelated expander bits.
+        constexpr uint8_t bit = 1U << 4;
+        uint8_t state = 0, direction = 0;
+        if (TryReadRegs(0x02, &state, 1) != ESP_OK ||
+            TryReadRegs(0x04, &direction, 1) != ESP_OK) return false;
+        const auto write = [this](uint8_t reg, uint8_t value) {
+            const uint8_t data[] = {reg, value};
+            return i2c_master_transmit(i2c_device_, data, sizeof(data), 100) == ESP_OK;
+        };
+        if (enabled) {
+            return write(0x02, state | bit) && write(0x04, direction & ~bit);
+        }
+        return write(0x02, state & ~bit) && write(0x04, direction | bit);
+    }
+
     void ResetIli9342()
     {
         ESP_LOGI(TAG, "Reset IlI9342");
@@ -339,7 +356,6 @@ private:
 
 class M5StackCoreS3Board : public WifiBoard {
 private:
-    static constexpr int kPowerSaveSleepDelaySeconds  = 300;
     static constexpr int kPowerStatePollIntervalMs    = 1000;
     static constexpr int kPowerReadErrorLogIntervalMs = 10000;
 
@@ -359,33 +375,12 @@ private:
     LvglDisplay* display_;
     StackChanCamera* camera_;
     esp_timer_handle_t touchpad_timer_;
-    PowerSaveTimer* power_save_timer_;
-    hal_bridge::XiaozhiConfig_t xiaozhi_config_;
     std::mutex power_state_mutex_;
+    std::mutex camera_storage_mutex_;
     PowerState power_state_;
-    bool last_power_save_enabled_             = false;
     int64_t last_power_state_check_ms_        = 0;
     int64_t last_power_error_log_ms_          = 0;
     uint32_t consecutive_power_read_failures_ = 0;
-
-    bool ShouldEnablePowerSave(bool has_external_power, bool is_discharging) const
-    {
-        return is_discharging || (has_external_power && xiaozhi_config_.allowShutdownWhenCharging);
-    }
-
-    void UpdatePowerSaveEnabled(bool has_external_power, bool is_discharging)
-    {
-        const bool should_enable_power_save = ShouldEnablePowerSave(has_external_power, is_discharging);
-        if (should_enable_power_save == last_power_save_enabled_) {
-            return;
-        }
-
-        ESP_LOGI(TAG, "Power save timer %s: external_power=%d, discharging=%d, allowShutdownWhenCharging=%d",
-                 should_enable_power_save ? "enabled" : "disabled", has_external_power, is_discharging,
-                 xiaozhi_config_.allowShutdownWhenCharging);
-        power_save_timer_->SetEnabled(should_enable_power_save);
-        last_power_save_enabled_ = should_enable_power_save;
-    }
 
     void RefreshPowerState()
     {
@@ -410,10 +405,6 @@ private:
             }
         }
 
-        if (status_err == ESP_OK) {
-            UpdatePowerSaveEnabled(has_external_power, discharging);
-        }
-
         if (status_err != ESP_OK || level_err != ESP_OK) {
             consecutive_power_read_failures_++;
             const int64_t now_ms = esp_timer_get_time() / 1000;
@@ -434,40 +425,13 @@ private:
         }
     }
 
-    void PollPowerSaveState()
+    void PollPowerState()
     {
         const int64_t now_ms = esp_timer_get_time() / 1000;
         if (last_power_state_check_ms_ != 0 && (now_ms - last_power_state_check_ms_) < kPowerStatePollIntervalMs) {
             return;
         }
         last_power_state_check_ms_ = now_ms;
-        RefreshPowerState();
-    }
-
-    void InitializePowerSaveTimer()
-    {
-        xiaozhi_config_ = hal_bridge::get_xiaozhi_config();
-
-        const int seconds_to_shutdown = xiaozhi_config_.idleShutdownTimeSeconds > 0
-                                            ? static_cast<int>(xiaozhi_config_.idleShutdownTimeSeconds)
-                                            : -1;
-        const int seconds_to_sleep    = seconds_to_shutdown == -1
-                                            ? kPowerSaveSleepDelaySeconds
-                                            : std::min(kPowerSaveSleepDelaySeconds, seconds_to_shutdown);
-
-        ESP_LOGI(TAG, "Init power save timer: sleep=%d s, shutdown=%d s, allow_shutdown_when_charging=%d",
-                 seconds_to_sleep, seconds_to_shutdown, xiaozhi_config_.allowShutdownWhenCharging);
-
-        power_save_timer_ = new PowerSaveTimer(-1, seconds_to_sleep, seconds_to_shutdown);
-        power_save_timer_->OnEnterSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(true);
-            // GetBacklight()->SetBrightness(10);
-        });
-        power_save_timer_->OnExitSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(false);
-            GetBacklight()->RestoreBrightness();
-        });
-        power_save_timer_->OnShutdownRequest([this]() { pmic_->PowerOff(); });
         RefreshPowerState();
     }
 
@@ -550,7 +514,7 @@ private:
                 [](void* arg) {
                     M5StackCoreS3Board* board = (M5StackCoreS3Board*)arg;
                     board->PollTouchpad();
-                    board->PollPowerSaveState();
+                    board->PollPowerState();
                 },
             .arg                   = this,
             .dispatch_method       = ESP_TIMER_TASK,
@@ -566,7 +530,7 @@ private:
     {
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num      = GPIO_NUM_37;
-        buscfg.miso_io_num      = GPIO_NUM_NC;
+        buscfg.miso_io_num      = GPIO_NUM_35; // SD MISO; LCD DC is switched by CoreS3 SD library
         buscfg.sclk_io_num      = GPIO_NUM_36;
         buscfg.quadwp_io_num    = GPIO_NUM_NC;
         buscfg.quadhd_io_num    = GPIO_NUM_NC;
@@ -671,6 +635,7 @@ private:
         };
 
         camera_ = new StackChanCamera(video_config);
+        camera_->SetStorageMutex(&camera_storage_mutex_);
         camera_->SetHMirror(false);
     }
 
@@ -679,12 +644,20 @@ public:
     {
         InitializeI2c();
         InitializeAxp2101();
-        InitializePowerSaveTimer();
         InitializeAw9523();
         I2cDetect();
         InitializeFt6336();
         InitializeSpi();
         InitializeIli9342Display();
+        // Register only: SD is never mounted during board initialization.
+        stackchan::sd::Configure({
+            .display_io = static_cast<StackChanAvatarDisplay*>(display_)->GetPanelIOForSd(),
+            .camera_mutex = &camera_storage_mutex_,
+            .power_context = aw9523_,
+            .set_power = [](void* ctx, bool on) {
+                return static_cast<Aw9523*>(ctx)->SetSdPower(on);
+            },
+        });
         InitializeCamera();
         StartTouchpadTimer();
         GetBacklight()->RestoreBrightness();
@@ -728,14 +701,6 @@ public:
         charging    = power_state_.charging;
         discharging = power_state_.discharging;
         return true;
-    }
-
-    virtual void SetPowerSaveLevel(PowerSaveLevel level) override
-    {
-        if (level != PowerSaveLevel::LOW_POWER) {
-            power_save_timer_->WakeUp();
-        }
-        WifiBoard::SetPowerSaveLevel(level);
     }
 
     virtual Backlight* GetBacklight() override

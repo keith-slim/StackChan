@@ -115,8 +115,6 @@ struct UserAccountInfo_t {
  *
  */
 struct XiaozhiConfig_t {
-    uint32_t idleShutdownTimeSeconds = 600;
-    bool allowShutdownWhenCharging   = false;
     uint8_t idleRandomMovementLevel  = 2;
     bool startAiAgentOnBoot          = false;
 };
@@ -235,6 +233,10 @@ public:
     void setRgbColor(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
     void showRgbColor(uint8_t r, uint8_t g, uint8_t b);
     void refreshRgb();
+    // Conversation LED 0 and sleep blackout are layers of the shared RGB controller.
+    void setConversationRgbColor(uint8_t r, uint8_t g, uint8_t b);
+    void releaseConversationRgbColor();
+    void setSleepRgbBlackout(bool enabled);
 
     /* ---------------------------------- Power --------------------------------- */
     void setServoPowerEnabled(bool enabled);

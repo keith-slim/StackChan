@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../port_stage1/port_stage1.h"
 #include "../utils/random.h"
 #include <hal/hal.h>
 #include <cstdint>
@@ -45,7 +46,10 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
-        if (!stackchan.hasAvatar() || stackchan.avatar().isModifyLocked()) {
+        // Stage-1 owns eye shape during skits/rest. Preserve blink state and
+        // the pre-scene eye weights so resuming cannot reopen to a skit pose.
+        if (!stackchan.hasAvatar() || stackchan.avatar().isModifyLocked() ||
+            (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive())) {
             return;
         }
 

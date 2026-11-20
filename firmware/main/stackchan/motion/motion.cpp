@@ -63,6 +63,16 @@ void Motion::moveWithSpeed(int yawAngle, int pitchAngle, int speed)
     _pitch_servo->moveWithSpeed(pitchAngle, speed);
 }
 
+void Motion::moveRelativeFrom(const uitk::Vector2i& origin, int yawDelta, int pitchDelta, int speed)
+{
+    const auto yaw_limit = _yaw_servo->getAngleLimit();
+    const auto pitch_limit = _pitch_servo->getAngleLimit();
+    moveWithSpeed(
+        clampRelativeAngle(origin.x, yawDelta, yaw_limit.x, yaw_limit.y),
+        clampRelativeAngle(origin.y, pitchDelta, pitch_limit.x, pitch_limit.y),
+        speed);
+}
+
 void Motion::goHome(int speed)
 {
     _yaw_servo->moveWithSpeed(0, speed);

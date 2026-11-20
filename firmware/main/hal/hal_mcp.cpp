@@ -7,7 +7,12 @@
 #include <mooncake_log.h>
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
+#include <stackchan/motion/motion_math.h>
+#include <stackchan/port_stage1/port_stage1.h>
+#include <stackchan/port_stage1/quiet_mode.h>
 #include <apps/common/common.h>
+#include <cstdlib>
+#include <ctime>
 
 using namespace stackchan;
 
@@ -23,6 +28,57 @@ void Hal::xiaozhi_mcp_init()
     // System Prompt：
     // You can control the robot's head. Use get_yaw and get_pitch to sense current position. Use set_yaw for horizontal
     // movement and set_pitch for vertical movement. All angles are in degrees.
+
+    mclog::tagInfo(_tag, "add system.get_local_time tool");
+    mcp_server.AddTool(
+        "self.system.get_local_time",
+        "Returns the current date, time, and weekday from this device using its configured timezone. "
+        "You MUST call this tool whenever the user asks for the current time, date, weekday, or a relative date. "
+        "Do not infer the answer from server time.",
+        std::vector<Property>{}, [this](const PropertyList& properties) -> ReturnValue {
+            // Reapply the saved POSIX timezone here so this tool does not depend on
+            // initialization order or on another component changing the process TZ.
+            std::string timezone = getTimezone();
+            setenv("TZ", timezone.c_str(), 1);
+            tzset();
+
+            std::time_t now = std::time(nullptr);
+            if (now < 1577836800) {
+                return std::string(R"({"synchronized":false,"error":"Device clock is not synchronized yet."})");
+            }
+
+            struct tm local_time = {};
+            if (localtime_r(&now, &local_time) == nullptr) {
+                return std::string(R"({"synchronized":false,"error":"Failed to read device local time."})");
+            }
+
+            char date_time[32] = {};
+            char weekday[16]   = {};
+            char zone_name[16] = {};
+            char offset_raw[8] = {};
+            if (std::strftime(date_time, sizeof(date_time), "%Y-%m-%d %H:%M:%S", &local_time) == 0 ||
+                std::strftime(weekday, sizeof(weekday), "%A", &local_time) == 0 ||
+                std::strftime(zone_name, sizeof(zone_name), "%Z", &local_time) == 0) {
+                return std::string(R"({"synchronized":false,"error":"Failed to format device local time."})");
+            }
+            std::strftime(offset_raw, sizeof(offset_raw), "%z", &local_time);
+
+            std::string utc_offset = offset_raw;
+            if (utc_offset.size() == 5) {
+                utc_offset.insert(3, ":");
+            }
+            if (timezone == "JST-9") {
+                // POSIX reverses the offset sign in "JST-9". Return the familiar
+                // notation as well so the language model cannot mistake it for UTC-9.
+                utc_offset = "+09:00";
+            }
+
+            auto result = fmt::format(
+                R"({{"synchronized":true,"local_datetime":"{}","weekday":"{}","timezone_abbreviation":"{}","utc_offset":"{}","timezone_posix":"{}","unix_time":{},"instruction":"Use local_datetime exactly as the device local time. It is already converted from UTC; do not convert it again or answer with UTC."}})",
+                date_time, weekday, zone_name, utc_offset, timezone, static_cast<long long>(now));
+            mclog::tagInfo(_tag, "get_local_time: {}", result);
+            return result;
+        });
 
     mclog::tagInfo(_tag, "add robot.get_head_angles tool");
     mcp_server.AddTool("self.robot.get_head_angles",
@@ -58,6 +114,8 @@ void Hal::xiaozhi_mcp_init()
 
                            LvglLockGuard lock;
 
+                           stackchan::stage1::CancelForExternalChange(GetStackChan());
+                           stackchan::stage1::NotifyManualMotion();
                            auto& motion = GetStackChan().motion();
                            if (pitch != -9999) {
                                motion.pitchServo().moveWithSpeed(pitch * 10, speed);
@@ -68,6 +126,68 @@ void Hal::xiaozhi_mcp_init()
 
                            return true;
                        });
+
+    // Relative voice head movement: read the servo's actual current angle
+    // and its live limits under the same LVGL lock before commanding motion.
+    // The servo's runtime limits may shrink after stall protection triggers.
+    mclog::tagInfo(_tag, "add robot.adjust_head_angles tool");
+    mcp_server.AddTool(
+        "self.robot.adjust_head_angles",
+        "Move the head relative to its current position by a bounded 10-degree step. "
+        "yaw_delta: +10 left, -10 right; pitch_delta: +10 up, -10 down. "
+        "Each axis is clamped to the servo's current limits, including stall-protection limits. "
+        "Only one axis may be moved per call.",
+        PropertyList({Property("yaw_delta", kPropertyTypeInteger, 0, -10, 10),
+                      Property("pitch_delta", kPropertyTypeInteger, 0, -10, 10),
+                      Property("speed", kPropertyTypeInteger, 150, 100, 1000)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int yaw_delta = properties["yaw_delta"].value<int>();
+            const int pitch_delta = properties["pitch_delta"].value<int>();
+            const int speed = properties["speed"].value<int>();
+
+            // Reject non-10-degree increments and combined movement.
+            if ((yaw_delta != 0 && yaw_delta != 10 && yaw_delta != -10) ||
+                (pitch_delta != 0 && pitch_delta != 10 && pitch_delta != -10) ||
+                ((yaw_delta == 0) == (pitch_delta == 0))) {
+                return false;
+            }
+
+            LvglLockGuard lock;
+            auto& motion = GetStackChan().motion();
+            stackchan::stage1::CancelForExternalChange(GetStackChan());
+            stackchan::stage1::NotifyManualMotion();
+
+            // Single-axis voice movement: no command is sent to the untouched axis.
+            const bool yaw_axis = yaw_delta != 0;
+            auto& servo = yaw_axis ? motion.yawServo() : motion.pitchServo();
+            const auto limit = servo.getAngleLimit();
+            const int before = servo.getCurrentAngle();
+            const int delta = (yaw_axis ? yaw_delta : pitch_delta) * 10;
+            const int target = stackchan::motion::clampRelativeAngle(before, delta, limit.x, limit.y);
+            mclog::tagInfo(_tag, "relative {}: {} -> {}, limits: {}..{}",
+                           yaw_axis ? "yaw" : "pitch", before, target, limit.x, limit.y);
+            if (target != before) servo.moveWithSpeed(target, speed);
+            return true;
+        });
+
+    // Reuse the stage-1 action sequencer; MCP workers never touch servo/LVGL.
+    // Only an explicit requested action is allowed to move the head.
+    mclog::tagInfo(_tag, "add robot.play_action tool");
+    mcp_server.AddTool(
+        "self.robot.play_action",
+        "Play one short, predefined head gesture ONLY when the user explicitly "
+        "requests it. Valid action IDs: nod (うなずく), shake_head (首を横に振る), "
+        "tilt_head (首を傾ける), happy_move (喜ぶ), surprise_move (驚く), "
+        "shy_move (照れる). No arbitrary angles. "
+        "Returns false if another scene or action has priority. "
+        "Do not repeat automatically.",
+        PropertyList({Property("action", kPropertyTypeString, std::string(""))}),
+        [](const PropertyList& properties) -> ReturnValue {
+            const auto action = properties["action"].value<std::string>();
+            const bool queued = stackchan::stage1::RequestCue(action.c_str());
+            mclog::tagInfo(_tag, "play_action: action={}, queued={}", action, queued);
+            return queued;
+        });
 
     mclog::tagInfo(_tag, "add robot.set_led_color tool");
     mcp_server.AddTool(
@@ -86,10 +206,85 @@ void Hal::xiaozhi_mcp_init()
 
             LvglLockGuard lock;
 
+            stackchan::stage1::CancelForExternalChange(GetStackChan());
+            stackchan::stage1::NotifyManualLed();
             GetStackChan().leftNeonLight().setColor(r, g, b);
             GetStackChan().rightNeonLight().setColor(r, g, b);
 
             return true;
+        });
+
+    // Explicit voice sleep command reuses stage-1's timed nap/night
+    // sleep state; it does not modify the separate quiet-mode setting.
+    mclog::tagInfo(_tag, "add robot.request_sleep tool");
+    mcp_server.AddTool(
+        "self.robot.request_sleep",
+        "Queue a manual nap or night sleep after the current spoken reply. "
+        "Only call on an explicit user request such as '寝て良いよ'. "
+        "This is not the temporary quiet mode.",
+        std::vector<Property>{},
+        [](const PropertyList&) -> ReturnValue {
+            const bool queued = stackchan::stage1::RequestSleep();
+            mclog::tagInfo(_tag, "request_sleep: queued={}", queued);
+            return queued;
+        });
+
+    mclog::tagInfo(_tag, "add robot.set_quiet_mode tool");
+    mcp_server.AddTool(
+        "self.robot.set_quiet_mode",
+        "Set or cancel quiet mode. action=minutes (0 cancels), until, schedule, cancel, cancel_if_active. "
+        "start/end are minutes since local midnight (0..1439); daily and enabled apply to schedule. "
+        "Only call on an explicit user request.",
+        PropertyList({Property("minutes", kPropertyTypeInteger, 30, 0, 1440),
+                      Property("action", kPropertyTypeString, std::string("minutes")).SetMaxLength(24),
+                      Property("start", kPropertyTypeInteger, 720, 0, 1439),
+                      Property("end", kPropertyTypeInteger, 780, 0, 1439),
+                      Property("daily", kPropertyTypeBoolean, true),
+                      Property("enabled", kPropertyTypeBoolean, true)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            using namespace stackchan::stage1::quiet_mode;
+            const auto& action = properties["action"].value<std::string>();
+            Request request;
+            request.minutes = properties["minutes"].value<int>();
+            request.start = properties["start"].value<int>();
+            request.end = properties["end"].value<int>();
+            request.daily = properties["daily"].value<bool>();
+            request.enabled = properties["enabled"].value<bool>();
+            if (action == "minutes") request.action = request.minutes ? Action::Minutes : Action::Cancel;
+            else if (action == "until") request.action = Action::Until;
+            else if (action == "schedule") request.action = Action::Schedule;
+            else if (action == "cancel" || action == "cancel_if_active") {
+                if (action == "cancel_if_active" && !Active()) return true;
+                request.action = Action::Cancel;
+            } else return false;
+            const auto result = Apply(request, true);
+            mclog::tagInfo(_tag, "set_quiet_mode: action={} saved={}", action, result == ESP_OK);
+            return result == ESP_OK;
+        });
+
+    // Voice relative volume control complements the existing
+    // self.audio_speaker.set_volume absolute tool. Use the same HAL entry
+    // point as Web SETUP with permanent=true for persistent settings.
+    mclog::tagInfo(_tag, "add robot.adjust_volume tool");
+    mcp_server.AddTool(
+        "self.robot.adjust_volume",
+        "Increase or decrease this robot's speaker volume in percent. "
+        "delta must be +10 or -10. This is for explicit voice volume requests; "
+        "never use it for quoted, negative, or hypothetical instructions.",
+        PropertyList({Property("delta", kPropertyTypeInteger, 10, -10, 10)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int delta = properties["delta"].value<int>();
+            if (delta != 10 && delta != -10) return false;
+
+            const int current = static_cast<int>(getSpeakerVolume());
+            int next = current + delta;
+            if (next < 0) next = 0;
+            if (next > 100) next = 100;
+            setSpeakerVolume(static_cast<uint8_t>(next), true);
+            const int applied = static_cast<int>(getSpeakerVolume());
+            mclog::tagInfo(_tag, "adjust_volume: from={} delta={} applied={}",
+                           current, delta, applied);
+            return applied == next;
         });
 
     mclog::tagInfo(_tag, "add robot.create_reminder tool");

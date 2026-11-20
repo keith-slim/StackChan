@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include <stackchan/port_stage1/port_stage1.h>
 #include "board/hal_bridge.h"
 #include "drivers/bmi270/bmi270.h"
 #include "utils/motion_detector/motion_detector.h"
@@ -28,6 +29,7 @@ static void _imu_task(void* param)
 
             if (motion_detector->isShakeDetected()) {
                 mclog::tagInfo(_tag, "Shake Detected!");
+                stackchan::stage1::NotifyActivity("imu_shake");
                 GetHAL().onImuMotionEvent.emit(ImuMotionEvent::Shake);
             }
             // if (motion_detector->isPickUpDetected()) {
