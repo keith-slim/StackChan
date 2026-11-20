@@ -13,6 +13,12 @@ static const std::string_view _tag = "HAL-IOE";
 
 static std::unique_ptr<m5::PY32IOExpander_Class> _io_expander;
 
+// LED 0 is shared by the conversation indicator and ordinary neck effects.
+// Keep the last non-conversation color so releasing a status indication does
+// not erase another feature's LED state.
+static uint8_t _led0_base_r = 0, _led0_base_g = 0, _led0_base_b = 0;
+static bool _conversation_led0_owned = false;
+
 void Hal::io_expander_init()
 {
     mclog::tagInfo(_tag, "init");
@@ -71,7 +77,30 @@ void Hal::setRgbColor(uint8_t index, uint8_t r, uint8_t g, uint8_t b)
     if (!_io_expander) {
         return;
     }
+    if (index == 0) {
+        _led0_base_r = r;
+        _led0_base_g = g;
+        _led0_base_b = b;
+        // Any other writer takes ownership from the status indicator.
+        _conversation_led0_owned = false;
+    }
     _io_expander->setLedColor(index, r, g, b);
+}
+
+void Hal::setConversationRgbColor(uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!_io_expander) return;
+    _conversation_led0_owned = true;
+    _io_expander->setLedColor(0, r, g, b);
+    _io_expander->refreshLeds();
+}
+
+void Hal::releaseConversationRgbColor()
+{
+    if (!_io_expander || !_conversation_led0_owned) return;
+    _conversation_led0_owned = false;
+    _io_expander->setLedColor(0, _led0_base_r, _led0_base_g, _led0_base_b);
+    _io_expander->refreshLeds();
 }
 
 void Hal::refreshRgb()
