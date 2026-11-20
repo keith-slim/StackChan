@@ -333,7 +333,8 @@ void StackChanAvatarDisplay::SetupUI()
             Application::GetInstance().GetDeviceState() == kDeviceStateIdle,
             self->is_sleeping_);
         if (!stackchan::idle_lifecycle::AudioFinished(state)) return;
-        if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_) {
+        if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_ ||
+            self->speech_emotion_active_) {
             ESP_LOGW(TAG, "[IDLE_RECOVERY] completing missed speech end (mouth=%d subtitle=%d)",
                      self->speaking_modifier_id_ >= 0, self->subtitle_speaking_);
             self->FinishSpeakingAnimation();
@@ -381,23 +382,47 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
 
 void StackChanAvatarDisplay::FinishSpeakingAnimation()
 {
-    // Called by both normal status transitions and idle recovery. Ending a
-    // reply must finish its captions as well as its mouth animation.
+    // One speech-end path for normal status changes and idle recovery.
+    auto& stackchan = GetStackChan();
+    auto& avatar = stackchan.avatar();
+    if (stackchan::stage1::IsNapSleepActive() &&
+        !stackchan::stage1::IsWakeSequenceActive()) {
+        avatar.setEmotion(Emotion::Sleepy);
+        if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
+            blink->resyncEyeWeights();
+        ESP_LOGI(TAG, "[SLEEP_DIAG] restored nap face after speech");
+    } else if (speech_emotion_active_) {
+        avatar.setEmotion(speech_emotion_before_);
+        if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
+            blink->resyncEyeWeights();
+        ESP_LOGI(TAG, "[EMOTION] restored after reply");
+    }
+    speech_emotion_active_ = false;
+    speech_emotion_explicit_ = false;
+
     if (subtitle_speaking_) {
         subtitle_speaking_ = false;
         subtitle_preview_shown_ = false;
         BeginSubtitleReview();
     }
     if (speaking_modifier_id_ < 0) return;
-    auto& stackchan = GetStackChan();
     stackchan.removeModifier(speaking_modifier_id_);
     speaking_modifier_id_ = -1;
-    stackchan.avatar().mouth().setWeight(0);
+    avatar.mouth().setWeight(0);
 }
 
 void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
 {
-    const auto state = CurrentIdleState(device_idle, is_sleeping_);
+    auto state = CurrentIdleState(device_idle, is_sleeping_);
+    // A missed STANDBY must also release the listening/thinking face. Do this
+    // before enabling idle expressions so they cannot inherit hidden eyes.
+    if (stackchan::idle_lifecycle::AudioFinished(state) &&
+        state.conversation_active && !state.scene_active && !state.wake_active) {
+        stackchan::stage1::SetConversationPose(GetStackChan(),
+                                                stackchan::stage1::ConversationPose::None);
+        state = CurrentIdleState(device_idle, is_sleeping_);
+        ESP_LOGI(TAG, "[IDLE_RECOVERY] conversation face restored");
+    }
     // One policy controls the update cadence and idle modifiers in normal
     // standby, nap/sleep, speech and missed-STANDBY recovery.
     const bool normal_rate = stackchan::idle_lifecycle::AudioFinished(state);
@@ -1001,28 +1026,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     if (strcmp(status, Lang::Strings::STANDBY) != 0)
         startup_hint_text_.clear();
 
-    // A spoken emotion belongs to one reply, not to subsequent listening
-    // or idle periods. Restore its preceding expression at reply boundaries
-    // without clearing unread subtitles or restarting the speech transport.
-    if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
-        strcmp(status, Lang::Strings::STANDBY) == 0) {
-        if (stackchan::stage1::IsNapSleepActive() &&
-            !stackchan::stage1::IsWakeSequenceActive()) {
-            // Auto sleep voice is not a conversation. Restore the sleep face
-            // rather than a pre-reply neutral expression on STANDBY.
-            avatar.setEmotion(Emotion::Sleepy);
-            if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
-                blink->resyncEyeWeights();
-            ESP_LOGI(TAG, "[SLEEP_DIAG] restored nap face after speech");
-        } else if (speech_emotion_active_) {
-            avatar.setEmotion(speech_emotion_before_);
-            if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
-                blink->resyncEyeWeights();
-            ESP_LOGI(TAG, "[EMOTION] restored after reply");
-        }
-        speech_emotion_active_ = false;
-        speech_emotion_explicit_ = false;
-    }
     // Bridge the existing Xiaozhi state transitions to the S3 avatar only.
     // No new speech transport, microphone task or swipe gesture handler.
     bool is_idle      = false;
@@ -1080,8 +1083,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // restored as a stationary open mouth after speech ends.
     if (strcmp(status, Lang::Strings::LISTENING) == 0 && !wake_visual)
         stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::Listening);
-    else if (strcmp(status, Lang::Strings::STANDBY) == 0)
-        stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::None);
     if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
         strcmp(status, Lang::Strings::STANDBY) == 0)
         avatar.mouth().setWeight(0);
