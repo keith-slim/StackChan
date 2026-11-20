@@ -617,12 +617,7 @@ struct Runtime {
         }
         if (elapsed >= 2050 && wake_step == 1) {
             wake_step = 2;
-            // Restore the actual pre-sleep neck angle before idle motion
-            // resumes. Use the same pace as settling into sleep, rather than
-            // the slower intermediate wake gesture.
-            sc.motion().moveRelativeFrom(saved_angles, 0, 0, 350);
-            ESP_LOGI(LOG_TAG, "wake restore pre-sleep neck: yaw=%d pitch=%d",
-                     saved_angles.x, saved_angles.y);
+            sc.motion().moveRelativeFrom(saved_angles, 0, 0, 180);
             // The final wake step already requests the saved position.
             // Avoid commanding that same pose again on scene release.
             restore_neck_on_release = false;
