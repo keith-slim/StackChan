@@ -71,8 +71,7 @@ void Hal::init()
         return;
     }
     xiaozhi_mcp_init();
-    // Head Si12T touch pad disabled: spurious swipe events can wake sleeping StackChan.
-    // Screen touch and IMU are initialized independently below.
+    head_touch_init();
     io_expander_init();
     rtc_init();
     imu_init();
