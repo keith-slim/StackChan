@@ -11,6 +11,7 @@
 #include <nvs_flash.h>
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
 #include <freertos/task.h>
 #include "board/hal_bridge.h"
 #include "stackchan/storage/nvs_snapshot.h"
@@ -195,7 +196,7 @@ static void _sd_backup_task(void*)
         _sd_retry_after_us.store(esp_timer_get_time() + 60000000LL, std::memory_order_release);
     }
     _sd_backup_running.store(false, std::memory_order_release);
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 static void _schedule_sd_backup_if_safe()
@@ -210,21 +211,30 @@ static void _schedule_sd_backup_if_safe()
     const int64_t retry_at = _sd_retry_after_us.load(std::memory_order_acquire);
     if (retry_at && esp_timer_get_time() < retry_at) return;
 
-    // Keep internal RAM available for Wi-Fi PHY, audio and DMA allocations.
-    constexpr size_t kMinInternalFree = 48 * 1024;
-    constexpr size_t kMinLargestBlock = 12 * 1024;
+    // esp_flash_dispatcher runs cache-disabling NVS operations on its own
+    // internal stack, so this short-lived worker can keep its stack in PSRAM.
+    // Retain enough internal heap for the SD driver, Wi-Fi, audio and DMA.
+    constexpr size_t kMinInternalFree = 28 * 1024;
+    constexpr size_t kMinLargestBlock = 6 * 1024;
+    constexpr size_t kMinPsramFree = 32 * 1024;
     const size_t free_bytes = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (free_bytes < kMinInternalFree || largest < kMinLargestBlock) return;
+    const size_t psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (free_bytes < kMinInternalFree || largest < kMinLargestBlock ||
+        psram < kMinPsramFree) return;
 
     bool expected = false;
     if (!_sd_backup_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return;
     }
-    if (xTaskCreate(_sd_backup_task, "sd_nvs_backup", 6144, nullptr, 1, nullptr) != pdPASS) {
+    TaskHandle_t task = nullptr;
+    if (xTaskCreateWithCaps(_sd_backup_task, "sd_nvs_backup", 6144, nullptr, 1, &task,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         _sd_backup_running.store(false, std::memory_order_release);
         _sd_retry_after_us.store(esp_timer_get_time() + 60000000LL, std::memory_order_release);
         mclog::tagError(_tag, "SD NVS backup task creation failed");
+    } else {
+        mclog::tagInfo(_tag, "SD NVS backup task started with PSRAM stack");
     }
 }
 

@@ -11,6 +11,8 @@
 #include "voice_client.h"
 #include "quiet_mode.h"
 #include "quiet_mark.h"
+#include "environment.h"
+#include "weather_face.h"
 #include <stackchan/avatar/skins/default/default.h>
 #include <application.h>
 #include <stackchan/stackchan.h>
@@ -274,6 +276,8 @@ struct Runtime {
     std::unique_ptr<AvatarRestFace> rest;
     std::unique_ptr<AvatarDreamFace> dream;
     std::unique_ptr<AvatarQuietMark> quiet_mark;
+    std::unique_ptr<AvatarWeatherFace> weather_face;
+    uint32_t environment_poll_at = 0;
 
     // All LVGL work stays in Update's existing display lock. The source
     // mouth is the original DefaultAvatar or the S3-style rest face.
@@ -285,6 +289,21 @@ struct Runtime {
         if (!quiet_mark)
             quiet_mark = std::make_unique<AvatarQuietMark>(lv_screen_active());
         quiet_mark->Render(mouth);
+    }
+
+    // The weather badge stays visible across ordinary face changes. Comfort
+    // decorations yield to conversation, actions and sleep faces to avoid
+    // covering their more important expression.
+    void SyncWeather(uint32_t now, bool suppress_comfort) {
+        auto appearance = environment::ReadAppearance();
+        if (!appearance.visible) {
+            weather_face.reset();
+            return;
+        }
+        if (suppress_comfort) appearance.comfort = weather::Comfort::None;
+        if (!weather_face)
+            weather_face = std::make_unique<AvatarWeatherFace>(lv_screen_active());
+        weather_face->Render(appearance, now);
     }
 
     void RestoreNightBacklight() {
@@ -885,6 +904,7 @@ void Start() {
     // Start after the StackChanAvatarDisplay has attached its avatar.
     quiet_mode::Init();
     voice::Init();
+    environment::Init();
     voice::Reset();
     CancelDreamRemark();
     r = Runtime{};
@@ -926,6 +946,7 @@ void Start() {
 }
 void Stop() {
     enabled.store(false);
+    environment::SetIdle(false);
     Application::GetInstance().SetWakeWordAnnouncementProvider({});
     voice::Cancel();
     voice::Reset();
@@ -1081,6 +1102,14 @@ void Update(StackChan& sc) {
          VoicePending() || r.conversation_pose != ConversationPose::None ||
          wake_sequence_active.load()))
         r.SyncQuietMark(sc, false);
+    const bool environment_idle = idle.load() && !voice::IsBusy() && !VoicePending() &&
+                                  r.conversation_pose == ConversationPose::None &&
+                                  !r.cue_active && !wake_sequence_active.load();
+    environment::SetIdle(environment_idle);
+    if (r.environment_poll_at == 0 || now - r.environment_poll_at >= 1000) {
+        r.environment_poll_at = now;
+        environment::Poll();
+    }
     bool event = interrupted.exchange(false);
     const uint8_t wake_bits = wake_intents.exchange(0);
     const WakeReason requested = (wake_bits & 2) ? WakeReason::Word :
@@ -1118,6 +1147,7 @@ void Update(StackChan& sc) {
     if (r.cue_active) {
         r.SyncQuietMark(sc, false);
         r.TickCue(sc, now);
+        r.SyncWeather(now, true);
         return;
     }
     // Explicit conversation state always wins over idle skits and sleep
@@ -1125,6 +1155,7 @@ void Update(StackChan& sc) {
     if (r.conversation_pose != ConversationPose::None) {
         r.SyncQuietMark(sc, false);
         r.DrawConversation(sc, now);
+        r.SyncWeather(now, true);
         return;
     }
 
@@ -1218,6 +1249,8 @@ void Update(StackChan& sc) {
          r.conversation_pose == ConversationPose::None &&
          !voice::IsBusy() && !VoicePending() && !r.own_speech &&
          !wake_sequence_active.load()));
+    r.SyncWeather(now, r.own_face || Runtime::Sleeping(state.phase) ||
+                       voice::IsBusy() || VoicePending());
 }
 
 } // namespace stackchan::stage1

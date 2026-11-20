@@ -4,17 +4,21 @@
 #include "voice_settings.h"
 #include "voice_client.h"
 #include "quiet_mode.h"
+#include "environment.h"
 #include "setup_web.h"
 #include "stackchan/wifi/wifi_web.h"
 #include <hal/hal.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <atomic>
 #include <cJSON.h>
 #include <cstdio>
 #include <cstring>
 #include <new>
+
+extern "C" bool stackchan_sd_nvs_backup_pending(void);
 
 namespace stackchan::stage1::web {
 namespace {
@@ -42,7 +46,7 @@ p{margin:8px 0}small,.hint{display:block;color:#68758a;font-size:10.5px;line-hei
 .fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 label{display:block;margin:0 0 5px;font-weight:500}
 input,button{font:inherit}
-input[type=time],input[type=number],input[type=text],textarea{display:block;width:100%;max-width:14rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;background:#fff;color:inherit;padding:5px 8px}
+input[type=time],input[type=number],input[type=text],input[type=password],textarea{display:block;width:100%;max-width:14rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;background:#fff;color:inherit;padding:5px 8px}
 textarea{display:block;resize:vertical;min-height:60px;width:100%;max-width:none}
 .check{display:flex;gap:8px;align-items:center;margin:0 0 12px}
 input[type=checkbox]{width:16px;height:16px;margin:0}
@@ -73,7 +77,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#quiet">お黙り</a><a href="#actions">サーボテスト</a><a href="#wifi">Wi-Fi</a><a href="#device">デバイス</a><a href="#aiSetup">AI・省電力</a><a href="#appsSetup">アプリ表示</a><a href="#deviceInfo">端末情報</a>
+<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#quiet">お黙り</a><a href="#environment">天気・位置</a><a href="#actions">サーボテスト</a><a href="#wifi">Wi-Fi</a><a href="#device">デバイス</a><a href="#aiSetup">AI・省電力</a><a href="#appsSetup">アプリ表示</a><a href="#deviceInfo">端末情報</a>
 </nav></aside><main>
 <h1>セッティング</h1>
 <form id="settings">
@@ -162,6 +166,17 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <div class="buttons"><button type="button" id="quietSave" disabled>保存して反映</button></div>
 <small>日をまたぐ予約に対応。毎日をオフにすると次の該当時間帯の一回だけ。今回だけ解除しても翌日の予約は維持します。一時指定と予約が重なる場合は遅い終了時刻まで有効です。再起動後も保存設定を使用します。</small>
 <p id="quietActionStatus" class="status" role="status"></p>
+</section>
+<section id="environment" class="card"><h2>天気・位置情報</h2>
+<p id="environmentInfo" class="status">位置情報を読み込み中…</p>
+<div class="fields">
+<label>地域の表示名（任意）<input id="environmentRegion" type="text" maxlength="127" autocomplete="off" placeholder="例：東京都 千代田区"></label>
+<label>OpenWeatherMap APIキー<input id="environmentKey" type="password" maxlength="128" autocomplete="new-password" placeholder="変更する場合のみ入力"></label>
+</div>
+<label class="check"><input id="environmentClearKey" type="checkbox">登録済みAPIキーを削除する</label>
+<div class="buttons"><button type="button" id="environmentSave" disabled>保存して取得</button><button type="button" id="environmentReload">状態を再読込</button></div>
+<p id="environmentStatus" class="status" role="status">読み込み中…</p>
+<small>接続元IPから地域を推定し、OpenWeatherMapの現在天気を取得します。APIキーは画面へ返さずNVSに保存し、SDのconfig.jsonへ非同期バックアップします。バックアップにはAPIキーも含まれるため、SDカードの取り扱いに注意してください。天気は約10分、位置は約1時間ごとに、会話していないときだけ更新します。取得から30分を超えた天気は装飾に使いません。</small>
 </section>
 <section id="actions" class="card"><h2>サーボアクションの実機テスト</h2>
 <small>現在位置から相対的に動作します。うなずき・首振りは開始位置へ戻り、ほかの動作は終了位置を維持します。可動域は自動で制限します。</small>
@@ -354,6 +369,39 @@ q('quietApply').addEventListener('click',()=>{const n=Number(q('quietMinutes').v
 q('quietApplyUntil').addEventListener('click',()=>{if(q('quietUntil').value)setQuiet({action:'until',end_time:q('quietUntil').value});});
 q('quietSave').addEventListener('click',()=>{const start=q('quietStart').value,end=q('quietEnd').value;if(!start||!end||start===end){q('quietActionStatus').textContent='開始と終了は異なる時刻を指定してください。';return;}setQuiet({action:'schedule',enabled:q('quietEnabled').checked,daily:q('quietDaily').checked,start_time:start,end_time:end});});
 setInterval(loadQuiet,10000);
+const environmentInfo=document.getElementById('environmentInfo');
+const environmentStatus=document.getElementById('environmentStatus');
+const environmentRegion=document.getElementById('environmentRegion');
+const environmentKey=document.getElementById('environmentKey');
+const environmentClearKey=document.getElementById('environmentClearKey');
+const environmentSave=document.getElementById('environmentSave');
+let environmentLoaded=false,environmentPending=false;
+async function loadEnvironment(){
+ try{
+  const response=await fetch('/api/stage1/environment',{cache:'no-store'});
+  if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
+  const d=await response.json();
+  if(!environmentLoaded){environmentRegion.value=d.region_override||'';environmentLoaded=true;environmentSave.disabled=false;}
+  const place=d.location_valid?(d.region_name||d.city||'取得済み')+' ('+d.latitude.toFixed(4)+', '+d.longitude.toFixed(4)+')':'位置情報は未取得です';
+  const weather=d.weather_valid?(d.weather_stale?'前回の天気: ':'現在の天気: ')+d.description+' / '+d.temperature_c.toFixed(1)+'℃ / 湿度'+d.humidity_percent+'% / '+d.weather_age_minutes+'分前':'天気は未取得です';
+  environmentInfo.textContent=place+'\n'+weather;
+  environmentStatus.textContent=(d.weather_key_set?'APIキー登録済み':'APIキー未登録')+' / 地域HTTP '+d.location_http+' / 天気HTTP '+d.weather_http+(d.fetching?' / 取得中':'')+(d.sd_pending?' / SD同期待ち':'');
+ }catch(e){environmentStatus.textContent='読込失敗: '+e.message;}
+}
+environmentSave.addEventListener('click',async()=>{
+ if(!environmentLoaded||environmentPending)return;
+ const encoder=new TextEncoder();
+ if(encoder.encode(environmentRegion.value.trim()).length>127||encoder.encode(environmentKey.value.trim()).length>128){environmentStatus.textContent='地域名は127バイト、APIキーは128バイト以内です';return;}
+ environmentPending=true;environmentSave.disabled=true;environmentStatus.textContent='NVSへ保存中…';
+ try{
+  const response=await fetch('/api/stage1/environment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({region_name:environmentRegion.value.trim(),weather_api_key:environmentKey.value.trim(),clear_key:environmentClearKey.checked})});
+  if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
+  environmentKey.value='';environmentClearKey.checked=false;await loadEnvironment();
+  environmentStatus.textContent='NVSへ保存しました。位置・天気は待機中に取得します。SDバックアップは非同期です。';
+ }catch(e){environmentStatus.textContent='保存失敗: '+e.message;}
+ finally{environmentPending=false;environmentSave.disabled=false;}
+});
+document.getElementById('environmentReload').addEventListener('click',loadEnvironment);
 const wifiList=document.getElementById('wifiNetworks'),wifiStatus=document.getElementById('wifiStatus');
 let wifiSaved=[],wifiActive='';
 const ipFields=[['ip','IPアドレス'],['subnet','サブネットマスク'],['gw','ゲートウェイ'],['dns1','DNS1'],['dns2','DNS2（任意）']];
@@ -559,7 +607,7 @@ async function setupLoad(){
 }
 document.getElementById('setupReload').addEventListener('click',setupLoad);
 // Avoid concurrent large JSON responses on the memory-constrained server.
-Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(wifiLoad).then(setupLoad);
+Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(loadEnvironment).then(wifiLoad).then(setupLoad);
 </script></body></html>)STAGE1PAGE";
 
 void Reply(httpd_req_t* req, const char* status, const char* body) {
@@ -567,6 +615,21 @@ void Reply(httpd_req_t* req, const char* status, const char* body) {
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, body);
+}
+// A partial JSON request must not occupy the HTTPD worker indefinitely.
+// This deadline covers the complete body rather than restarting per chunk.
+bool ReadBody(httpd_req_t* req, char* body, int length) {
+    constexpr int64_t kBodyReadDeadlineUs = 10000000;
+    const int64_t deadline = esp_timer_get_time() + kBodyReadDeadlineUs;
+    int received = 0;
+    while (received < length) {
+        if (esp_timer_get_time() >= deadline) return false;
+        const int count = httpd_req_recv(req, body + received, length - received);
+        if (count == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (count <= 0) return false;
+        received += count;
+    }
+    return true;
 }
 esp_err_t Page(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -607,6 +670,137 @@ esp_err_t ReadQuiet(httpd_req_t* req) {
         (unsigned)(v.start_minute/60), (unsigned)(v.start_minute%60), (unsigned)(v.end_minute/60), (unsigned)(v.end_minute%60),
         (unsigned)v.once_start, (unsigned)v.once_end, (unsigned)v.temporary_until, (unsigned)v.skip_until);
     Reply(req, "200 OK", json);
+    return ESP_OK;
+}
+bool JsonEscape(const char* source, char* output, size_t capacity) {
+    if (!source || !output || capacity == 0) return false;
+    size_t used = 0;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(source); *p; ++p) {
+        if (*p == '"' || *p == '\\') {
+            if (used + 2 >= capacity) return false;
+            output[used++] = '\\'; output[used++] = static_cast<char>(*p);
+        } else if (*p < 0x20) {
+            if (used + 6 >= capacity) return false;
+            const int written = std::snprintf(output + used, capacity - used, "\\u%04x", *p);
+            if (written != 6) return false;
+            used += 6;
+        } else {
+            if (used + 1 >= capacity) return false;
+            output[used++] = static_cast<char>(*p);
+        }
+    }
+    output[used] = '\0';
+    return true;
+}
+esp_err_t ReadEnvironment(httpd_req_t* req) {
+    // Snapshot, escaped strings and the serialized response exceed half of the
+    // 4 KiB HTTPD stack. Keep the complete scratch area in PSRAM so it cannot
+    // overwrite httpd_req_t while formatting a response.
+    struct Scratch {
+        environment::Snapshot snapshot;
+        environment::Settings settings;
+        char region_override[256];
+        char region_name[520];
+        char city[256];
+        char description[256];
+        char json[2048];
+    };
+    Scratch* scratch = static_cast<Scratch*>(
+        heap_caps_calloc(1, sizeof(Scratch), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!scratch) {
+        Reply(req, "503 Service Unavailable", "{\"error\":\"PSRAM unavailable\"}");
+        return ESP_OK;
+    }
+    struct ReleaseScratch {
+        Scratch* value;
+        ~ReleaseScratch() {
+            if (!value) return;
+            // The saved API key must not remain in a freed PSRAM block.
+            std::memset(value, 0, sizeof(*value));
+            heap_caps_free(value);
+        }
+    } release{scratch};
+    scratch->snapshot = environment::Read();
+    scratch->settings = environment::GetSettings();
+    const bool escaped = JsonEscape(scratch->settings.region_name, scratch->region_override,
+                                    sizeof(scratch->region_override)) &&
+        JsonEscape(scratch->snapshot.region_name, scratch->region_name,
+                   sizeof(scratch->region_name)) &&
+        JsonEscape(scratch->snapshot.city, scratch->city, sizeof(scratch->city)) &&
+        JsonEscape(scratch->snapshot.description, scratch->description,
+                   sizeof(scratch->description));
+    std::memset(scratch->settings.weather_api_key, 0,
+                sizeof(scratch->settings.weather_api_key));
+    if (!escaped) {
+        Reply(req, "500 Internal Server Error", "{\"error\":\"environment text too long\"}");
+        return ESP_OK;
+    }
+    const int length = std::snprintf(scratch->json, sizeof(scratch->json),
+        "{\"initialized\":%s,\"location_valid\":%s,\"weather_valid\":%s,"
+        "\"weather_stale\":%s,\"weather_key_set\":%s,\"fetching\":%s,"
+        "\"region_override\":\"%s\",\"region_name\":\"%s\",\"city\":\"%s\","
+        "\"latitude\":%.6f,\"longitude\":%.6f,\"temperature_c\":%.2f,"
+        "\"humidity_percent\":%u,\"condition_code\":%u,\"description\":\"%s\","
+        "\"weather_age_minutes\":%llu,\"location_http\":%d,\"weather_http\":%d,"
+        "\"sd_pending\":%s}",
+        scratch->snapshot.initialized ? "true" : "false",
+        scratch->snapshot.location_valid ? "true" : "false",
+        scratch->snapshot.weather_valid ? "true" : "false",
+        scratch->snapshot.weather_stale ? "true" : "false",
+        scratch->snapshot.weather_key_set ? "true" : "false",
+        scratch->snapshot.fetching ? "true" : "false",
+        scratch->region_override, scratch->region_name, scratch->city,
+        scratch->snapshot.latitude, scratch->snapshot.longitude,
+        scratch->snapshot.temperature_c, scratch->snapshot.humidity_percent,
+        scratch->snapshot.condition_code, scratch->description,
+        static_cast<unsigned long long>(scratch->snapshot.weather_age_minutes),
+        scratch->snapshot.location_http, scratch->snapshot.weather_http,
+        stackchan_sd_nvs_backup_pending() ? "true" : "false");
+    if (length < 0 || static_cast<size_t>(length) >= sizeof(scratch->json)) {
+        Reply(req, "500 Internal Server Error", "{\"error\":\"environment response too large\"}");
+        return ESP_OK;
+    }
+    Reply(req, "200 OK", scratch->json);
+    return ESP_OK;
+}
+esp_err_t WriteEnvironment(httpd_req_t* req) {
+    char content_type[64]{};
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
+        std::strncmp(content_type, "application/json", 16) != 0) {
+        Reply(req, "415 Unsupported Media Type", "{\"error\":\"JSON required\"}");
+        return ESP_OK;
+    }
+    if (req->content_len < 1 || req->content_len > 512) {
+        Reply(req, "413 Payload Too Large", "{\"error\":\"invalid size\"}");
+        return ESP_OK;
+    }
+    char body[513]{};
+    if (!ReadBody(req, body, req->content_len)) {
+        Reply(req, "408 Request Timeout", "{\"error\":\"request body timeout\"}");
+        return ESP_OK;
+    }
+    cJSON* root = cJSON_ParseWithLength(body, req->content_len);
+    const cJSON* region = root ? cJSON_GetObjectItemCaseSensitive(root, "region_name") : nullptr;
+    const cJSON* key = root ? cJSON_GetObjectItemCaseSensitive(root, "weather_api_key") : nullptr;
+    const cJSON* clear = root ? cJSON_GetObjectItemCaseSensitive(root, "clear_key") : nullptr;
+    auto settings = environment::GetSettings();
+    const bool valid = cJSON_IsObject(root) && cJSON_IsString(region) &&
+        cJSON_IsString(key) && (!clear || cJSON_IsBool(clear)) &&
+        std::strlen(region->valuestring) < sizeof(settings.region_name) &&
+        std::strlen(key->valuestring) < sizeof(settings.weather_api_key);
+    if (valid) {
+        std::snprintf(settings.region_name, sizeof(settings.region_name), "%s", region->valuestring);
+        if (cJSON_IsTrue(clear)) settings.weather_api_key[0] = '\0';
+        if (key->valuestring[0])
+            std::snprintf(settings.weather_api_key, sizeof(settings.weather_api_key), "%s", key->valuestring);
+    }
+    const bool saved = valid && environment::SaveSettings(settings);
+    std::memset(settings.weather_api_key, 0, sizeof(settings.weather_api_key));
+    cJSON_Delete(root);
+    Reply(req, !valid ? "400 Bad Request" : !saved ? "500 Internal Server Error" : "200 OK",
+          !valid ? "{\"error\":\"invalid environment settings\"}" :
+          !saved ? "{\"error\":\"NVS save failed\"}" :
+          "{\"saved_nvs\":true,\"sd_backup_pending\":true}");
     return ESP_OK;
 }
 // Voice text settings are deliberately separate from the small 512-byte
@@ -673,13 +867,11 @@ esp_err_t WriteVoice(httpd_req_t* req) {
         Reply(req,"503 Service Unavailable","{\"error\":\"PSRAM unavailable\"}"); return ESP_OK;
     }
     auto* draft = new(memory) voice::Settings();
-    int got = 0;
-    while (got < req->content_len) {
-        const int n = httpd_req_recv(req, buf + got, req->content_len - got);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (n <= 0) { heap_caps_free(memory); heap_caps_free(buf); return ESP_FAIL; }
-        got += n;
+    if (!ReadBody(req, buf, req->content_len)) {
+        heap_caps_free(memory); heap_caps_free(buf);
+        Reply(req,"408 Request Timeout","{\"error\":\"request body timeout\"}"); return ESP_OK;
     }
+    const int got = req->content_len;
     buf[got] = 0;
     cJSON* root = cJSON_Parse(buf);
     heap_caps_free(buf);
@@ -791,12 +983,8 @@ esp_err_t WriteConfig(httpd_req_t* req) {
         return ESP_OK;
     }
     char buf[513]{};
-    int received = 0;
-    while (received < req->content_len) {
-        int n = httpd_req_recv(req, buf + received, req->content_len - received);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (n <= 0) return ESP_FAIL;
-        received += n;
+    if (!ReadBody(req, buf, req->content_len)) {
+        Reply(req,"408 Request Timeout","{\"error\":\"request body timeout\"}"); return ESP_OK;
     }
     cJSON* root = cJSON_Parse(buf);
     int wake = 0, sleep = 0, chance = 0;
@@ -855,12 +1043,8 @@ esp_err_t TriggerAction(httpd_req_t* req) {
         return ESP_OK;
     }
     char body[97]{};
-    int read = 0;
-    while (read < req->content_len) {
-        const int n = httpd_req_recv(req, body + read, req->content_len - read);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (n <= 0) return ESP_FAIL;
-        read += n;
+    if (!ReadBody(req, body, req->content_len)) {
+        Reply(req,"408 Request Timeout","{\"error\":\"request body timeout\"}"); return ESP_OK;
     }
     cJSON* request = cJSON_Parse(body);
     const cJSON* action = request ? cJSON_GetObjectItemCaseSensitive(request, "action") : nullptr;
@@ -889,13 +1073,11 @@ esp_err_t TriggerVoiceTest(httpd_req_t* req) {
         Reply(req, "503 Service Unavailable", "{\"error\":\"PSRAM unavailable\"}");
         return ESP_OK;
     }
-    int received = 0;
-    while (received < req->content_len) {
-        const int n = httpd_req_recv(req, body + received, req->content_len - received);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (n <= 0) { heap_caps_free(body); return ESP_FAIL; }
-        received += n;
+    if (!ReadBody(req, body, req->content_len)) {
+        heap_caps_free(body);
+        Reply(req,"408 Request Timeout","{\"error\":\"request body timeout\"}"); return ESP_OK;
     }
+    const int received = req->content_len;
     body[received] = '\0';
     cJSON* root = cJSON_ParseWithLength(body, received);
     const cJSON* item = root ? cJSON_GetObjectItemCaseSensitive(root, "text") : nullptr;
@@ -947,7 +1129,7 @@ void Start() {
     // IDF 6.1 supports allocating the HTTP server task stack from PSRAM.
     // Keep the HTTPD/lwIP kernel and DMA-only allocations on their default heaps.
     config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    config.max_uri_handlers = 13;
+    config.max_uri_handlers = 15;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -978,6 +1160,12 @@ void Start() {
     quiet_read.uri = "/api/stage1/quiet"; quiet_read.method = HTTP_GET; quiet_read.handler = ReadQuiet;
     httpd_uri_t quiet_write{};
     quiet_write.uri = "/api/stage1/quiet"; quiet_write.method = HTTP_POST; quiet_write.handler = WriteQuiet;
+    httpd_uri_t environment_read{};
+    environment_read.uri = "/api/stage1/environment"; environment_read.method = HTTP_GET;
+    environment_read.handler = ReadEnvironment;
+    httpd_uri_t environment_write{};
+    environment_write.uri = "/api/stage1/environment"; environment_write.method = HTTP_POST;
+    environment_write.handler = WriteEnvironment;
     httpd_uri_t wifi_read{};
     wifi_read.uri = "/api/stage1/wifi"; wifi_read.method = HTTP_GET;
     wifi_read.handler = stackchan::wifi::web::ReadSettings;
@@ -999,6 +1187,8 @@ void Start() {
         httpd_register_uri_handler(server, &voice_test) != ESP_OK ||
         httpd_register_uri_handler(server, &quiet_read) != ESP_OK ||
         httpd_register_uri_handler(server, &quiet_write) != ESP_OK ||
+        httpd_register_uri_handler(server, &environment_read) != ESP_OK ||
+        httpd_register_uri_handler(server, &environment_write) != ESP_OK ||
         httpd_register_uri_handler(server, &wifi_read) != ESP_OK ||
         httpd_register_uri_handler(server, &wifi_write) != ESP_OK ||
         httpd_register_uri_handler(server, &setup_read) != ESP_OK ||
