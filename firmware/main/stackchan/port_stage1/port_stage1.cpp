@@ -302,7 +302,9 @@ struct Runtime {
             weather_face.reset();
             return;
         }
-        if (suppress_comfort || (bubble && bubble->getVisible()))
+        const bool bubble_overlaps_cold = bubble && bubble->getVisible() &&
+                                          appearance.comfort == weather::Comfort::Cold;
+        if (suppress_comfort || bubble_overlaps_cold)
             appearance.comfort = weather::Comfort::None;
         if (!weather_face)
             weather_face = std::make_unique<AvatarWeatherFace>(lv_screen_active());
@@ -1158,7 +1160,7 @@ void Update(StackChan& sc) {
     if (r.conversation_pose != ConversationPose::None) {
         r.SyncQuietMark(sc, false);
         r.DrawConversation(sc, now);
-        r.SyncWeather(sc, now, true);
+        r.SyncWeather(sc, now, false);
         return;
     }
 
@@ -1252,14 +1254,10 @@ void Update(StackChan& sc) {
          r.conversation_pose == ConversationPose::None &&
          !voice::IsBusy() && !VoicePending() && !r.own_speech &&
          !wake_sequence_active.load()));
-    // Normal Xiaozhi conversation speech is not a Stage-1 announcement, so
-    // voice::IsBusy() alone cannot identify it. Hide temperature comfort
-    // overlays for every non-idle device state. SyncWeather also suppresses
-    // only the overlapping temperature decoration while a bubble is shown.
-    const bool xiaozhi_busy =
-        Application::GetInstance().GetDeviceState() != kDeviceStateIdle;
-    r.SyncWeather(sc, now, xiaozhi_busy || r.own_face || Runtime::Sleeping(state.phase) ||
-                           voice::IsBusy() || VoicePending());
+    // Autonomous faces still own their full expression. Ordinary speech only
+    // suppresses the cold scarf when it physically overlaps the bubble; the
+    // top-left badge and top-right heat drops remain visible.
+    r.SyncWeather(sc, now, r.own_face || Runtime::Sleeping(state.phase));
 }
 
 } // namespace stackchan::stage1
