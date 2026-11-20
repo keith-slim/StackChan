@@ -428,8 +428,10 @@ void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
     // An actual application idle state is sufficient to restore Stage1.
     // Requiring an earlier STANDBY callback would defeat missed-STANDBY
     // recovery and leave the nap scheduler stuck in non-standby.
-    if (normal_rate)
+    if (normal_rate) {
         stackchan::stage1::OnStandby(true);
+        GetHAL().releaseConversationRgbColor();
+    }
     if (normal_rate && !_is_xiaozhi_idle.load())
         ESP_LOGI(TAG, "[IDLE_RECOVERY] normal StackChan update cadence restored");
     _is_xiaozhi_idle.store(normal_rate);
@@ -1035,8 +1037,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         FinishSpeakingAnimation();
 
-        GetHAL().setRgbColor(0, 0, 50, 0);
-        GetHAL().refreshRgb();
+        GetHAL().setConversationRgbColor(0, 50, 0);
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         _is_xiaozhi_ready = true;
@@ -1045,8 +1046,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
         is_idle = true;
 
-        GetHAL().setRgbColor(0, 0, 0, 0);
-        GetHAL().refreshRgb();
+        GetHAL().releaseConversationRgbColor();
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
         if (subtitle_prestart_queued_) {
@@ -1072,8 +1072,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
         }
 
-        GetHAL().setRgbColor(0, 0, 0, 50);
-        GetHAL().refreshRgb();
+        GetHAL().setConversationRgbColor(0, 0, 50);
     } else if (!preserve_touch_caption &&
                !(standalone_speech && strcmp(status, Lang::Strings::CONNECTING) == 0)) {
         avatar.setSpeech(status);
