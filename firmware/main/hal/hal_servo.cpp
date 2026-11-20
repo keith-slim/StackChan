@@ -9,11 +9,13 @@
 #include <smooth_ui_toolkit.hpp>
 #include <mooncake_log.h>
 #include <settings.h>
+#include <mutex>
 
 using namespace smooth_ui_toolkit;
 using namespace stackchan::motion;
 
 static SCSCL _scs_bus;
+static std::mutex _scs_bus_mutex;
 
 struct ServoConfig_t {
     int id             = -1;
@@ -73,6 +75,7 @@ public:
 
     void set_angle_impl(int angle) override
     {
+        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int mapped_angle = _zero_pos + angle * 16 / 5 / 10;  // 一步对应 0.3125度, 0.3125 = 5/16
         mapped_angle     = uitk::clamp(mapped_angle, _runtime_raw_pos_limit.x, _runtime_raw_pos_limit.y);
 
@@ -88,11 +91,15 @@ public:
 
     int getCurrentAngle() override
     {
-        int current_pos = _scs_bus.ReadPos(_config.id);
+        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+        uint8_t communication_error = 0;
+        int current_pos = read_position_with_retry(communication_error);
         if (!is_raw_pos_valid(current_pos)) {
             int fallback_angle = uitk::clamp(Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
-            mclog::tagWarn(_tag, "id: {} ignore invalid current pos: {}, fallback angle: {}", _config.id, current_pos,
-                           fallback_angle);
+            mclog::tagWarn(_tag,
+                           "id: {} ignore invalid current pos after retry: {}, error: {} ({}), fallback angle: {}",
+                           _config.id, current_pos, communication_error_name(communication_error),
+                           static_cast<unsigned>(communication_error), fallback_angle);
             return fallback_angle;
         }
 
@@ -104,6 +111,7 @@ public:
 
     bool is_moving_impl() override
     {
+        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int moving = _scs_bus.ReadMove(_config.id);
         // A failed UART read returns -1; it is not evidence of movement.
         // The animation state is already checked by Servo::isMoving().
@@ -112,21 +120,18 @@ public:
 
     void setTorqueEnabled(bool enabled) override
     {
-        // Record the last COMMAND, not a verified motor state: a UART packet
-        // can be applied even when its ACK is missing. Never retry every 200ms
-        // while idle just because a reply was not received.
+        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+        // The bus is configured for no write ACK. Record the command locally
+        // and avoid adding a 10 ms timeout to every animation frame.
         if (_torque_command_known && _torque_commanded_enabled == enabled) return;
         _torque_command_known = true;
-        const int ack = _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
+        _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
         Servo::setTorqueEnabled(enabled);
-        if (ack != 1) {
-            mclog::tagWarn(_tag, "id: {} torque {} command unacknowledged, ack: {}",
-                           _config.id, enabled ? "ON" : "OFF", ack);
-        }
     }
 
     bool getTorqueEnabled() override
     {
+        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int torque_enable = _scs_bus.ReadToqueEnable(_config.id);
         // mclog::tagInfo(_tag, "id: {} torque enable: {}", _id, torque_enable);
         return torque_enable > 0;
@@ -134,10 +139,14 @@ public:
 
     void setCurrentAngleAsZero() override
     {
-        int current_pos = _scs_bus.ReadPos(_config.id);
+        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+        uint8_t communication_error = 0;
+        int current_pos = read_position_with_retry(communication_error);
         if (!is_raw_pos_valid(current_pos)) {
-            mclog::tagWarn(_tag, "id: {} ignore invalid zero calibration pos: {}, keep zero pos: {}", _config.id,
-                           current_pos, _zero_pos);
+            mclog::tagWarn(_tag,
+                           "id: {} ignore invalid zero calibration pos after retry: {}, error: {} ({}), keep zero pos: {}",
+                           _config.id, current_pos, communication_error_name(communication_error),
+                           static_cast<unsigned>(communication_error), _zero_pos);
             return;
         }
 
@@ -163,6 +172,7 @@ public:
 
     void rotate(int velocity) override
     {
+        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         velocity = uitk::clamp(velocity, -1000, 1000);
 
         if (!_config.enablePwmMode) {
@@ -200,6 +210,31 @@ private:
     int _last_stall_direction       = 0;
     int _stall_confirm_count        = 0;
     bool _last_stall_feedback_valid = false;
+
+    static const char* communication_error_name(uint8_t error)
+    {
+        switch (error) {
+            case 0: return "invalid_range";
+            case ERR_NO_REPLY: return "no_reply";
+            case ERR_CRC_CMP: return "checksum";
+            case ERR_SLAVE_ID: return "wrong_id";
+            case ERR_BUFF_LEN: return "wrong_length";
+            default: return "unknown";
+        }
+    }
+
+    // Caller holds _scs_bus_mutex. A single retry filters an isolated UART
+    // reply loss without hiding a persistent wiring, power or servo fault.
+    int read_position_with_retry(uint8_t& communication_error)
+    {
+        int current_pos = _scs_bus.ReadPos(_config.id);
+        communication_error = _scs_bus.getLastError();
+        if (current_pos >= 0 || communication_error == 0) return current_pos;
+        vTaskDelay(pdMS_TO_TICKS(1));
+        current_pos = _scs_bus.ReadPos(_config.id);
+        communication_error = _scs_bus.getLastError();
+        return current_pos;
+    }
 
     static int abs_int(int value)
     {
@@ -342,7 +377,12 @@ void Hal::servo_init()
 {
     mclog::tagInfo("HAL-Servo", "init");
 
-    _scs_bus.begin(UART_NUM_1, 1000000, 6, 7);
+    if (!_scs_bus.begin(UART_NUM_1, 1000000, 6, 7)) {
+        mclog::tagError("HAL-Servo", "failed to initialize UART1");
+    }
+    // These servos execute writes but do not reliably return write-status
+    // packets. Reads still wait for and validate their normal response packet.
+    _scs_bus.Level = 0;
 
     ServoConfig_t yaw_servo_config;
     yaw_servo_config.id                     = 1;
