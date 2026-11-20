@@ -144,10 +144,10 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         voice::SceneChanged(state.phase, now);
     }
     if (!config) return;
-    if (quiet_mode::Active()) {
+    const bool quiet = quiet_mode::Active();
+    if (quiet) {
         if (voice::SleepActive()) avatar_dream::EndTalk();
         voice::Quiet();
-        return;
     }
     if (entered) {
         switch (state.phase) {
@@ -161,12 +161,12 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         case Phase::NightWake:
             if (state.wake_reason == WakeReason::Touch && config->touch[0])
                 voice::QueueScene(voice::Kind::Touch);
-            else if (state.wake_reason == WakeReason::Timer && config->timer[0])
+            else if (!quiet && state.wake_reason == WakeReason::Timer && config->timer[0])
                 voice::QueueScene(voice::Kind::Timer);
             // Wake-word speech belongs to Xiaozhi; never queue a duplicate.
             break;
         case Phase::NapSleep:
-            voice::EnterNap(*config, now);
+            if (!quiet) voice::EnterNap(*config, now);
             break;
         default: break;
         }
@@ -174,7 +174,7 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
     if (voice::TickScene(*config, state.phase, now) &&
         dream_remark.motif != avatar_dream::Motif::None)
         dream_remark.timer_requested = true;
-    if (state.phase != Phase::NapSleep) return;
+    if (state.phase != Phase::NapSleep || quiet) return;
 
     // During a nap, completion or send failure rearms the same voice kind.
     voice::ResumeNap(*config, now);
@@ -1067,10 +1067,13 @@ bool RequestCue(const char* id) {
 void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
+    quiet_mode::Tick();
+    if (const auto* config = voice::Current())
+        voice::TickMonologue(*config, r.phase, false, now); // pause/resume even during conversation
     // While sleeping, the quiet mark is part of the rest face and must not
     // disappear just because an announcement/transport becomes busy.
     // Explicit wake and conversation still control their own overlay.
-    const bool quiet_sleep = quiet_mode::Active() &&
+    const bool quiet_sleep = quiet_mode::Active() && !voice::IsBusy() &&
                              Runtime::Sleeping(r.phase) &&
                              !wake_sequence_active.load();
     if (!quiet_sleep &&
@@ -1208,7 +1211,7 @@ void Update(StackChan& sc) {
     // original rule: hide during conversation, actions and playback.
     // Render after face updates so it follows the real mouth position.
     const bool quiet_active = quiet_mode::Active();
-    const bool sleeping_quiet = quiet_active && Runtime::Sleeping(state.phase) &&
+    const bool sleeping_quiet = quiet_active && !voice::IsBusy() && Runtime::Sleeping(state.phase) &&
                                 !wake_sequence_active.load();
     r.SyncQuietMark(sc, sleeping_quiet ||
         (quiet_active && standby && !r.cue_active &&

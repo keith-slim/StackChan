@@ -15,6 +15,8 @@ uint32_t scene_since = 0, next_snore_at = 0, next_talk_at = 0;
 uint32_t next_monologue_at = 0;
 uint16_t monologue_min = 0, monologue_max = 0;
 bool monologue_enabled = false;
+bool monologue_paused = false;
+uint32_t monologue_remaining = 0;
 
 const char* Tag(Kind kind) {
     switch (kind) {
@@ -68,7 +70,7 @@ void Cancel() {
     // Only snore/sleep-talk can be canceled. Leave greetings and conversation.
     Application::GetInstance().CancelSleepAnnouncement();
 }
-bool Request(const Settings& config, const char* kind, const char* text) {
+bool Request(const Settings& config, const char* kind, const char* text, bool manual) {
     (void)config;
     if (!kind || !text || !text[0] || std::strlen(text) > 512) return false;
     // Only autonomous announcements are silenced. Touch/wake-word and
@@ -77,14 +79,12 @@ bool Request(const Settings& config, const char* kind, const char* text) {
                             std::strcmp(kind, "sleep_talk") == 0 ||
                             std::strcmp(kind, "dream_remark") == 0 ||
                             std::strcmp(kind, "monologue") == 0 ||
-                            std::strcmp(kind, "bedtime") == 0 ||
-                            std::strcmp(kind, "morning") == 0 ||
                             std::strcmp(kind, "timer") == 0;
-    if (autonomous && quiet_mode::Active()) {
+    if (!manual && autonomous && quiet_mode::Active()) {
         ESP_LOGI(TAG, "[SPEECH] kind=%s phase=suppressed_quiet", kind);
         return false;
     }
-    const bool queued = Application::GetInstance().RequestAnnouncement(kind, text);
+    const bool queued = Application::GetInstance().RequestAnnouncement(kind, text, manual);
     ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s transport=ws12800",
              kind, queued ? "requested" : "busy_or_unavailable");
     return queued;
@@ -96,6 +96,8 @@ void Reset() {
     next_monologue_at = 0;
     monologue_min = monologue_max = 0;
     monologue_enabled = false;
+    monologue_paused = false;
+    monologue_remaining = 0;
 }
 void SceneChanged(Phase phase, uint32_t now) {
     pending_scene = Kind::None;
@@ -133,9 +135,9 @@ void LeaveNap() {
     next_snore_at = next_talk_at = 0;
 }
 void Quiet() {
-    pending_scene = Kind::None;
+    // Morning, bedtime and explicit touch greetings are not background speech.
+    if (pending_scene == Kind::Timer) pending_scene = Kind::None;
     next_snore_at = next_talk_at = 0;
-    next_monologue_at = 0;
     if (active_sleep != Kind::None) Cancel();
     active_sleep = Kind::None;
 }
@@ -176,10 +178,26 @@ bool TickMonologue(const Settings& config, Phase phase, bool eligible, uint32_t 
         monologue_min = config.monologue_min;
         monologue_max = config.monologue_max;
         next_monologue_at = 0;
+        monologue_paused = false;
+        monologue_remaining = 0;
     }
     if (!config.monologue_enabled || !config.monologue_prompt[0]) {
         next_monologue_at = 0;
+        monologue_paused = false;
+        monologue_remaining = 0;
         return false;
+    }
+    if (quiet_mode::Active()) {
+        if (!monologue_paused) {
+            monologue_remaining = next_monologue_at && static_cast<int32_t>(next_monologue_at - now) > 0
+                ? next_monologue_at - now : (next_monologue_at ? 1U : MonologueDelay(config));
+            monologue_paused = true;
+        }
+        return false;
+    }
+    if (monologue_paused) {
+        next_monologue_at = now + monologue_remaining;
+        monologue_paused = false;
     }
     // Awake/idle is checked again by Application::RequestAnnouncement.
     if (phase != Phase::Awake || !eligible) return false;

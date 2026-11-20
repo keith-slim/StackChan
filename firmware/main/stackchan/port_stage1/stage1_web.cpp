@@ -144,16 +144,24 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <p id="testSpeechStatus" class="status" role="status">待機中</p></section>
 <section id="quiet" class="card"><h2>お黙りモード</h2>
 <p id="quietStatus" class="status" role="status">状態を読み込み中…</p>
-<div id="quietPresets" class="buttons">
-<button type="button" data-quiet-minutes="15">15分</button>
-<button type="button" data-quiet-minutes="30">30分</button>
-<button type="button" data-quiet-minutes="60">60分</button>
-<button type="button" class="danger" data-quiet-minutes="0">解除</button>
-</div>
-<div class="setup-row"><label>任意の時間（1～1440分）
-<input id="quietMinutes" type="number" min="1" max="1440" value="30" required></label>
-<button type="button" id="quietApply">設定</button></div>
-<small>独り言、寝言、いびきなどの自動発話を一時停止します。通常会話、ウェイクワード、Webの手動テストは使用できます。設定はNVSへ保存され、再起動後も終了時刻まで有効です。</small>
+<div class="buttons"><button type="button" class="danger" id="quietCancel" disabled>今回のお黙りモードを解除</button></div>
+<small>独り言・いびき・寝言・昼寝からの自動起床時の発話・夢の感想を停止します。起床・就寝時の挨拶、ウェイクワード、手動会話、Webテスト、無音の小芝居は従来どおり。待受中は口に白いテープを表示します。</small>
+<h3>今から静かにする</h3>
+<div class="setup-row"><label>時間（分）<input id="quietMinutes" type="number" min="1" max="1440" value="30"></label>
+<button type="button" id="quietApply" disabled>この時間だけ静かにする</button></div>
+<small>1～1440分。時間を省略した「静かにして」「黙って」は30分。</small>
+<h3>指定時刻まで</h3>
+<div class="setup-row"><label>終了時刻<input id="quietUntil" type="time" value="15:00"></label>
+<button type="button" id="quietApplyUntil" disabled>この時刻まで静かにする</button></div>
+<small>すでに過ぎた時刻は翌日まで。</small>
+<h3>時間帯の予約</h3>
+<label class="check"><input id="quietEnabled" type="checkbox">時間帯の予約を使用</label>
+<label class="check"><input id="quietDaily" type="checkbox" checked>毎日繰り返す</label>
+<div class="fields"><label>開始時刻<input id="quietStart" type="time" value="12:00"></label>
+<label>終了時刻<input id="quietEnd" type="time" value="13:00"></label></div>
+<div class="buttons"><button type="button" id="quietSave" disabled>保存して反映</button></div>
+<small>日をまたぐ予約に対応。毎日をオフにすると次の該当時間帯の一回だけ。今回だけ解除しても翌日の予約は維持します。一時指定と予約が重なる場合は遅い終了時刻まで有効です。再起動後も保存設定を使用します。</small>
+<p id="quietActionStatus" class="status" role="status"></p>
 </section>
 <section id="actions" class="card"><h2>サーボアクションの実機テスト</h2>
 <small>現在位置から相対的に動作します。うなずき・首振りは開始位置へ戻り、ほかの動作は終了位置を維持します。可動域は自動で制限します。</small>
@@ -313,36 +321,39 @@ testMonologue.addEventListener('click',async()=>{
  }catch(e){message.textContent='失敗: '+e.message;}
  finally{testMonologue.disabled=false;}
 });
-const quietStatus=document.getElementById('quietStatus');
+const quietStatus=document.getElementById('quietStatus'), q=id=>document.getElementById(id);
+let quietLoaded=false,quietPending=false,quietData=null;
+function quietButtons(){
+ for(const id of ['quietApply','quietApplyUntil','quietSave','quietCancel'])
+  q(id).disabled=!quietLoaded||quietPending||(id==='quietCancel'&&!quietData.active);
+}
+function renderQuiet(data,fill){
+ quietData=data;quietLoaded=true;
+ if(fill){q('quietEnabled').checked=data.settings.enabled;q('quietDaily').checked=data.settings.daily;q('quietStart').value=data.settings.start_time;q('quietEnd').value=data.settings.end_time;}
+ quietStatus.textContent=!data.clock_ready?'本体の時刻同期を待っています。':data.active?'お黙りモード中 ／ '+new Date(data.until*1000).toLocaleString('ja-JP')+' まで（残り約'+Math.max(1,Math.ceil(data.remaining_seconds/60))+'分）':'通常動作中'+(data.settings.enabled?' ／ '+(data.settings.daily?'毎日予約あり':data.settings.once_end>data.now?'一回予約あり':'一回予約終了'):'');
+ quietButtons();
+}
 async function loadQuiet(){
- try{
-  const res=await fetch('/api/stage1/quiet',{cache:'no-store'});
-  if(!res.ok)throw Error('HTTP '+res.status);
-  const data=await res.json();
-  if(data.active){
-   const minutes=Math.max(1,Math.ceil(Number(data.remaining_seconds)/60));
-   quietStatus.textContent='お黙りモード中（残り約'+minutes+'分）';
-  }else quietStatus.textContent='解除中（自動発話できます）';
- }catch(e){quietStatus.textContent='状態を取得できません: '+e.message;}
+ if(quietPending)return;
+ try{const res=await fetch('/api/stage1/quiet',{cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);const data=await res.json();if(!quietPending)renderQuiet(data,!quietLoaded);}
+ catch(e){quietStatus.textContent='状態を取得できません: '+e.message;}
 }
-async function setQuiet(minutes,button){
- if(!Number.isInteger(minutes)||minutes<0||minutes>1440){quietStatus.textContent='時間は1～1440分で指定してください';return;}
- const buttons=document.querySelectorAll('#quiet button');buttons.forEach(b=>b.disabled=true);
- quietStatus.textContent=minutes?'設定中…':'解除中…';
+async function setQuiet(body){
+ if(!quietLoaded||quietPending)return;
+ quietPending=true;quietButtons();q('quietActionStatus').textContent='保存して反映中…';
  try{
-  const res=await fetch('/api/stage1/quiet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({minutes})});
-  if(!res.ok)throw Error('HTTP '+res.status+': '+await res.text());
-  await loadQuiet();
- }catch(e){quietStatus.textContent='変更できません: '+e.message;}
- finally{buttons.forEach(b=>b.disabled=false);}
+  const res=await fetch('/api/stage1/quiet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!res.ok)throw Error(await res.text());
+  renderQuiet(await res.json(),body.action==='schedule');
+  q('quietActionStatus').textContent=body.action==='cancel'?'今回のお黙りモードを解除しました。':'保存して反映しました。';
+ }catch(e){q('quietActionStatus').textContent='保存失敗: '+e.message;}
+ finally{quietPending=false;quietButtons();}
 }
-document.getElementById('quietPresets').addEventListener('click',e=>{
- const button=e.target.closest('button[data-quiet-minutes]');if(button)setQuiet(Number(button.dataset.quietMinutes),button);
-});
-document.getElementById('quietApply').addEventListener('click',e=>{
- const field=document.getElementById('quietMinutes');if(field.reportValidity())setQuiet(Number(field.value),e.currentTarget);
-});
-setInterval(loadQuiet,60000);
+q('quietCancel').addEventListener('click',()=>setQuiet({action:'cancel'}));
+q('quietApply').addEventListener('click',()=>{const n=Number(q('quietMinutes').value);if(!Number.isInteger(n)||n<1||n>1440){q('quietActionStatus').textContent='時間は1～1440分で指定してください。';return;}setQuiet({action:'minutes',minutes:n});});
+q('quietApplyUntil').addEventListener('click',()=>{if(q('quietUntil').value)setQuiet({action:'until',end_time:q('quietUntil').value});});
+q('quietSave').addEventListener('click',()=>{const start=q('quietStart').value,end=q('quietEnd').value;if(!start||!end||start===end){q('quietActionStatus').textContent='開始と終了は異なる時刻を指定してください。';return;}setQuiet({action:'schedule',enabled:q('quietEnabled').checked,daily:q('quietDaily').checked,start_time:start,end_time:end});});
+setInterval(loadQuiet,10000);
 const wifiList=document.getElementById('wifiNetworks'),wifiStatus=document.getElementById('wifiStatus');
 let wifiSaved=[],wifiActive='';
 const ipFields=[['ip','IPアドレス'],['subnet','サブネットマスク'],['gw','ゲートウェイ'],['dns1','DNS1'],['dns2','DNS2（任意）']];
@@ -584,10 +595,17 @@ esp_err_t ReadConfig(httpd_req_t* req) {
     return ESP_OK;
 }
 esp_err_t ReadQuiet(httpd_req_t* req) {
-    const uint32_t remaining = quiet_mode::RemainingSeconds();
-    char json[80];
-    std::snprintf(json, sizeof(json), "{\"active\":%s,\"remaining_seconds\":%u}",
-                  remaining ? "true" : "false", static_cast<unsigned>(remaining));
+    const auto s = quiet_mode::GetStatus();
+    const auto& v = s.settings;
+    char json[512];
+    std::snprintf(json, sizeof(json),
+        "{\"active\":%s,\"clock_ready\":%s,\"until\":%u,\"now\":%u,\"remaining_seconds\":%u,"
+        "\"settings\":{\"enabled\":%s,\"daily\":%s,\"start_time\":\"%02u:%02u\",\"end_time\":\"%02u:%02u\","
+        "\"once_start\":%u,\"once_end\":%u,\"temporary_until\":%u,\"skip_until\":%u}}",
+        s.active?"true":"false", s.clock_ready?"true":"false", (unsigned)s.until, (unsigned)s.now,
+        (unsigned)(s.active?s.until-s.now:0), v.enabled?"true":"false", v.daily?"true":"false",
+        (unsigned)(v.start_minute/60), (unsigned)(v.start_minute%60), (unsigned)(v.end_minute/60), (unsigned)(v.end_minute%60),
+        (unsigned)v.once_start, (unsigned)v.once_end, (unsigned)v.temporary_until, (unsigned)v.skip_until);
     Reply(req, "200 OK", json);
     return ESP_OK;
 }
@@ -707,34 +725,58 @@ bool Uint(const cJSON* root, const char* key, int min, int max, int step, int& v
     value = static_cast<int>(n);
     return true;
 }
+bool QuietTime(const cJSON* root, const char* key, uint16_t& minute) {
+    const auto* item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!cJSON_IsString(item) || std::strlen(item->valuestring)!=5) return false;
+    const char* s = item->valuestring;
+    if(s[2]!=':'||s[0]<'0'||s[0]>'9'||s[1]<'0'||s[1]>'9'||s[3]<'0'||s[3]>'9'||s[4]<'0'||s[4]>'9') return false;
+    const unsigned h=(s[0]-'0')*10+s[1]-'0', m=(s[3]-'0')*10+s[4]-'0';
+    if(h>=24||m>=60)return false;
+    minute=h*60+m;return true;
+}
 esp_err_t WriteQuiet(httpd_req_t* req) {
     char content_type[64]{};
     if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
         std::strncmp(content_type, "application/json", 16) != 0) {
-        Reply(req, "415 Unsupported Media Type", "{\"error\":\"JSON required\"}");
-        return ESP_OK;
+        Reply(req,"415 Unsupported Media Type","{\"error\":\"JSON required\"}");return ESP_OK;
     }
-    if (req->content_len < 1 || req->content_len > 64) {
-        Reply(req, "400 Bad Request", "{\"error\":\"invalid quiet request\"}");
-        return ESP_OK;
+    if(req->content_len<1||req->content_len>256){
+        Reply(req,"400 Bad Request","{\"error\":\"invalid quiet request\"}");return ESP_OK;
     }
-    char body[65]{};
-    int received = 0;
-    while (received < req->content_len) {
-        const int n = httpd_req_recv(req, body + received, req->content_len - received);
-        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (n <= 0) return ESP_FAIL;
-        received += n;
+    char body[257]{};
+    int received=0;
+    while(received<req->content_len){
+        const int n=httpd_req_recv(req,body+received,req->content_len-received);
+        if(n<=0)return ESP_FAIL;
+        received+=n;
     }
-    cJSON* root = cJSON_ParseWithLength(body, received);
-    int minutes = 0;
-    const bool valid = root && cJSON_IsObject(root) &&
-        Uint(root, "minutes", 0, 1440, 1, minutes);
-    const bool saved = valid && quiet_mode::SetMinutes(minutes);
+    cJSON* root=cJSON_ParseWithLength(body,received);
+    using namespace quiet_mode;
+    Request request;
+    bool valid=cJSON_IsObject(root);
+    const auto* action=cJSON_GetObjectItemCaseSensitive(root,"action");
+    if(valid){
+        const char* name=cJSON_IsString(action)?action->valuestring:"";
+        if(!action||!std::strcmp(name,"minutes")){
+            int n=0;valid=Uint(root,"minutes",action?1:0,1440,1,n);
+            request.action=n?Action::Minutes:Action::Cancel;request.minutes=n;
+        } else if(!std::strcmp(name,"cancel"))request.action=Action::Cancel;
+        else if(!std::strcmp(name,"until")){
+            request.action=Action::Until;valid=QuietTime(root,"end_time",request.end);
+        } else if(!std::strcmp(name,"schedule")){
+            request.action=Action::Schedule;
+            const auto* enabled=cJSON_GetObjectItemCaseSensitive(root,"enabled");
+            const auto* daily=cJSON_GetObjectItemCaseSensitive(root,"daily");
+            valid=cJSON_IsBool(enabled)&&cJSON_IsBool(daily)&&QuietTime(root,"start_time",request.start)&&
+                QuietTime(root,"end_time",request.end)&&request.start!=request.end;
+            request.enabled=cJSON_IsTrue(enabled);request.daily=cJSON_IsTrue(daily);
+        } else valid=false;
+    }
     cJSON_Delete(root);
-    Reply(req, !valid ? "400 Bad Request" : !saved ? "500 Internal Server Error" : "200 OK",
-          !valid ? "{\"error\":\"minutes must be 0 to 1440\"}" :
-          !saved ? "{\"error\":\"NVS save failed or clock unavailable\"}" : "{\"ok\":true}");
+    const auto result=valid?Apply(request):ESP_ERR_INVALID_ARG;
+    if(result==ESP_OK)return ReadQuiet(req);
+    Reply(req,(result==ESP_ERR_INVALID_ARG||result==ESP_ERR_INVALID_STATE)?"400 Bad Request":"500 Internal Server Error",
+        result==ESP_ERR_INVALID_STATE?"{\"error\":\"clock unavailable\"}":result==ESP_ERR_INVALID_ARG?"{\"error\":\"invalid quiet settings\"}":"{\"error\":\"NVS save failed\"}");
     return ESP_OK;
 }
 esp_err_t WriteConfig(httpd_req_t* req) {
@@ -867,7 +909,7 @@ esp_err_t TriggerVoiceTest(httpd_req_t* req) {
     if (valid) {
         LvglLockGuard lock;
         const auto* config = voice::Current();
-        if (config) accepted = voice::Request(*config, kind, content);
+        if (config) accepted = voice::Request(*config, kind, content, true);
     }
     cJSON_Delete(root);
     heap_caps_free(body);

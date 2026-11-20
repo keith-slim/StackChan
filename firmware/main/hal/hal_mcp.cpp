@@ -232,16 +232,34 @@ void Hal::xiaozhi_mcp_init()
     mclog::tagInfo(_tag, "add robot.set_quiet_mode tool");
     mcp_server.AddTool(
         "self.robot.set_quiet_mode",
-        "Silence autonomous speech, sleep talk and snoring temporarily. "
-        "Does not disable manual conversation, wake words, or Web tests. "
-        "minutes=0 cancels; 1..1440 schedules a temporary quiet period. "
+        "Set or cancel quiet mode. action=minutes (0 cancels), until, schedule, cancel, cancel_if_active. "
+        "start/end are minutes since local midnight (0..1439); daily and enabled apply to schedule. "
         "Only call on an explicit user request.",
-        PropertyList({Property("minutes", kPropertyTypeInteger, 30, 0, 1440)}),
+        PropertyList({Property("minutes", kPropertyTypeInteger, 30, 0, 1440),
+                      Property("action", kPropertyTypeString, std::string("minutes")).SetMaxLength(24),
+                      Property("start", kPropertyTypeInteger, 720, 0, 1439),
+                      Property("end", kPropertyTypeInteger, 780, 0, 1439),
+                      Property("daily", kPropertyTypeBoolean, true),
+                      Property("enabled", kPropertyTypeBoolean, true)}),
         [](const PropertyList& properties) -> ReturnValue {
-            const int minutes = properties["minutes"].value<int>();
-            const bool saved = stackchan::stage1::quiet_mode::SetMinutes(minutes);
-            mclog::tagInfo(_tag, "set_quiet_mode: minutes={} saved={}", minutes, saved);
-            return saved;
+            using namespace stackchan::stage1::quiet_mode;
+            const auto& action = properties["action"].value<std::string>();
+            Request request;
+            request.minutes = properties["minutes"].value<int>();
+            request.start = properties["start"].value<int>();
+            request.end = properties["end"].value<int>();
+            request.daily = properties["daily"].value<bool>();
+            request.enabled = properties["enabled"].value<bool>();
+            if (action == "minutes") request.action = request.minutes ? Action::Minutes : Action::Cancel;
+            else if (action == "until") request.action = Action::Until;
+            else if (action == "schedule") request.action = Action::Schedule;
+            else if (action == "cancel" || action == "cancel_if_active") {
+                if (action == "cancel_if_active" && !Active()) return true;
+                request.action = Action::Cancel;
+            } else return false;
+            const auto result = Apply(request, true);
+            mclog::tagInfo(_tag, "set_quiet_mode: action={} saved={}", action, result == ESP_OK);
+            return result == ESP_OK;
         });
 
     // Voice relative volume control complements the existing

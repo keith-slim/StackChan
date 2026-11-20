@@ -9,7 +9,7 @@ namespace stackchan::stage1::voice {
 enum class Kind : uint8_t {
     None, Bedtime, Morning, Touch, Timer, Snore, SleepTalk
 };
-bool Request(const Settings& config, const char* kind, const char* text);
+bool Request(const Settings& config, const char* kind, const char* text, bool manual = false);
 bool IsBusy(); // Queued/generating/playing voice; used for scene ordering.
 uint8_t SleepSoundPlaying(); // 0=none, 1=snore, 2=sleep talk; actual playback.
 void Cancel(); // Invalidate a stale nap voice, not a greeting or conversation.

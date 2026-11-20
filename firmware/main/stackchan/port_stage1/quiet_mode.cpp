@@ -1,77 +1,100 @@
 #include "quiet_mode.h"
+#include <application.h>
 #include <nvs.h>
 #include <esp_log.h>
-#include <atomic>
-#include <cstdint>
-#include <ctime>
-#include <limits>
+#include <mutex>
 
 extern "C" void stackchan_nvs_commit_observer(void);
 
 namespace stackchan::stage1::quiet_mode {
 namespace {
 constexpr char kNamespace[] = "sc_quiet";
-constexpr char kUntilKey[] = "until";
-constexpr time_t kValidClock = 1704067200; // 2024-01-01 UTC
+constexpr char kSettingsKey[] = "settings_v1";
 constexpr char kTag[] = "STAGE1-QUIET";
-std::atomic<uint32_t> until_epoch{0};
+std::mutex state_mutex, write_mutex;
+Settings settings;
+bool observed_active = false;
+void ObserveLocked(bool voice_command) {
+    const bool active = Evaluate(settings, std::time(nullptr)).active;
+    if (active == observed_active) return;
+    observed_active = active;
+    ESP_LOGI(kTag, "[QUIET] active=%d", active);
+    // Only schedules work; no network or LVGL operation under this lock.
+    if (active) Application::GetInstance().QuietModeStarted(voice_command);
+}
 }
 
 void Init() {
-    until_epoch.store(0, std::memory_order_release);
+    std::lock_guard<std::mutex> writer(write_mutex);
+    Settings loaded;
     nvs_handle_t handle;
     const esp_err_t err = nvs_open(kNamespace, NVS_READONLY, &handle);
-    if (err == ESP_ERR_NVS_NOT_FOUND) return;
-    if (err != ESP_OK) {
-        ESP_LOGW(kTag, "Could not read NVS: %s", esp_err_to_name(err));
-        return;
+    if (err == ESP_OK) {
+        size_t size = sizeof(loaded);
+        const auto read = nvs_get_blob(handle, kSettingsKey, &loaded, &size);
+        if (read == ESP_ERR_NVS_NOT_FOUND) {
+            loaded = {};
+            nvs_get_u32(handle, "until", &loaded.temporary_until);
+        } else if (read != ESP_OK || size != sizeof(loaded) || !Valid(loaded)) {
+            ESP_LOGW(kTag, "Invalid stored quiet settings");
+            loaded = {};
+        }
+        nvs_close(handle);
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(kTag, "NVS read failed: %s", esp_err_to_name(err));
     }
-    uint32_t value = 0;
-    const esp_err_t read = nvs_get_u32(handle, kUntilKey, &value);
-    nvs_close(handle);
-    if (read == ESP_OK) until_epoch.store(value, std::memory_order_release);
-    else if (read != ESP_ERR_NVS_NOT_FOUND)
-        ESP_LOGW(kTag, "Invalid quiet settings: %s", esp_err_to_name(read));
+    std::lock_guard<std::mutex> lock(state_mutex);
+    settings = loaded;
+    observed_active = false;
 }
-
-bool Active() {
-    return RemainingSeconds() != 0;
+Status GetStatus() {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return Evaluate(settings, std::time(nullptr));
 }
-
+bool Active() { return GetStatus().active; }
 uint32_t RemainingSeconds() {
-    const uint32_t until = until_epoch.load(std::memory_order_acquire);
-    if (!until) return 0;
-    const time_t now = std::time(nullptr);
-    if (now < kValidClock || static_cast<uint64_t>(now) >= until) return 0;
-    return until - static_cast<uint32_t>(now);
+    const auto status = GetStatus();
+    return status.active ? status.until - status.now : 0;
 }
-
-bool SetMinutes(int minutes) {
-    if (minutes < 0 || minutes > 1440) return false;
-    uint32_t next = 0;
-    if (minutes) {
-        const time_t now = std::time(nullptr);
-        if (now < kValidClock || static_cast<uint64_t>(now) >
-            std::numeric_limits<uint32_t>::max() - static_cast<uint32_t>(minutes) * 60U)
-            return false;
-        next = static_cast<uint32_t>(now) + static_cast<uint32_t>(minutes) * 60U;
+void Tick() {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    ObserveLocked(false);
+}
+esp_err_t Apply(const Request& request, bool voice_command) {
+    const bool requires_clock = request.action != Action::Cancel &&
+        !(request.action == Action::Schedule && !request.enabled);
+    std::lock_guard<std::mutex> writer(write_mutex);
+    const int64_t now = std::time(nullptr);
+    if (requires_clock && !ClockReady(now)) return ESP_ERR_INVALID_STATE;
+    Settings next;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        next = settings;
     }
+    if (!Modify(next, request, now) || !Valid(next)) return ESP_ERR_INVALID_ARG;
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(kTag, "NVS open failed: %s", esp_err_to_name(err));
-        return false;
-    }
-    err = nvs_set_u32(handle, kUntilKey, next);
+    auto err = nvs_open(kNamespace, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_blob(handle, kSettingsKey, &next, sizeof(next));
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
     if (err != ESP_OK) {
         ESP_LOGE(kTag, "NVS save failed: %s", esp_err_to_name(err));
-        return false;
+        return err;
     }
-    until_epoch.store(next, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        settings = next;
+        ObserveLocked(voice_command);
+    }
     stackchan_nvs_commit_observer();
-    ESP_LOGI(kTag, "Quiet mode %s, minutes=%d", next ? "enabled" : "disabled", minutes);
-    return true;
+    return ESP_OK;
 }
+bool SetMinutes(int minutes) {
+    if (minutes < 0 || minutes > 1440) return false;
+    Request request;
+    request.action = minutes ? Action::Minutes : Action::Cancel;
+    request.minutes = minutes;
+    return Apply(request) == ESP_OK;
 }
+} // namespace stackchan::stage1::quiet_mode

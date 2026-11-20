@@ -1,12 +1,13 @@
 #pragma once
-
-#include <cstdint>
+#include "quiet_schedule.h"
+#include <esp_err.h>
 
 namespace stackchan::stage1::quiet_mode {
-// NVS-backed temporary suppression of autonomous speech only.
-// Conversation and explicit wake-word interaction remain available.
 void Init();
+Status GetStatus();
 bool Active();
 uint32_t RemainingSeconds();
-bool SetMinutes(int minutes); // 0=cancel, 1..1440=temporary silence.
+esp_err_t Apply(const Request& request, bool voice_command = false);
+bool SetMinutes(int minutes);
+void Tick(); // Detect scheduled activation even during conversation.
 }
