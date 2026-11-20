@@ -59,6 +59,7 @@ private:
     stackchan::avatar::Emotion speech_emotion_before_ = stackchan::avatar::Emotion::Neutral;
 
     void FinishSpeakingAnimation();
+    void ReconcileIdleLifecycle(bool device_idle);
     void ReconcileIdleModifiers(bool idle);
     void AdvanceSubtitle();
     void AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary);
