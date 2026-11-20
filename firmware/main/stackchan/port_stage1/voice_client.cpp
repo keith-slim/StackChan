@@ -12,6 +12,9 @@ Kind pending_scene = Kind::None;
 Kind active_sleep = Kind::None;
 Phase scene_phase = Phase::Boot;
 uint32_t scene_since = 0, next_snore_at = 0, next_talk_at = 0;
+uint32_t next_monologue_at = 0;
+uint16_t monologue_min = 0, monologue_max = 0;
+bool monologue_enabled = false;
 
 const char* Tag(Kind kind) {
     switch (kind) {
@@ -35,6 +38,17 @@ const char* Phrase(const Settings& config, Kind kind) {
 }
 uint32_t Delay(uint16_t lo, uint16_t hi) {
     return (static_cast<uint32_t>(lo) + esp_random() % (static_cast<uint32_t>(hi - lo) + 1)) * 1000;
+}
+uint32_t MonologueDelay(const Settings& config) {
+    const uint32_t minutes = static_cast<uint32_t>(config.monologue_min) +
+        esp_random() % (static_cast<uint32_t>(config.monologue_max - config.monologue_min) + 1);
+    return minutes * 60U * 1000U;
+}
+void RearmMonologue(const Settings& config, uint32_t now) {
+    const uint32_t delay = MonologueDelay(config);
+    next_monologue_at = now + delay;
+    ESP_LOGI(TAG, "[SPEECH] kind=monologue phase=scheduled delay_minutes=%u",
+             static_cast<unsigned>(delay / 60000U));
 }
 void Rearm(const Settings& config, Kind kind, uint32_t now) {
     if (kind == Kind::Snore)
@@ -62,6 +76,7 @@ bool Request(const Settings& config, const char* kind, const char* text) {
     const bool autonomous = std::strcmp(kind, "snore") == 0 ||
                             std::strcmp(kind, "sleep_talk") == 0 ||
                             std::strcmp(kind, "dream_remark") == 0 ||
+                            std::strcmp(kind, "monologue") == 0 ||
                             std::strcmp(kind, "bedtime") == 0 ||
                             std::strcmp(kind, "morning") == 0 ||
                             std::strcmp(kind, "timer") == 0;
@@ -78,6 +93,9 @@ void Reset() {
     pending_scene = active_sleep = Kind::None;
     scene_phase = Phase::Boot;
     scene_since = next_snore_at = next_talk_at = 0;
+    next_monologue_at = 0;
+    monologue_min = monologue_max = 0;
+    monologue_enabled = false;
 }
 void SceneChanged(Phase phase, uint32_t now) {
     pending_scene = Kind::None;
@@ -117,6 +135,7 @@ void LeaveNap() {
 void Quiet() {
     pending_scene = Kind::None;
     next_snore_at = next_talk_at = 0;
+    next_monologue_at = 0;
     if (active_sleep != Kind::None) Cancel();
     active_sleep = Kind::None;
 }
@@ -147,5 +166,31 @@ bool RequestSleep(Kind kind, const Settings& config, const char* text, uint32_t 
     }
     Rearm(config, kind, now);
     return false;
+}
+
+bool TickMonologue(const Settings& config, Phase phase, bool eligible, uint32_t now) {
+    // Web changes take effect without a reboot and start a fresh interval.
+    if (monologue_enabled != config.monologue_enabled ||
+        monologue_min != config.monologue_min || monologue_max != config.monologue_max) {
+        monologue_enabled = config.monologue_enabled;
+        monologue_min = config.monologue_min;
+        monologue_max = config.monologue_max;
+        next_monologue_at = 0;
+    }
+    if (!config.monologue_enabled || !config.monologue_prompt[0]) {
+        next_monologue_at = 0;
+        return false;
+    }
+    // Awake/idle is checked again by Application::RequestAnnouncement.
+    if (phase != Phase::Awake || !eligible) return false;
+    if (!next_monologue_at) {
+        RearmMonologue(config, now);
+        return false;
+    }
+    if (static_cast<int32_t>(now - next_monologue_at) < 0) return false;
+
+    const bool accepted = Request(config, "monologue", config.monologue_prompt);
+    RearmMonologue(config, now); // A busy/error event never spins or retries immediately.
+    return accepted;
 }
 } // namespace stackchan::stage1::voice

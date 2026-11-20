@@ -3,6 +3,7 @@
 #include "port_stage1.h"
 #include "voice_settings.h"
 #include "voice_client.h"
+#include "quiet_mode.h"
 #include "setup_web.h"
 #include "stackchan/wifi/wifi_web.h"
 #include <hal/hal.h>
@@ -47,6 +48,7 @@ textarea{display:block;resize:vertical;min-height:60px;width:100%;max-width:none
 input[type=checkbox]{width:16px;height:16px;margin:0}
 button{min-height:30px;padding:5px 12px;background:#285bd4;color:white;border:0;border-radius:7px;cursor:pointer}
 button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
+.danger{background:#9b3540}.danger:hover{background:#7f2b34}
 .setup-row{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin:8px 0 12px}
 .setup-row label{flex:1 1 190px;min-width:0}
 .setup-row select{display:block;width:100%;max-width:19rem;min-height:30px;border:1px solid #bac5d6;border-radius:7px;background:white;color:inherit;padding:5px 8px}
@@ -71,7 +73,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#actions">サーボテスト</a><a href="#wifi">Wi-Fi</a><a href="#device">デバイス</a><a href="#aiSetup">AI・省電力</a><a href="#appsSetup">アプリ表示</a><a href="#deviceInfo">端末情報</a>
+<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#quiet">お黙り</a><a href="#actions">サーボテスト</a><a href="#wifi">Wi-Fi</a><a href="#device">デバイス</a><a href="#aiSetup">AI・省電力</a><a href="#appsSetup">アプリ表示</a><a href="#deviceInfo">端末情報</a>
 </nav></aside><main>
 <h1>セッティング</h1>
 <form id="settings">
@@ -123,6 +125,16 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <label>寝言最長間隔（秒）<input name="talk_max" type="number" min="1" max="3600" required></label>
 </div><small>各256バイトまで。夜間は発声せず、昼寝中だけ使用します。</small>
 </section>
+<section class="card"><h2>独り言</h2>
+<label class="check"><input name="monologue_enabled" type="checkbox"> 起床中の独り言を有効にする</label>
+<label>独り言への指示<textarea name="monologue_prompt" rows="3"></textarea></label>
+<div class="fields">
+<label>最短間隔（分）<input name="monologue_min" type="number" min="1" max="1440" required></label>
+<label>最長間隔（分）<input name="monologue_max" type="number" min="1" max="1440" required></label>
+</div><small>起床・待機中だけ、既存のAIサーバーへ生成を依頼します。会話・睡眠・静音中は開始しません。</small>
+<div class="buttons"><button type="button" id="testMonologue">独り言を今すぐテスト</button></div>
+<p id="testMonologueStatus" class="status" role="status">待機中</p>
+</section>
 <div class="save"><button type="submit">音声設定を保存</button><p id="voiceStatus" class="status" role="status">読み込み中…</p></div>
 </form>
 <section class="card"><h2>音声テスト（AIサーバー 12800）</h2>
@@ -130,6 +142,19 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <div class="buttons"><button type="button" id="testSpeech">読み上げテスト</button></div>
 <small>12800の既存Gemini Live音声・字幕経路を使用。通常会話中は開始しません。</small>
 <p id="testSpeechStatus" class="status" role="status">待機中</p></section>
+<section id="quiet" class="card"><h2>お黙りモード</h2>
+<p id="quietStatus" class="status" role="status">状態を読み込み中…</p>
+<div id="quietPresets" class="buttons">
+<button type="button" data-quiet-minutes="15">15分</button>
+<button type="button" data-quiet-minutes="30">30分</button>
+<button type="button" data-quiet-minutes="60">60分</button>
+<button type="button" class="danger" data-quiet-minutes="0">解除</button>
+</div>
+<div class="setup-row"><label>任意の時間（1～1440分）
+<input id="quietMinutes" type="number" min="1" max="1440" value="30" required></label>
+<button type="button" id="quietApply">設定</button></div>
+<small>独り言、寝言、いびきなどの自動発話を一時停止します。通常会話、ウェイクワード、Webの手動テストは使用できます。設定はNVSへ保存され、再起動後も終了時刻まで有効です。</small>
+</section>
 <section id="actions" class="card"><h2>サーボアクションの実機テスト</h2>
 <small>現在位置から相対的に動作します。うなずき・首振りは開始位置へ戻り、ほかの動作は終了位置を維持します。可動域は自動で制限します。</small>
 <div id="servoActions" class="buttons">
@@ -228,27 +253,29 @@ document.getElementById('servoActions').addEventListener('click',async e=>{
  finally{button.disabled=false;}
 });
 const voiceForm=document.getElementById('voiceSettings'),v=voiceForm.elements;
-const voiceStatus=document.getElementById('voiceStatus'),voiceFields=['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','snore_min','snore_max','talk_min','talk_max'];
+ const voiceStatus=document.getElementById('voiceStatus'),voiceFields=['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','snore_min','snore_max','talk_min','talk_max','monologue_enabled','monologue_prompt','monologue_min','monologue_max'];
 async function loadVoice(){
  try{
   const r=await fetch('/api/stage1/voice',{cache:'no-store'});
   if(!r.ok)throw Error('HTTP '+r.status);
-  const data=await r.json();for(const field of voiceFields)v[field].value=data[field]??'';
+   const data=await r.json();for(const field of voiceFields){
+    if(field==='monologue_enabled')v[field].checked=!!data[field];else v[field].value=data[field]??'';
+   }
   voiceStatus.textContent='読み込み完了';
  }catch(e){voiceStatus.textContent='読み込み失敗: '+e.message;}
 }
 voiceForm.addEventListener('submit',async e=>{
  e.preventDefault();if(!voiceForm.reportValidity())return;
- for(const [low,high] of [['snore_min','snore_max'],['talk_min','talk_max']]){
+  for(const [low,high] of [['snore_min','snore_max'],['talk_min','talk_max'],['monologue_min','monologue_max']]){
   if(Number(v[low].value)>Number(v[high].value)){voiceStatus.textContent='最短間隔は最長以下にしてください';return;}
  }
  const enc=new TextEncoder();
- for(const field of ['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt']){
-  const max=(field==='snore'||field==='sleep_talk_prompt')?256:512;
+  for(const field of ['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','monologue_prompt']){
+   const max=(field==='snore'||field==='sleep_talk_prompt')?256:512;
   if(enc.encode(v[field].value).length>max){voiceStatus.textContent=field+'は'+max+'バイト以内にしてください';return;}
  }
- const data={};for(const field of voiceFields)data[field]=
-  ['snore_min','snore_max','talk_min','talk_max'].includes(field)?Number(v[field].value):v[field].value;
+  const data={};for(const field of voiceFields)data[field]=field==='monologue_enabled'?v[field].checked:
+   ['snore_min','snore_max','talk_min','talk_max','monologue_min','monologue_max'].includes(field)?Number(v[field].value):v[field].value;
  voiceStatus.textContent='保存中…';
  try{
   const r=await fetch('/api/stage1/voice',{method:'POST',
@@ -272,6 +299,50 @@ testSpeech.addEventListener('click',async()=>{
  }catch(e){message.textContent='発話できません: '+e.message;}
  finally{testSpeech.disabled=false;}
 });
+const testMonologue=document.getElementById('testMonologue');
+testMonologue.addEventListener('click',async()=>{
+ const message=document.getElementById('testMonologueStatus'),value=v.monologue_prompt.value;
+ const size=new TextEncoder().encode(value).length;
+ if(!size||size>512){message.textContent='独り言への指示はUTF-8で1～512バイトにしてください';return;}
+ testMonologue.disabled=true;message.textContent='要求中…';
+ try{
+  const res=await fetch('/api/stage1/voice/test',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({kind:'monologue',text:value})});
+  if(!res.ok)throw Error(res.status===409?'会話中または発話中です':'HTTP '+res.status);
+  message.textContent='独り言を受け付けました';
+ }catch(e){message.textContent='失敗: '+e.message;}
+ finally{testMonologue.disabled=false;}
+});
+const quietStatus=document.getElementById('quietStatus');
+async function loadQuiet(){
+ try{
+  const res=await fetch('/api/stage1/quiet',{cache:'no-store'});
+  if(!res.ok)throw Error('HTTP '+res.status);
+  const data=await res.json();
+  if(data.active){
+   const minutes=Math.max(1,Math.ceil(Number(data.remaining_seconds)/60));
+   quietStatus.textContent='お黙りモード中（残り約'+minutes+'分）';
+  }else quietStatus.textContent='解除中（自動発話できます）';
+ }catch(e){quietStatus.textContent='状態を取得できません: '+e.message;}
+}
+async function setQuiet(minutes,button){
+ if(!Number.isInteger(minutes)||minutes<0||minutes>1440){quietStatus.textContent='時間は1～1440分で指定してください';return;}
+ const buttons=document.querySelectorAll('#quiet button');buttons.forEach(b=>b.disabled=true);
+ quietStatus.textContent=minutes?'設定中…':'解除中…';
+ try{
+  const res=await fetch('/api/stage1/quiet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({minutes})});
+  if(!res.ok)throw Error('HTTP '+res.status+': '+await res.text());
+  await loadQuiet();
+ }catch(e){quietStatus.textContent='変更できません: '+e.message;}
+ finally{buttons.forEach(b=>b.disabled=false);}
+}
+document.getElementById('quietPresets').addEventListener('click',e=>{
+ const button=e.target.closest('button[data-quiet-minutes]');if(button)setQuiet(Number(button.dataset.quietMinutes),button);
+});
+document.getElementById('quietApply').addEventListener('click',e=>{
+ const field=document.getElementById('quietMinutes');if(field.reportValidity())setQuiet(Number(field.value),e.currentTarget);
+});
+setInterval(loadQuiet,60000);
 const wifiList=document.getElementById('wifiNetworks'),wifiStatus=document.getElementById('wifiStatus');
 let wifiSaved=[],wifiActive='';
 const ipFields=[['ip','IPアドレス'],['subnet','サブネットマスク'],['gw','ゲートウェイ'],['dns1','DNS1'],['dns2','DNS2（任意）']];
@@ -477,7 +548,7 @@ async function setupLoad(){
 }
 document.getElementById('setupReload').addEventListener('click',setupLoad);
 // Avoid concurrent large JSON responses on the memory-constrained server.
-Promise.resolve().then(load).then(loadVoice).then(wifiLoad).then(setupLoad);
+Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(wifiLoad).then(setupLoad);
 </script></body></html>)STAGE1PAGE";
 
 void Reply(httpd_req_t* req, const char* status, const char* body) {
@@ -512,6 +583,14 @@ esp_err_t ReadConfig(httpd_req_t* req) {
     Reply(req, "200 OK", json);
     return ESP_OK;
 }
+esp_err_t ReadQuiet(httpd_req_t* req) {
+    const uint32_t remaining = quiet_mode::RemainingSeconds();
+    char json[80];
+    std::snprintf(json, sizeof(json), "{\"active\":%s,\"remaining_seconds\":%u}",
+                  remaining ? "true" : "false", static_cast<unsigned>(remaining));
+    Reply(req, "200 OK", json);
+    return ESP_OK;
+}
 // Voice text settings are deliberately separate from the small 512-byte
 // scheduler request. Temporary objects live in PSRAM to protect internal RAM.
 bool Uint(const cJSON* root, const char* key, int min, int max, int step, int& value);
@@ -529,10 +608,14 @@ esp_err_t ReadVoice(httpd_req_t* req) {
             cJSON_AddStringToObject(json, "timer", c->timer);
             cJSON_AddStringToObject(json, "snore", c->snore);
             cJSON_AddStringToObject(json, "sleep_talk_prompt", c->sleep_talk_prompt);
+            cJSON_AddBoolToObject(json, "monologue_enabled", c->monologue_enabled);
+            cJSON_AddStringToObject(json, "monologue_prompt", c->monologue_prompt);
             cJSON_AddNumberToObject(json, "snore_min", c->snore_min);
             cJSON_AddNumberToObject(json, "snore_max", c->snore_max);
             cJSON_AddNumberToObject(json, "talk_min", c->talk_min);
             cJSON_AddNumberToObject(json, "talk_max", c->talk_max);
+            cJSON_AddNumberToObject(json, "monologue_min", c->monologue_min);
+            cJSON_AddNumberToObject(json, "monologue_max", c->monologue_max);
         }
     }
     char* text = cJSON_PrintUnformatted(json);
@@ -583,7 +666,9 @@ esp_err_t WriteVoice(httpd_req_t* req) {
     cJSON* root = cJSON_Parse(buf);
     heap_caps_free(buf);
     const auto* c = root;
-    int snore_lo=0, snore_hi=0, talk_lo=0, talk_hi=0;
+    int snore_lo=0, snore_hi=0, talk_lo=0, talk_hi=0, monologue_lo=0, monologue_hi=0;
+    const auto* monologue_enabled = cJSON_IsObject(c) ?
+        cJSON_GetObjectItemCaseSensitive(c, "monologue_enabled") : nullptr;
     const bool valid = cJSON_IsObject(c) &&
         VoiceText(c,"morning",draft->morning,sizeof(draft->morning)) &&
         VoiceText(c,"bedtime",draft->bedtime,sizeof(draft->bedtime)) &&
@@ -592,10 +677,16 @@ esp_err_t WriteVoice(httpd_req_t* req) {
         VoiceText(c,"timer",draft->timer,sizeof(draft->timer)) &&
         VoiceText(c,"snore",draft->snore,sizeof(draft->snore)) &&
         VoiceText(c,"sleep_talk_prompt",draft->sleep_talk_prompt,sizeof(draft->sleep_talk_prompt)) &&
+        cJSON_IsBool(monologue_enabled) &&
+        VoiceText(c,"monologue_prompt",draft->monologue_prompt,sizeof(draft->monologue_prompt)) &&
         Uint(c,"snore_min",1,3600,1,snore_lo) && Uint(c,"snore_max",1,3600,1,snore_hi) &&
-        Uint(c,"talk_min",1,3600,1,talk_lo) && Uint(c,"talk_max",1,3600,1,talk_hi);
+        Uint(c,"talk_min",1,3600,1,talk_lo) && Uint(c,"talk_max",1,3600,1,talk_hi) &&
+        Uint(c,"monologue_min",1,1440,1,monologue_lo) &&
+        Uint(c,"monologue_max",1,1440,1,monologue_hi);
     draft->snore_min=snore_lo; draft->snore_max=snore_hi;
     draft->talk_min=talk_lo; draft->talk_max=talk_hi;
+    draft->monologue_enabled=cJSON_IsTrue(monologue_enabled);
+    draft->monologue_min=monologue_lo; draft->monologue_max=monologue_hi;
     bool saved=false;
     if (valid && voice::Valid(*draft)) {
         LvglLockGuard lock;
@@ -615,6 +706,36 @@ bool Uint(const cJSON* root, const char* key, int min, int max, int step, int& v
     if (n < min || n > max || n != static_cast<int>(n) || static_cast<int>(n) % step) return false;
     value = static_cast<int>(n);
     return true;
+}
+esp_err_t WriteQuiet(httpd_req_t* req) {
+    char content_type[64]{};
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
+        std::strncmp(content_type, "application/json", 16) != 0) {
+        Reply(req, "415 Unsupported Media Type", "{\"error\":\"JSON required\"}");
+        return ESP_OK;
+    }
+    if (req->content_len < 1 || req->content_len > 64) {
+        Reply(req, "400 Bad Request", "{\"error\":\"invalid quiet request\"}");
+        return ESP_OK;
+    }
+    char body[65]{};
+    int received = 0;
+    while (received < req->content_len) {
+        const int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) return ESP_FAIL;
+        received += n;
+    }
+    cJSON* root = cJSON_ParseWithLength(body, received);
+    int minutes = 0;
+    const bool valid = root && cJSON_IsObject(root) &&
+        Uint(root, "minutes", 0, 1440, 1, minutes);
+    const bool saved = valid && quiet_mode::SetMinutes(minutes);
+    cJSON_Delete(root);
+    Reply(req, !valid ? "400 Bad Request" : !saved ? "500 Internal Server Error" : "200 OK",
+          !valid ? "{\"error\":\"minutes must be 0 to 1440\"}" :
+          !saved ? "{\"error\":\"NVS save failed or clock unavailable\"}" : "{\"ok\":true}");
+    return ESP_OK;
 }
 esp_err_t WriteConfig(httpd_req_t* req) {
     char content_type[64]{};
@@ -736,14 +857,17 @@ esp_err_t TriggerVoiceTest(httpd_req_t* req) {
     body[received] = '\0';
     cJSON* root = cJSON_ParseWithLength(body, received);
     const cJSON* item = root ? cJSON_GetObjectItemCaseSensitive(root, "text") : nullptr;
+    const cJSON* kind_item = root ? cJSON_GetObjectItemCaseSensitive(root, "kind") : nullptr;
     const char* content = cJSON_IsString(item) ? item->valuestring : nullptr;
+    const char* kind = cJSON_IsString(kind_item) ? kind_item->valuestring : "test";
     const size_t len = content ? std::strlen(content) : 0;
-    const bool valid = content && len >= 1 && len <= 512;
+    const bool valid_kind = std::strcmp(kind,"test")==0 || std::strcmp(kind,"monologue")==0;
+    const bool valid = valid_kind && content && len >= 1 && len <= 512;
     bool accepted = false;
     if (valid) {
         LvglLockGuard lock;
         const auto* config = voice::Current();
-        if (config) accepted = voice::Request(*config, "test", content);
+        if (config) accepted = voice::Request(*config, kind, content);
     }
     cJSON_Delete(root);
     heap_caps_free(body);
@@ -781,7 +905,7 @@ void Start() {
     // IDF 6.1 supports allocating the HTTP server task stack from PSRAM.
     // Keep the HTTPD/lwIP kernel and DMA-only allocations on their default heaps.
     config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    config.max_uri_handlers = 11;
+    config.max_uri_handlers = 13;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -808,6 +932,10 @@ void Start() {
     voice_write.uri = "/api/stage1/voice"; voice_write.method = HTTP_POST; voice_write.handler = WriteVoice;
     httpd_uri_t voice_test{};
     voice_test.uri = "/api/stage1/voice/test"; voice_test.method = HTTP_POST; voice_test.handler = TriggerVoiceTest;
+    httpd_uri_t quiet_read{};
+    quiet_read.uri = "/api/stage1/quiet"; quiet_read.method = HTTP_GET; quiet_read.handler = ReadQuiet;
+    httpd_uri_t quiet_write{};
+    quiet_write.uri = "/api/stage1/quiet"; quiet_write.method = HTTP_POST; quiet_write.handler = WriteQuiet;
     httpd_uri_t wifi_read{};
     wifi_read.uri = "/api/stage1/wifi"; wifi_read.method = HTTP_GET;
     wifi_read.handler = stackchan::wifi::web::ReadSettings;
@@ -827,6 +955,8 @@ void Start() {
         httpd_register_uri_handler(server, &voice_read) != ESP_OK ||
         httpd_register_uri_handler(server, &voice_write) != ESP_OK ||
         httpd_register_uri_handler(server, &voice_test) != ESP_OK ||
+        httpd_register_uri_handler(server, &quiet_read) != ESP_OK ||
+        httpd_register_uri_handler(server, &quiet_write) != ESP_OK ||
         httpd_register_uri_handler(server, &wifi_read) != ESP_OK ||
         httpd_register_uri_handler(server, &wifi_write) != ESP_OK ||
         httpd_register_uri_handler(server, &setup_read) != ESP_OK ||

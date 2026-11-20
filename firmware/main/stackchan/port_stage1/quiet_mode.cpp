@@ -35,10 +35,15 @@ void Init() {
 }
 
 bool Active() {
+    return RemainingSeconds() != 0;
+}
+
+uint32_t RemainingSeconds() {
     const uint32_t until = until_epoch.load(std::memory_order_acquire);
-    if (!until) return false;
+    if (!until) return 0;
     const time_t now = std::time(nullptr);
-    return now >= kValidClock && static_cast<uint64_t>(now) < until;
+    if (now < kValidClock || static_cast<uint64_t>(now) >= until) return 0;
+    return until - static_cast<uint32_t>(now);
 }
 
 bool SetMinutes(int minutes) {

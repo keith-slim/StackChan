@@ -28,4 +28,7 @@ bool SleepActive();
 Kind FinishSleepIfIdle(const Settings& config, uint32_t now); // None if still playing
 bool Due(Kind kind, uint32_t now);
 bool RequestSleep(Kind kind, const Settings& config, const char* text, uint32_t now);
+// S3-style automatic monologue scheduler. It reuses the Stage-1 update task,
+// so no additional FreeRTOS task stack is allocated.
+bool TickMonologue(const Settings& config, Phase phase, bool eligible, uint32_t now);
 }

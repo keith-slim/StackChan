@@ -1180,6 +1180,12 @@ void Update(StackChan& sc) {
     }
     r.Begin(sc, state.phase, state.kind, now);
     VoiceTick(old_phase, state, now);
+    if (const auto* config = voice::Current()) {
+        const bool monologue_eligible = valid && standby && !event && !accepted_wake &&
+            !wake_sequence_active.load() && !voice::IsBusy() && !VoicePending() &&
+            state.phase == Phase::Awake;
+        voice::TickMonologue(*config, state.phase, monologue_eligible, now);
+    }
     DreamRemarkTick(sc, state, now, event && !Application::GetInstance().IsAnnouncementActive());
     r.TickNightBacklight(now);
     if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||

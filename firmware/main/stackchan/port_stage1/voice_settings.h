@@ -13,8 +13,11 @@ struct Settings {
     char timer[513] = "よく寝た。そろそろ起きるね。";
     char snore[257] = "グゥ～　グゥ～";
     char sleep_talk_prompt[257] = "寝言っぽい一言";
+    char monologue_prompt[513] = "今の様子や気分について、短い独り言を一言。";
     uint16_t snore_min = 20, snore_max = 60;
     uint16_t talk_min = 60, talk_max = 180;
+    uint16_t monologue_min = 5, monologue_max = 20;
+    bool monologue_enabled = true;
 };
 bool Init();   // Lazily allocate persistent settings in SPIRAM.
 void Stop();   // Not safe while async voice task is running.
