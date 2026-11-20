@@ -329,9 +329,10 @@ void StackChanAvatarDisplay::SetupUI()
             Application::GetInstance().GetDeviceState() == kDeviceStateIdle,
             self->is_sleeping_);
         if (!stackchan::idle_lifecycle::AudioFinished(state)) return;
-        if (self->speaking_modifier_id_ >= 0) {
+        if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_) {
+            ESP_LOGW(TAG, "[IDLE_RECOVERY] completing missed speech end (mouth=%d subtitle=%d)",
+                     self->speaking_modifier_id_ >= 0, self->subtitle_speaking_);
             self->FinishSpeakingAnimation();
-            ESP_LOGW(TAG, "[IDLE_RECOVERY] cleared stale speaking animation");
         }
         // Do not recreate normal idle motion while Stage1 owns a sleep,
         // wake, conversation or theatre animation.
@@ -376,6 +377,13 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
 
 void StackChanAvatarDisplay::FinishSpeakingAnimation()
 {
+    // Called by both normal status transitions and idle recovery. Ending a
+    // reply must finish its captions as well as its mouth animation.
+    if (subtitle_speaking_) {
+        subtitle_speaking_ = false;
+        subtitle_preview_shown_ = false;
+        BeginSubtitleReview();
+    }
     if (speaking_modifier_id_ < 0) return;
     auto& stackchan = GetStackChan();
     stackchan.removeModifier(speaking_modifier_id_);
@@ -1009,22 +1017,12 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     bool is_listening = false;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
-        if (subtitle_speaking_) {
-            subtitle_speaking_ = false;
-            subtitle_preview_shown_ = false;
-            BeginSubtitleReview();
-        }
         FinishSpeakingAnimation();
 
         GetHAL().setRgbColor(0, 0, 50, 0);
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
-        if (subtitle_speaking_) {
-            subtitle_speaking_ = false;
-            subtitle_preview_shown_ = false;
-            BeginSubtitleReview();
-        }
         _is_xiaozhi_ready = true;
 
         FinishSpeakingAnimation();
