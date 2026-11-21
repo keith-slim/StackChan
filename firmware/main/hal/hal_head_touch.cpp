@@ -170,7 +170,7 @@ static void _head_touch_update_task(void* param)
             if (!touched) suppress_until_release = false;
         } else if (gesture != HeadPetGesture::None &&
                    !stackchan::stage1::IsWakeSequenceActive()) {
-            stackchan::stage1::NotifyActivity("head_pad");
+            // 撫でジェスチャー自体では、昼寝抽選の無操作時間をリセットしない。
             GetHAL().onHeadPetGesture.emit(gesture);
         }
 

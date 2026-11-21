@@ -29,7 +29,7 @@ static void _imu_task(void* param)
 
             if (motion_detector->isShakeDetected()) {
                 mclog::tagInfo(_tag, "Shake Detected!");
-                stackchan::stage1::NotifyActivity("imu_shake");
+                // 揺れ表現は維持するが、昼寝抽選の無操作時間には影響させない。
                 GetHAL().onImuMotionEvent.emit(ImuMotionEvent::Shake);
             }
             // if (motion_detector->isPickUpDetected()) {

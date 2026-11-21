@@ -294,7 +294,8 @@ void StackChanAvatarDisplay::SetupUI()
         // S3: a screen tap during sleep wakes the avatar first. It must
         // not toggle the Xiaozhi chat state on the same touch.
         if (stackchan::stage1::RequestWakeTouch("screen_click")) return;
-        stackchan::stage1::NotifyActivity("screen_click");
+        // タップ自体では昼寝抽選を延期しない。実際に会話が始まれば、
+        // Xiaozhiの通常の状態遷移が待機解除を通知する。
         static uint32_t last_toggle_tick = 0;
         const uint32_t now               = GetHAL().millis();
         if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {

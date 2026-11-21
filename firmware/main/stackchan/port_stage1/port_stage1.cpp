@@ -984,10 +984,6 @@ void OnStandby(bool ready) {
         interrupted.store(true);
     }
 }
-void NotifyActivity(const char* source) {
-    if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=activity:%s", source ? source : "unknown");
-    interrupted.store(true);
-}
 void NotifyExternalSpeech() {
     // Xiaozhi owns the speech bubble once any ASR/system/TTS text arrives.
     // The end of a wake animation must never delete a newer subtitle.
