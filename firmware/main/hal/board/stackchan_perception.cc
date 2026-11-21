@@ -188,12 +188,13 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             const float error_x = center_x - 0.5f;
             const float error_y = 0.5f - center_y;
             // CoreS3実機のyaw負方向が画像の左、pitch正方向が画像の上を向く。
-            const int yaw_delta = std::abs(error_x) < 0.06f
+            // 顔中心を画面中央の約8px以内へ収める。
+            const int yaw_delta = std::abs(error_x) < 0.025f
                                       ? 0
-                                      : static_cast<int>(std::clamp(error_x * 360.0f, -120.0f, 120.0f));
-            const int pitch_delta = std::abs(error_y) < 0.08f
+                                      : static_cast<int>(std::clamp(error_x * 500.0f, -160.0f, 160.0f));
+            const int pitch_delta = std::abs(error_y) < 0.035f
                                         ? 0
-                                        : static_cast<int>(std::clamp(error_y * 260.0f, -80.0f, 80.0f));
+                                        : static_cast<int>(std::clamp(error_y * 360.0f, -110.0f, 110.0f));
             ESP_LOGI(kTag, "Track face=(%.3f,%.3f) score=%.3f correction=(%d,%d)", center_x, center_y, score,
                      yaw_delta, pitch_delta);
             if (yaw_delta != 0 || pitch_delta != 0)
