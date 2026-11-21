@@ -24,7 +24,7 @@ private:
     static void WorkerEntry(void* context);
     void RunWorker(uint64_t snapshot_end);
     bool PostAudio(const int16_t* pcm, size_t frames, float& angle_deg, float& confidence);
-    bool PostVision(float& center_x, float& center_y, float& score);
+    bool PostVision(float& center_x, float& center_y, float& score, float& body_target_y, float& body_score);
 
     StackChanCamera* camera_ = nullptr;
     int16_t* audio_ring_     = nullptr;

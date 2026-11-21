@@ -31,6 +31,7 @@ constexpr int kTrackingStartGraceMs   = 3000;
 constexpr int kTrackingMaxMs          = 5 * 60 * 1000;
 constexpr float kMinimumDoaConfidence = 0.04f;
 constexpr float kMinimumFaceScore     = 0.55f;
+constexpr float kMinimumBodyScore     = 0.35f;
 
 std::string Endpoint(const char* path)
 {
@@ -164,7 +165,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
 
     const int64_t tracking_started_us = esp_timer_get_time();
     bool conversation_seen            = false;
-    bool face_missing_logged          = false;
+    bool person_missing_logged        = false;
     ESP_LOGI(kTag, "Realtime face tracking started");
     while ((esp_timer_get_time() - tracking_started_us) / 1000 < kTrackingMaxMs) {
         const int64_t frame_started_us = esp_timer_get_time();
@@ -180,8 +181,10 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         float center_x = 0.5f;
         float center_y = 0.5f;
         float score    = 0.0f;
-        if (PostVision(center_x, center_y, score) && score >= kMinimumFaceScore) {
-            face_missing_logged = false;
+        float body_target_y = 0.5f;
+        float body_score    = 0.0f;
+        if (PostVision(center_x, center_y, score, body_target_y, body_score) && score >= kMinimumFaceScore) {
+            person_missing_logged = false;
             const float error_x = center_x - 0.5f;
             const float error_y = 0.5f - center_y;
             // CoreS3実機のyaw負方向が画像の左、pitch正方向が画像の上を向く。
@@ -195,9 +198,17 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                      yaw_delta, pitch_delta);
             if (yaw_delta != 0 || pitch_delta != 0)
                 stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta);
-        } else if (!face_missing_logged) {
-            ESP_LOGI(kTag, "No face in view; keeping audio direction and tracking");
-            face_missing_logged = true;
+        } else if (body_score >= kMinimumBodyScore) {
+            person_missing_logged = false;
+            const float error_y = 0.5f - body_target_y;
+            const int pitch_delta = std::abs(error_y) < 0.08f
+                                        ? 0
+                                        : static_cast<int>(std::clamp(error_y * 300.0f, -100.0f, 100.0f));
+            ESP_LOGI(kTag, "Track body head_hint_y=%.3f score=%.3f pitch=%d", body_target_y, body_score, pitch_delta);
+            if (pitch_delta != 0) stackchan::stage1::RequestPerceptionLook(0, pitch_delta);
+        } else if (!person_missing_logged) {
+            ESP_LOGI(kTag, "No face or body in view; keeping audio direction and tracking");
+            person_missing_logged = true;
         }
 
         const int64_t frame_elapsed_ms = (esp_timer_get_time() - frame_started_us) / 1000;
@@ -219,7 +230,8 @@ bool StackChanPerception::PostAudio(const int16_t* pcm, size_t frames, float& an
     return ok;
 }
 
-bool StackChanPerception::PostVision(float& center_x, float& center_y, float& score)
+bool StackChanPerception::PostVision(float& center_x, float& center_y, float& score, float& body_target_y,
+                                     float& body_score)
 {
     uint8_t* jpeg    = nullptr;
     size_t jpeg_size = 0;
@@ -255,6 +267,30 @@ bool StackChanPerception::PostVision(float& center_x, float& center_y, float& sc
             center_y = static_cast<float>(y->valuedouble);
             score    = best_score;
             ok       = std::isfinite(center_x) && std::isfinite(center_y);
+        }
+    }
+    if (!ok) {
+        cJSON* bodies = root ? cJSON_GetObjectItemCaseSensitive(root, "bodies") : nullptr;
+        cJSON* body   = nullptr;
+        float best_body_score = -1.0f;
+        if (cJSON_IsArray(bodies)) {
+            cJSON* candidate_body = nullptr;
+            cJSON_ArrayForEach(candidate_body, bodies)
+            {
+                float candidate_score = 0.0f;
+                if (JsonNumber(candidate_body, "score", candidate_score) && candidate_score > best_body_score) {
+                    body            = candidate_body;
+                    best_body_score = candidate_score;
+                }
+            }
+        }
+        cJSON* head_hint = body ? cJSON_GetObjectItemCaseSensitive(body, "head_hint") : nullptr;
+        if (cJSON_IsArray(head_hint) && cJSON_GetArraySize(head_hint) >= 2) {
+            cJSON* y = cJSON_GetArrayItem(head_hint, 1);
+            if (cJSON_IsNumber(y) && std::isfinite(y->valuedouble)) {
+                body_target_y = static_cast<float>(y->valuedouble);
+                body_score    = best_body_score;
+            }
         }
     }
     cJSON_Delete(root);
