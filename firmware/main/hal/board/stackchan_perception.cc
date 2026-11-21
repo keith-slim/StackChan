@@ -24,6 +24,7 @@ namespace {
 constexpr char kTag[]                 = "Perception";
 constexpr int kDoaTimeoutMs           = 1800;
 constexpr int kVisionTimeoutMs        = 5000;
+constexpr int kServoSettleMs          = 600;
 constexpr float kMinimumDoaConfidence = 0.04f;
 constexpr float kMinimumFaceScore     = 0.55f;
 
@@ -149,8 +150,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                      static_cast<unsigned>(available));
             if (confidence >= kMinimumDoaConfidence) {
                 const int yaw_delta = static_cast<int>(std::clamp(angle, -70.0f, 70.0f) * 10.0f);
-                stackchan::stage1::RequestPerceptionLook(yaw_delta, 0);
-                vTaskDelay(pdMS_TO_TICKS(450));
+                if (stackchan::stage1::RequestPerceptionLook(yaw_delta, 0))
+                    vTaskDelay(pdMS_TO_TICKS(kServoSettleMs));
             }
         }
         heap_caps_free(snapshot);
@@ -161,10 +162,13 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     float center_x = 0.5f;
     float center_y = 0.5f;
     float score    = 0.0f;
-    if (!PostVision(center_x, center_y, score) || score < kMinimumFaceScore) return;
+    if (!PostVision(center_x, center_y, score) || score < kMinimumFaceScore) {
+        ESP_LOGI(kTag, "No face in DOA view; keeping audio direction");
+        return;
+    }
 
-    // Positive yaw/pitch mean left/up in StackChan motion coordinates.
-    const int yaw_delta   = static_cast<int>(std::clamp((0.5f - center_x) * 600.0f, -250.0f, 250.0f));
+    // CoreS3の実機ではyaw負方向がカメラ画像の左、pitch正方向が上を向く。
+    const int yaw_delta   = static_cast<int>(std::clamp((center_x - 0.5f) * 600.0f, -250.0f, 250.0f));
     const int pitch_delta = static_cast<int>(std::clamp((0.5f - center_y) * 400.0f, -160.0f, 160.0f));
     ESP_LOGI(kTag, "Face center=(%.3f,%.3f) score=%.3f correction=(%d,%d)", center_x, center_y, score, yaw_delta,
              pitch_delta);

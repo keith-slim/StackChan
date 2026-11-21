@@ -1186,7 +1186,8 @@ void Update(StackChan& sc) {
                 std::clamp(pitch_before + perception_pitch_delta.load(), pitch_limit.x, pitch_limit.y);
             ESP_LOGI(LOG_TAG, "perception look yaw=%d->%d pitch=%d->%d", yaw_before, yaw_target, pitch_before,
                      pitch_target);
-            motion.moveWithSpeed(yaw_target, pitch_target, 300);
+            // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
+            motion.moveWithSpeed(yaw_target, pitch_target, 450);
         }
     }
     if (r.cue_active) {
