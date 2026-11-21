@@ -1187,7 +1187,7 @@ void Update(StackChan& sc) {
             ESP_LOGI(LOG_TAG, "perception look yaw=%d->%d pitch=%d->%d", yaw_before, yaw_target, pitch_before,
                      pitch_target);
             // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
-            motion.moveWithSpeed(yaw_target, pitch_target, 650);
+            motion.moveWithSpeed(yaw_target, pitch_target, 1000);
         }
     }
     if (r.cue_active) {
