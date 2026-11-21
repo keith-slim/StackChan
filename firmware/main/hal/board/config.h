@@ -39,7 +39,13 @@
 #define DISPLAY_BACKLIGHT_PIN GPIO_NUM_NC
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT true
 
-
+// CoreS3 LCD and microSD share SPI3. GPIO35 is switched between LCD D/C and
+// SD MISO only while the display is locked; these pins must never be replaced
+// with the S3-stackchan SDMMC pins because GPIO42 belongs to camera D3.
+#define SD_SPI_MOSI_GPIO GPIO_NUM_37
+#define SD_SPI_MISO_GPIO GPIO_NUM_35
+#define SD_SPI_CLK_GPIO  GPIO_NUM_36
+#define SD_SPI_CS_GPIO   GPIO_NUM_4
 
 /* Camera pins */
 #define CAMERA_PIN_PWDN GPIO_NUM_NC

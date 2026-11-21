@@ -13,6 +13,9 @@ public:
 
     bool Capture() override;
     bool StreamCaptures();
+    // Silent capture for the local perception worker. JPEG output is allocated
+    // in PSRAM and must be released with heap_caps_free().
+    bool CaptureJpeg(uint8_t** jpeg, size_t* jpeg_size, uint8_t quality);
 
     auto TryLockFrame()
     {

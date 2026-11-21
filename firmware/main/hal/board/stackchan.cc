@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <mutex>
 #include "stackchan_camera.h"
+#include "stackchan_perception.h"
 #include "stackchan/storage/cores3_sd.h"
 #include "hal_bridge.h"
 #include <hal/hal.h>
@@ -52,6 +53,20 @@ constexpr LcdInitCommand kIli9342eInitCommands[] = {
     {0x11, {}, 0, 120},
     {0x29, {}, 0, 120},
 };
+
+constexpr bool IsCameraDvpPin(gpio_num_t pin)
+{
+    return pin == CAMERA_PIN_D0 || pin == CAMERA_PIN_D1 || pin == CAMERA_PIN_D2 || pin == CAMERA_PIN_D3 ||
+           pin == CAMERA_PIN_D4 || pin == CAMERA_PIN_D5 || pin == CAMERA_PIN_D6 || pin == CAMERA_PIN_D7 ||
+           pin == CAMERA_PIN_VSYNC || pin == CAMERA_PIN_HREF || pin == CAMERA_PIN_PCLK;
+}
+
+// Do not copy the S3-stackchan SDMMC mapping here: its GPIO42 D0 conflicts
+// directly with the CoreS3 camera's GPIO42 D3.
+static_assert(!IsCameraDvpPin(SD_SPI_MOSI_GPIO));
+static_assert(!IsCameraDvpPin(SD_SPI_MISO_GPIO));
+static_assert(!IsCameraDvpPin(SD_SPI_CLK_GPIO));
+static_assert(!IsCameraDvpPin(SD_SPI_CS_GPIO));
 
 esp_err_t ApplyIli9342eInit(esp_lcd_panel_io_handle_t panel_io)
 {
@@ -374,6 +389,7 @@ private:
     Ft6336* ft6336_;
     LvglDisplay* display_;
     StackChanCamera* camera_;
+    StackChanPerception* perception_ = nullptr;
     esp_timer_handle_t touchpad_timer_;
     std::mutex power_state_mutex_;
     std::mutex camera_storage_mutex_;
@@ -529,9 +545,9 @@ private:
     void InitializeSpi()
     {
         spi_bus_config_t buscfg = {};
-        buscfg.mosi_io_num      = GPIO_NUM_37;
-        buscfg.miso_io_num      = GPIO_NUM_35; // SD MISO; LCD DC is switched by CoreS3 SD library
-        buscfg.sclk_io_num      = GPIO_NUM_36;
+        buscfg.mosi_io_num      = SD_SPI_MOSI_GPIO;
+        buscfg.miso_io_num      = SD_SPI_MISO_GPIO;  // LCD DC is switched by CoreS3 SD library
+        buscfg.sclk_io_num      = SD_SPI_CLK_GPIO;
         buscfg.quadwp_io_num    = GPIO_NUM_NC;
         buscfg.quadhd_io_num    = GPIO_NUM_NC;
         buscfg.max_transfer_sz  = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t);
@@ -548,7 +564,7 @@ private:
         ESP_LOGD(TAG, "Install panel IO");
         esp_lcd_panel_io_spi_config_t io_config = {};
         io_config.cs_gpio_num                   = GPIO_NUM_3;
-        io_config.dc_gpio_num                   = GPIO_NUM_35;
+        io_config.dc_gpio_num                   = SD_SPI_MISO_GPIO;
         io_config.spi_mode                      = 2;
         io_config.pclk_hz                       = 40 * 1000 * 1000;
         io_config.trans_queue_depth             = 10;
@@ -659,6 +675,9 @@ public:
             },
         });
         InitializeCamera();
+#if CONFIG_STACKCHAN_PERCEPTION_ENABLED
+        perception_ = new StackChanPerception(camera_);
+#endif
         StartTouchpadTimer();
         GetBacklight()->RestoreBrightness();
     }
@@ -688,6 +707,16 @@ public:
     virtual Camera* GetCamera() override
     {
         return camera_;
+    }
+
+    void OnAudioInputFrame(const int16_t* samples, size_t frames, size_t channels, size_t microphone_channels) override
+    {
+        if (perception_) perception_->OnAudioInputFrame(samples, frames, channels, microphone_channels);
+    }
+
+    void OnWakeWordDetected() override
+    {
+        if (perception_) perception_->OnWakeWordDetected();
     }
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override

@@ -24,6 +24,7 @@
 #include <nvs.h>
 #include <esp_err.h>
 #include <atomic>
+#include <algorithm>
 #include <ctime>
 #include <cstring>
 #include <memory>
@@ -42,6 +43,10 @@ std::atomic<bool> owns_auto{false};
 std::atomic<int> queued_cue{-1};
 std::atomic<bool> manual_sleep_requested{false};
 std::atomic<uint32_t> manual_sleep_requested_at{0};
+std::atomic<int> perception_yaw_delta{0};
+std::atomic<int> perception_pitch_delta{0};
+std::atomic<uint32_t> perception_requested_at{0};
+std::atomic<bool> perception_look_pending{false};
 // LVGL is owned by Update(). Head pad/voice tasks only set these flags.
 std::atomic<uint8_t> wake_intents{0}; // touch=1, wake word=2
 std::atomic<bool> sleep_wake_eligible{false};
@@ -1086,6 +1091,21 @@ bool RequestCue(const char* id) {
     }
     return false;
 }
+
+bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
+{
+    constexpr int kMaxYawDelta   = 900;
+    constexpr int kMaxPitchDelta = 450;
+    yaw_delta                    = std::clamp(yaw_delta, -kMaxYawDelta, kMaxYawDelta);
+    pitch_delta                  = std::clamp(pitch_delta, -kMaxPitchDelta, kMaxPitchDelta);
+    if (yaw_delta == 0 && pitch_delta == 0) return false;
+    perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
+    perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
+    perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
+    perception_look_pending.store(true, std::memory_order_release);
+    return true;
+}
+
 void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
@@ -1144,6 +1164,30 @@ void Update(StackChan& sc) {
         if (!r.own_face && !r.cue_active)
             r.BeginCue(sc, static_cast<Cue>(cue), now);
         else ESP_LOGW(LOG_TAG, "cue skipped: autonomous scene is active");
+    }
+    if (perception_look_pending.load(std::memory_order_acquire)) {
+        const bool expired = static_cast<uint32_t>(now - perception_requested_at.load()) > 3000;
+        // Wake-triggered tracking is allowed to replace the wake animation's
+        // neck target; sleep and explicit skits retain priority.
+        const bool motion_available = !r.cue_active && !Runtime::Sleeping(r.phase);
+        if (expired) {
+            perception_look_pending.store(false, std::memory_order_release);
+            ESP_LOGW(LOG_TAG, "perception look expired while motion was busy");
+        } else if (motion_available && perception_look_pending.exchange(false)) {
+            auto& motion           = sc.motion();
+            auto& yaw              = motion.yawServo();
+            auto& pitch            = motion.pitchServo();
+            const int yaw_before   = yaw.getCurrentAngle();
+            const int pitch_before = pitch.getCurrentAngle();
+            const auto yaw_limit   = yaw.getAngleLimit();
+            const auto pitch_limit = pitch.getAngleLimit();
+            const int yaw_target   = std::clamp(yaw_before + perception_yaw_delta.load(), yaw_limit.x, yaw_limit.y);
+            const int pitch_target =
+                std::clamp(pitch_before + perception_pitch_delta.load(), pitch_limit.x, pitch_limit.y);
+            ESP_LOGI(LOG_TAG, "perception look yaw=%d->%d pitch=%d->%d", yaw_before, yaw_target, pitch_before,
+                     pitch_target);
+            motion.moveWithSpeed(yaw_target, pitch_target, 300);
+        }
     }
     if (r.cue_active) {
         r.SyncQuietMark(sc, false);

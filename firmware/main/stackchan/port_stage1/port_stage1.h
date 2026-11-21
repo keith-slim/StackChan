@@ -34,6 +34,9 @@ bool IsAutonomousSceneActive();
 bool IsIdleServoMotionBlocked(); // Under LVGL lock: active scenes + first 3s of each skit.
 bool RequestCue(const char* id); // Validated named action; future Live integration.
 bool RequestSleep(); // Queue manual sleep until active speech/conversation drains.
+// Queue a bounded relative neck correction from Xavier perception. The actual
+// servo write is serialized by Update() under the existing LVGL/motion lock.
+bool RequestPerceptionLook(int yaw_delta, int pitch_delta);  // 0.1-degree units.
 void Update(StackChan& stackchan);
 } // namespace stage1
 } // namespace stackchan

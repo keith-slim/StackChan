@@ -1,0 +1,34 @@
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+class StackChanCamera;
+
+// Keeps the real-time audio path limited to a bounded PSRAM copy. Xavier I/O,
+// JPEG encoding and servo requests run only in the short-lived wake worker.
+class StackChanPerception {
+public:
+    explicit StackChanPerception(StackChanCamera* camera);
+    ~StackChanPerception();
+
+    void OnAudioInputFrame(const int16_t* samples, size_t frames, size_t channels, size_t microphone_channels);
+    void OnWakeWordDetected();
+
+private:
+    static constexpr size_t kSampleRate     = 16000;
+    static constexpr size_t kRingFrames     = kSampleRate * 2;
+    static constexpr size_t kSnapshotFrames = kSampleRate;
+
+    static void WorkerEntry(void* context);
+    void RunWorker(uint64_t snapshot_end);
+    bool PostAudio(const int16_t* pcm, size_t frames, float& angle_deg, float& confidence);
+    bool PostVision(float& center_x, float& center_y, float& score);
+
+    StackChanCamera* camera_ = nullptr;
+    int16_t* audio_ring_     = nullptr;
+    std::atomic<uint64_t> written_frames_{0};
+    std::atomic<uint64_t> snapshot_end_{0};
+    std::atomic<bool> worker_running_{false};
+};

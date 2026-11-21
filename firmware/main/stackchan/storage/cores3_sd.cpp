@@ -1,4 +1,5 @@
 #include "cores3_sd.h"
+#include "hal/board/config.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -101,9 +102,9 @@ public:
         // The SPI LCD implementation drains all queued DMA transfers when
         // tx_param(-1, nullptr, 0) is called (no command is emitted).
         if (esp_lcd_panel_io_tx_param(config.display_io, -1, nullptr, 0) != ESP_OK) return;
-        const int before = gpio_get_level(GPIO_NUM_35);
+        const int before = gpio_get_level(SD_SPI_MISO_GPIO);
         previous_dc_ = before < 0 ? 0 : before;
-        if (gpio_set_direction(GPIO_NUM_35, GPIO_MODE_INPUT) != ESP_OK) return;
+        if (gpio_set_direction(SD_SPI_MISO_GPIO, GPIO_MODE_INPUT) != ESP_OK) return;
         pin_switched_ = true;
         power_attempted_ = true;
         if (!config.set_power(config.power_context, true)) return;
@@ -113,7 +114,7 @@ public:
         host.max_freq_khz = 20000;
         sdspi_device_config_t slot = SDSPI_DEVICE_CONFIG_DEFAULT();
         slot.host_id = SPI3_HOST;
-        slot.gpio_cs = GPIO_NUM_4;
+        slot.gpio_cs                     = SD_SPI_CS_GPIO;
         esp_vfs_fat_mount_config_t mount = {};
         mount.format_if_mount_failed = false; // Never format user SD.
         mount.max_files = 5;
@@ -135,8 +136,8 @@ public:
             ESP_LOGW(kTag, "SD power disable failed");
         if (pin_switched_) {
             // Set the LCD D/C latch before changing the pad back to output.
-            gpio_set_level(GPIO_NUM_35, previous_dc_);
-            gpio_set_direction(GPIO_NUM_35, GPIO_MODE_OUTPUT);
+            gpio_set_level(SD_SPI_MISO_GPIO, previous_dc_);
+            gpio_set_direction(SD_SPI_MISO_GPIO, GPIO_MODE_OUTPUT);
         }
         if (display_locked_) lvgl_port_unlock();
         log_sd_memory("after_sd_access");
