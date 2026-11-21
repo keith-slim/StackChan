@@ -2,6 +2,7 @@
 
 #include "sdkconfig.h"
 
+#include "application.h"
 #include "board.h"
 #include "stackchan_camera.h"
 #include "stackchan/port_stage1/port_stage1.h"
@@ -16,6 +17,7 @@
 #include <cJSON.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
 #include <freertos/task.h>
@@ -24,7 +26,9 @@ namespace {
 constexpr char kTag[]                 = "Perception";
 constexpr int kDoaTimeoutMs           = 1800;
 constexpr int kVisionTimeoutMs        = 5000;
-constexpr int kServoSettleMs          = 600;
+constexpr int kTrackingIntervalMs     = 250;
+constexpr int kTrackingStartGraceMs   = 3000;
+constexpr int kTrackingMaxMs          = 5 * 60 * 1000;
 constexpr float kMinimumDoaConfidence = 0.04f;
 constexpr float kMinimumFaceScore     = 0.55f;
 
@@ -150,8 +154,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                      static_cast<unsigned>(available));
             if (confidence >= kMinimumDoaConfidence) {
                 const int yaw_delta = static_cast<int>(std::clamp(angle, -70.0f, 70.0f) * 10.0f);
-                if (stackchan::stage1::RequestPerceptionLook(yaw_delta, 0))
-                    vTaskDelay(pdMS_TO_TICKS(kServoSettleMs));
+                stackchan::stage1::RequestPerceptionLook(yaw_delta, 0);
             }
         }
         heap_caps_free(snapshot);
@@ -159,21 +162,49 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         ESP_LOGW(kTag, "No dual-mic wake snapshot available");
     }
 
-    float center_x = 0.5f;
-    float center_y = 0.5f;
-    float score    = 0.0f;
-    if (!PostVision(center_x, center_y, score) || score < kMinimumFaceScore) {
-        ESP_LOGI(kTag, "No face in DOA view; keeping audio direction");
-        return;
-    }
+    const int64_t tracking_started_us = esp_timer_get_time();
+    bool conversation_seen            = false;
+    bool face_missing_logged          = false;
+    ESP_LOGI(kTag, "Realtime face tracking started");
+    while ((esp_timer_get_time() - tracking_started_us) / 1000 < kTrackingMaxMs) {
+        const int64_t frame_started_us = esp_timer_get_time();
+        const auto state               = Application::GetInstance().GetDeviceState();
+        const bool conversation_active = state == kDeviceStateConnecting || state == kDeviceStateListening ||
+                                         state == kDeviceStateSpeaking || state == kDeviceStateNotifying;
+        conversation_seen = conversation_seen || conversation_active;
+        const int64_t tracking_elapsed_ms = (frame_started_us - tracking_started_us) / 1000;
+        if ((conversation_seen && state == kDeviceStateIdle) ||
+            (!conversation_seen && tracking_elapsed_ms >= kTrackingStartGraceMs))
+            break;
 
-    // CoreS3の実機ではyaw負方向がカメラ画像の左、pitch正方向が上を向く。
-    const int yaw_delta   = static_cast<int>(std::clamp((center_x - 0.5f) * 600.0f, -250.0f, 250.0f));
-    const int pitch_delta = static_cast<int>(std::clamp((0.5f - center_y) * 400.0f, -160.0f, 160.0f));
-    ESP_LOGI(kTag, "Face center=(%.3f,%.3f) score=%.3f correction=(%d,%d)", center_x, center_y, score, yaw_delta,
-             pitch_delta);
-    if (std::abs(yaw_delta) >= 20 || std::abs(pitch_delta) >= 20)
-        stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta);
+        float center_x = 0.5f;
+        float center_y = 0.5f;
+        float score    = 0.0f;
+        if (PostVision(center_x, center_y, score) && score >= kMinimumFaceScore) {
+            face_missing_logged = false;
+            const float error_x = center_x - 0.5f;
+            const float error_y = 0.5f - center_y;
+            // CoreS3実機のyaw負方向が画像の左、pitch正方向が画像の上を向く。
+            const int yaw_delta = std::abs(error_x) < 0.06f
+                                      ? 0
+                                      : static_cast<int>(std::clamp(error_x * 360.0f, -120.0f, 120.0f));
+            const int pitch_delta = std::abs(error_y) < 0.08f
+                                        ? 0
+                                        : static_cast<int>(std::clamp(error_y * 260.0f, -80.0f, 80.0f));
+            ESP_LOGI(kTag, "Track face=(%.3f,%.3f) score=%.3f correction=(%d,%d)", center_x, center_y, score,
+                     yaw_delta, pitch_delta);
+            if (yaw_delta != 0 || pitch_delta != 0)
+                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta);
+        } else if (!face_missing_logged) {
+            ESP_LOGI(kTag, "No face in view; keeping audio direction and tracking");
+            face_missing_logged = true;
+        }
+
+        const int64_t frame_elapsed_ms = (esp_timer_get_time() - frame_started_us) / 1000;
+        if (frame_elapsed_ms < kTrackingIntervalMs)
+            vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs - frame_elapsed_ms));
+    }
+    ESP_LOGI(kTag, "Realtime face tracking stopped");
 }
 
 bool StackChanPerception::PostAudio(const int16_t* pcm, size_t frames, float& angle_deg, float& confidence)

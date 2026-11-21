@@ -7,7 +7,7 @@
 class StackChanCamera;
 
 // Keeps the real-time audio path limited to a bounded PSRAM copy. Xavier I/O,
-// JPEG encoding and servo requests run only in the short-lived wake worker.
+// JPEG encoding and servo requests run in the PSRAM-backed conversation worker.
 class StackChanPerception {
 public:
     explicit StackChanPerception(StackChanCamera* camera);
