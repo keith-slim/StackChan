@@ -1,5 +1,5 @@
-// Stage-1 settings HTTP service: one guarded attempt after voice boot.
+// Stage-1 settings HTTP service: start on Wi-Fi connection, before activation.
 #pragma once
 namespace stackchan::stage1::web {
-void Start();
+bool Start(); // true when ready; false when a later retry is needed
 }

@@ -172,7 +172,6 @@ void Hal::updateHeapStatusLog()
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
 #include <stackchan/stackchan.h>
-#include <stackchan/port_stage1/stage1_web.h>
 #include <apps/common/common.h>
 #include <assets/assets.h>
 
@@ -260,13 +259,6 @@ static void _stackchan_update_task(void* param)
         // conversation processing is idle; reuse this task (no new stack).
         stackchan::wifi::web::ApplyPendingIfIdle();
         tools::update_reminders();
-
-        // Wait until activation, audio startup, and at least 30 seconds of runtime.
-        // Run HTTP initialization outside the LVGL lock and only while idle.
-        if (GetHAL().millis() >= 30000 && hal_bridge::is_xiaozhi_ready() &&
-            hal_bridge::is_xiaozhi_idle()) {
-            stackchan::stage1::web::Start();
-        }
 
         // Keep the conversation pacing delay OUTSIDE the LVGL lock so
         // subtitles and audio-related UI callbacks are not blocked by it.

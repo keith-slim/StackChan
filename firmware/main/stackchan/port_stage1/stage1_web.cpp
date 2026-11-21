@@ -12,6 +12,7 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <wifi_manager.h>
 #include <atomic>
 #include <cJSON.h>
 #include <cstdio>
@@ -1136,26 +1137,28 @@ esp_err_t TriggerVoiceTest(httpd_req_t* req) {
     return ESP_OK;
 }
 
-void Start() {
-    // Called from the StackChan update task after boot, only when Xiaozhi is
-    // idle. Low heap at the first attempt must not disable settings forever.
-    if (attempted.load()) return;
+bool Start() {
+    // Only called by Application's main event loop, before activation or
+    // on a later retry. Never compete with the Wi-Fi provisioning HTTPD.
+    if (attempted.load()) return true;
+    auto& wifi = WifiManager::GetInstance();
+    if (!wifi.IsInitialized() || !wifi.IsConnected() || wifi.IsConfigMode()) return false;
     static uint32_t last_attempt_ms = 0;
     const uint32_t now = GetHAL().millis();
-    if (last_attempt_ms && uint32_t(now - last_attempt_ms) < 30000) return;
+    if (last_attempt_ms && uint32_t(now - last_attempt_ms) < 30000) return false;
     last_attempt_ms = now;
     const size_t free_bytes = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const size_t psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    ESP_LOGI(TAG, "deferred start: internal_free=%u largest=%u psram=%u",
+    ESP_LOGI(TAG, "network-ready start: internal_free=%u largest=%u psram=%u",
              static_cast<unsigned>(free_bytes), static_cast<unsigned>(largest),
              static_cast<unsigned>(psram));
     if (free_bytes < MIN_FREE_INTERNAL || largest < MIN_LARGEST_INTERNAL ||
         psram < MIN_FREE_PSRAM) {
-        ESP_LOGW(TAG, "web start deferred: insufficient heap; will retry while idle");
-        return;
+        ESP_LOGW(TAG, "web start deferred: insufficient heap; will retry when safe");
+        return false;
     }
-    if (attempted.exchange(true)) return;
+    if (attempted.exchange(true)) return true;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 4096;
@@ -1173,7 +1176,7 @@ void Start() {
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         server = nullptr;
         attempted.store(false);
-        return;
+        return false;
     }
     httpd_uri_t page{};
     page.uri = "/"; page.method = HTTP_GET; page.handler = Page;
@@ -1230,11 +1233,12 @@ void Start() {
         httpd_stop(server);
         server = nullptr;
         attempted.store(false);
-        return;
+        return false;
     }
     ESP_LOGI(TAG, "ready: port=80 internal_free=%u largest=%u psram=%u",
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+    return true;
 }
 }

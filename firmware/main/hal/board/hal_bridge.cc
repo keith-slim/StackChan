@@ -19,6 +19,7 @@
 #include <initializer_list>
 #include <assets.h>
 #include <settings.h>
+#include <stackchan/port_stage1/stage1_web.h>
 
 static const char* _tag = "HAL_BRIDGE";
 
@@ -151,6 +152,8 @@ void start_xiaozhi_app()
 
     // Initialize and run the application
     auto& app = Application::GetInstance();
+    // Local configuration must be reachable even if the AI server is wrong.
+    app.SetLocalNetworkServiceStarter(stackchan::stage1::web::Start);
     app.Initialize();
     app.Run();  // This function runs the main event loop and never returns
 }
