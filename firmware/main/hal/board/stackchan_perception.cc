@@ -5,6 +5,7 @@
 #include "application.h"
 #include "board.h"
 #include "stackchan_camera.h"
+#include "stackchan_display.h"
 #include "stackchan/port_stage1/port_stage1.h"
 
 #include <algorithm>
@@ -82,7 +83,8 @@ bool JsonNumber(cJSON* object, const char* name, float& value)
 }
 }  // namespace
 
-StackChanPerception::StackChanPerception(StackChanCamera* camera) : camera_(camera)
+StackChanPerception::StackChanPerception(StackChanCamera* camera, StackChanAvatarDisplay* display)
+    : camera_(camera), display_(display)
 {
     audio_ring_ =
         static_cast<int16_t*>(heap_caps_calloc(kRingFrames * 2, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -117,6 +119,9 @@ void StackChanPerception::OnWakeWordDetected()
         return;
     }
     stop_requested_.store(false, std::memory_order_release);
+    // Only an actual wake from idle can start a pre-conversation greeting.
+    if (display_ && Application::GetInstance().GetDeviceState() == kDeviceStateIdle)
+        display_->ArmWakeFaceSmile();
     snapshot_end_.store(written_frames_.load(std::memory_order_acquire), std::memory_order_release);
     TaskHandle_t task = nullptr;
     if (xTaskCreateWithCaps(WorkerEntry, "perception", 12288, this, 2, &task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) !=
@@ -174,6 +179,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     bool conversation_seen            = false;
     bool person_missing_logged        = false;
     bool face_filter_initialized      = false;
+    bool wake_face_smile_shown         = false;
     bool face_center_locked           = false;
     int centered_frames               = 0;
     int face_missing_frames           = 0;
@@ -200,6 +206,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         if (PostVision(center_x, center_y, score, body_target_y, body_score) && score >= kMinimumFaceScore) {
             person_missing_logged = false;
             face_missing_frames   = 0;
+            if (!wake_face_smile_shown && display_ && !stop_requested_.load(std::memory_order_acquire))
+                wake_face_smile_shown = display_->ShowWakeFaceSmile();
             // 距離や検出枠の揺れをそのままサーボへ渡さず、中心座標を平滑化する。
             constexpr float kFilterAlpha = 0.35f;
             if (!face_filter_initialized) {

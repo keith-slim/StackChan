@@ -5,12 +5,13 @@
 #include <cstdint>
 
 class StackChanCamera;
+class StackChanAvatarDisplay;
 
 // Keeps the real-time audio path limited to a bounded PSRAM copy. Xavier I/O,
 // JPEG encoding and servo requests run in the PSRAM-backed conversation worker.
 class StackChanPerception {
 public:
-    explicit StackChanPerception(StackChanCamera* camera);
+    StackChanPerception(StackChanCamera* camera, StackChanAvatarDisplay* display);
     ~StackChanPerception();
 
     void OnAudioInputFrame(const int16_t* samples, size_t frames, size_t channels, size_t microphone_channels);
@@ -28,6 +29,7 @@ private:
     bool PostVision(float& center_x, float& center_y, float& score, float& body_target_y, float& body_score);
 
     StackChanCamera* camera_ = nullptr;
+    StackChanAvatarDisplay* display_ = nullptr;
     int16_t* audio_ring_     = nullptr;
     std::atomic<uint64_t> written_frames_{0};
     std::atomic<uint64_t> snapshot_end_{0};

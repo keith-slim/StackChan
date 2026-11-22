@@ -676,7 +676,7 @@ public:
         });
         InitializeCamera();
 #if CONFIG_STACKCHAN_PERCEPTION_ENABLED
-        perception_ = new StackChanPerception(camera_);
+        perception_ = new StackChanPerception(camera_, static_cast<StackChanAvatarDisplay*>(display_));
 #endif
         StartTouchpadTimer();
         GetBacklight()->RestoreBrightness();

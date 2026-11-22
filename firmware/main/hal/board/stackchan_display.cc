@@ -334,6 +334,7 @@ void StackChanAvatarDisplay::SetupUI()
             Application::GetInstance().GetDeviceState() == kDeviceStateIdle,
             self->is_sleeping_));
         if (!decision.audio_finished) return;
+        self->EndWakeFaceSmile();
         if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_) {
             ESP_LOGW(TAG, "[IDLE_RECOVERY] completing missed speech end (mouth=%d subtitle=%d)",
                      self->speaking_modifier_id_ >= 0, self->subtitle_speaking_);
@@ -378,6 +379,53 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
             idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
             return;
     }
+}
+
+bool StackChanAvatarDisplay::ShowWakeFaceSmile()
+{
+    // Called by the existing perception worker, never the audio feed task.
+    if (!wake_face_armed_.load() || Application::GetInstance().GetDeviceState() != kDeviceStateListening)
+        return false;
+    if (!Lock(10)) return false;
+    auto& sc = GetStackChan();
+    bool shown = false;
+    if (wake_face_armed_.load() && !wake_face_active_ && !wake_face_waiting_neutral_ &&
+        sc.hasAvatar() && Application::GetInstance().GetDeviceState() == kDeviceStateListening &&
+        !Application::GetInstance().IsAnnouncementActive() && !is_sleeping_ &&
+        !stackchan::stage1::IsSleepSceneActive() && !stackchan::stage1::IsWakeSequenceActive()) {
+        // The listening pose otherwise redraws neutral eye/mouth geometry on every update.
+        stackchan::stage1::SetConversationPose(sc, stackchan::stage1::ConversationPose::None);
+        wake_face_before_ = sc.avatar().getEmotion();
+        sc.avatar().setEmotion(Emotion::Happy);
+        if (auto* blink = static_cast<BlinkModifier*>(sc.getModifier(blink_modifier_id_)))
+            blink->resyncEyeWeights();
+        wake_face_active_ = true;
+        shown = true;
+        ESP_LOGI(TAG, "[EMOTION] wake face found: happy");
+    }
+    Unlock();
+    return shown;
+}
+
+void StackChanAvatarDisplay::EndWakeFaceSmile(bool resume_listening)
+{
+    // All callers already hold the display lock (including the LVGL idle timer).
+    wake_face_armed_.store(false);
+    wake_face_waiting_neutral_ = false;
+    if (!wake_face_active_) return;
+    wake_face_active_ = false;
+    auto& sc = GetStackChan();
+    if (!sc.hasAvatar()) return;
+    if (sc.avatar().getEmotion() == Emotion::Happy) {
+        sc.avatar().setEmotion(wake_face_before_);
+        if (auto* blink = static_cast<BlinkModifier*>(sc.getModifier(blink_modifier_id_)))
+            blink->resyncEyeWeights();
+    }
+    // Preserve the existing listening-complete nod and thinking animation.
+    if (resume_listening && Application::GetInstance().GetDeviceState() == kDeviceStateListening &&
+        !stackchan::stage1::IsWakeSequenceActive())
+        stackchan::stage1::SetConversationPose(sc, stackchan::stage1::ConversationPose::Listening);
+    ESP_LOGI(TAG, "[EMOTION] wake face smile ended");
 }
 
 void StackChanAvatarDisplay::FinishSpeakingAnimation()
@@ -473,6 +521,13 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     }
 
     DisplayLockGuard lock(this);
+
+    // CONNECTING/LISTENING each emit a normal neutral UI callback.
+    // Consume only that callback; subsequent LLM emotions (even neutral)
+    // end the temporary greeting before the normal speech emotion is saved.
+    const bool wake_ui_neutral = wake_face_waiting_neutral_ && strcmp(emotion, "neutral") == 0;
+    wake_face_waiting_neutral_ = false;
+    if (!wake_ui_neutral) EndWakeFaceSmile();
 
     // A failed snore/sleep-talk announcement can report an error emotion after
     // the announcement has already been cleared. That error is not a wake
@@ -774,6 +829,7 @@ void StackChanAvatarDisplay::SetChatMessage(
         stackchan::stage1::NotifyExternalSpeech();
 
     if (strcmp(role, "user") == 0) {
+        if (content[0] != '\0') EndWakeFaceSmile(true);
         // S3 listening-complete animation: show a short visual nod, then
         // the thinking face. The ASR text/audio path is unchanged.
         if (content[0] != '\0')
@@ -800,6 +856,7 @@ void StackChanAvatarDisplay::SetChatMessage(
 
     } else if (strcmp(role, "assistant") == 0) {
         if (content[0] == '\0') return;
+        EndWakeFaceSmile();
 
         // The existing protocol can stream TTS sentence text without an
         // llm.emotion packet. Match S3's conservative speech heuristics,
@@ -1011,6 +1068,13 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     const bool may_be_word = strcmp(status, Lang::Strings::CONNECTING) == 0 ||
                              strcmp(status, Lang::Strings::LISTENING) == 0;
     const bool standalone_speech = Application::GetInstance().IsAnnouncementActive();
+    // The initial smile belongs only to the pre-response wake conversation.
+    // Do not let a late camera result replace speech, errors or standby.
+    if (!may_be_word || standalone_speech) {
+        EndWakeFaceSmile();
+    } else {
+        wake_face_waiting_neutral_ = wake_face_armed_.load();
+    }
     const bool wake_handoff = may_be_word && !standalone_speech &&
                               stackchan::stage1::RequestWakeWord();
     const bool wake_visual = wake_handoff || stackchan::stage1::IsWakeSequenceActive();

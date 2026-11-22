@@ -12,6 +12,7 @@
 #include <deque>
 #include <string>
 #include <cstdint>
+#include <atomic>
 #include <stackchan/avatar/avatar/elements/emotion.h>
 #include <hal/utils/psram_allocator.h>
 
@@ -58,6 +59,13 @@ private:
     bool speech_conversation_running_ = false; // LISTENING/SPEAKING, not actual sleep.
     stackchan::avatar::Emotion speech_emotion_before_ = stackchan::avatar::Emotion::Neutral;
 
+    // Wake face discovery is independent of LLM speech emotions.
+    // Arming is lock-free on the wake-word path; visual state uses the display lock.
+    std::atomic_bool wake_face_armed_{false};
+    bool wake_face_active_ = false;
+    bool wake_face_waiting_neutral_ = false;
+    stackchan::avatar::Emotion wake_face_before_ = stackchan::avatar::Emotion::Neutral;
+    void EndWakeFaceSmile(bool resume_listening = false);
     void FinishSpeakingAnimation();
     void ReconcileIdleLifecycle(bool device_idle);
     void AdvanceSubtitle();
@@ -96,6 +104,8 @@ public:
     virtual void SetStatus(const char* status) override;
     virtual void ShowNotification(const char* notification, int duration_ms = 3000) override;
 
+    void ArmWakeFaceSmile() { wake_face_armed_.store(true); }
+    bool ShowWakeFaceSmile();
     void LvglLock();
     void LvglUnlock();
     esp_lcd_panel_io_handle_t GetPanelIOForSd() const { return panel_io_; }
