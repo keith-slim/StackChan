@@ -206,6 +206,14 @@ Webとの接続が切れた場合は新しいIPアドレスから開き直して
 <small>明るさ・音量は本体と同じ値を保存して反映します。タイムゾーンも本体SETUPと同じ選択肢です。</small></section>
 <section id="aiSetup" class="card"><h2>AI設定</h2>
 <div id="setupAiFields"></div>
+<h3>ウェイクワード感度</h3>
+<label class="check"><input id="wakeThresholdDefault" type="checkbox" checked disabled>モデル標準値を使用</label>
+<label for="wakeThreshold">検出閾値 <output id="wakeThresholdValue">0.55</output></label>
+<input id="wakeThreshold" type="range" min="40" max="90" step="1" value="55" disabled style="width:100%;max-width:19rem">
+<small>左（0.40）：高感度／右（0.90）：低感度。低いほど反応しやすくなりますが、誤検出も増える場合があります。WakeNetのみ対象です。</small>
+<div class="buttons"><button id="wakeThresholdSave" type="button" disabled>感度を保存</button></div>
+<p id="wakeThresholdStatus" class="status" role="status">読み込み中…</p>
+<small>保存後、次のウェイクワード待受処理で適用します。再起動は不要です。標準値に戻すこともできます。</small>
 <h3>接続先AIサーバー</h3>
 <div class="setup-row"><label>サーバーURL
 <input id="setupServerUrl" type="url" maxlength="192" autocomplete="off"
@@ -538,8 +546,8 @@ const setupTz=[
 const setupAppNames=[
  ['ai_agent','AI.AGENT'],['avatar','AVATAR'],['espnow_remote','ESPNOW.REMOTE'],
  ['app_center','APP.CENTER'],['ezdata','EZDATA'],['dance','DANCE']];
-async function setupSave(field,value,app){
- setupStatus.textContent='NVSへ保存中: '+field;
+async function setupSave(field,value,app,statusElement=setupStatus){
+ statusElement.textContent='NVSへ保存中: '+field;
  try{
   const payload={field,value};if(app)payload.app=app;
   const response=await fetch('/api/stage1/setup',{method:'POST',
@@ -547,10 +555,30 @@ async function setupSave(field,value,app){
   if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
   const result=await response.json();
   const loaded=await setupLoad();
-  if(loaded)setupStatus.textContent='NVSに保存しました。SDバックアップは別途同期'+
+  if(loaded)statusElement.textContent=field==='wake_threshold'?
+   'NVSに保存しました。次の待受処理で適用します。SDバックアップは別途同期します。':
+   'NVSに保存しました。SDバックアップは別途同期'+
    (result.reboot_required?'。AI設定の実動作への反映には再起動が必要です。':'。');
- }catch(e){setupStatus.textContent='保存失敗: '+e.message;}
+  else if(field==='wake_threshold')statusElement.textContent='NVSに保存しましたが、設定の再読み込みに失敗しました。';
+ }catch(e){statusElement.textContent='保存失敗: '+e.message;}
 }
+const wakeThreshold=document.getElementById('wakeThreshold');
+const wakeThresholdDefault=document.getElementById('wakeThresholdDefault');
+const wakeThresholdValue=document.getElementById('wakeThresholdValue');
+const wakeThresholdSave=document.getElementById('wakeThresholdSave');
+const wakeThresholdStatus=document.getElementById('wakeThresholdStatus');
+function updateWakeThreshold(){
+ wakeThreshold.disabled=wakeThresholdDefault.disabled||wakeThresholdDefault.checked;
+ wakeThresholdValue.textContent=wakeThresholdDefault.checked?'モデル標準値':(Number(wakeThreshold.value)/100).toFixed(2);
+}
+wakeThreshold.addEventListener('input',updateWakeThreshold);
+wakeThresholdDefault.addEventListener('change',updateWakeThreshold);
+wakeThresholdSave.addEventListener('click',async()=>{
+ wakeThresholdSave.disabled=true;wakeThresholdDefault.disabled=true;updateWakeThreshold();
+ try{
+  await setupSave('wake_threshold',wakeThresholdDefault.checked?0:Number(wakeThreshold.value),undefined,wakeThresholdStatus);
+ }finally{wakeThresholdDefault.disabled=false;wakeThresholdSave.disabled=false;updateWakeThreshold();}
+});
 const setupServerUrl=document.getElementById('setupServerUrl');
 const setupServerSave=document.getElementById('setupServerSave');
 const setupServerStatus=document.getElementById('setupServerStatus');
@@ -622,6 +650,16 @@ async function setupLoad(){
   setupField(device,'timezone','タイムゾーン',setupTz,d.timezone);
   setupField(ai,'idle_movement','待機中のランダム動作',[[0,'なし'],[1,'少なめ'],[2,'普通'],[3,'多め']],d.idle_movement);
   setupField(ai,'start_ai_on_boot','起動時にAIを自動開始',[[false,'無効'],[true,'有効']],d.start_ai_on_boot);
+  const threshold=d.wake_threshold;
+  const thresholdValid=Number.isInteger(threshold)&&(threshold===0||(threshold>=40&&threshold<=90));
+  wakeThresholdDefault.disabled=!thresholdValid;
+  wakeThresholdSave.disabled=!thresholdValid;
+  if(thresholdValid){
+   wakeThresholdDefault.checked=threshold===0;
+   wakeThreshold.value=String(threshold===0?55:threshold);
+  }
+  updateWakeThreshold();
+  wakeThresholdStatus.textContent=thresholdValid?'保存済み設定を読み込みました':'感度設定を読み込めません';
   setupServerUrl.value=d.server_base_url||'';
   setupServerSave.disabled=false;
   if(d.app_visibility_loaded){

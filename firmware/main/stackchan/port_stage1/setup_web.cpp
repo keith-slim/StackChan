@@ -1,6 +1,7 @@
 // Web access to the existing SETUP application's settings.
 // Never initialize or erase NVS, and never perform reset/OTA actions here.
 #include "setup_web.h"
+#include "wake_net_threshold.h"
 #include <hal/hal.h>
 #include <hal/hal_toggles.h>
 #include <apps/common/common.h>
@@ -172,6 +173,7 @@ esp_err_t Read(httpd_req_t* request) {
     const auto ai = hal.getXiaozhiConfig();
     cJSON_AddNumberToObject(root, "idle_movement", ai.idleRandomMovementLevel);
     AddBool(root, "start_ai_on_boot", ai.startAiAgentOnBoot);
+    cJSON_AddNumberToObject(root, "wake_threshold", WakeNetThreshold::Get());
 
     char ota_url[kMaxEndpoint]{};
     char server_base[kMaxServerBase + 1]{};
@@ -210,7 +212,7 @@ esp_err_t Read(httpd_req_t* request) {
     // settings response: otherwise the browser might save missing defaults.
     constexpr const char* required[] = {
         "brightness", "volume", "timezone", "idle_movement", "start_ai_on_boot",
-        "server_base_url",
+        "server_base_url", "wake_threshold",
         "app_visibility_loaded", "account_username", "device_name",
         "firmware_version", "mac", "battery", "charging", "sd_pending"
     };
@@ -301,6 +303,11 @@ esp_err_t Write(httpd_req_t* request) {
             saved = MatchAi(GetHAL().getXiaozhiConfig(), ai);
             needs_restart = true; // Matches SETUP application's warm-reboot semantics.
         }
+    } else if (valid && std::strcmp(field, "wake_threshold") == 0) {
+        int threshold = 0;
+        valid = Number(value, WakeNetThreshold::kDefault, WakeNetThreshold::kMax, 1, threshold) &&
+                WakeNetThreshold::IsValid(threshold);
+        if (valid) saved = WakeNetThreshold::Save(threshold);
     } else if (valid && std::strcmp(field, "server_base_url") == 0) {
         const char* base = cJSON_IsString(value) ? value->valuestring : nullptr;
         char ota_url[kMaxEndpoint]{};
