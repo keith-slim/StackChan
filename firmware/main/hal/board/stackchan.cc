@@ -719,6 +719,11 @@ public:
         if (perception_) perception_->OnWakeWordDetected();
     }
 
+    void OnConversationEnded() override
+    {
+        if (perception_) perception_->OnConversationEnded();
+    }
+
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override
     {
         std::lock_guard<std::mutex> lock(power_state_mutex_);

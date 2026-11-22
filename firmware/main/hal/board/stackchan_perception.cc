@@ -116,6 +116,7 @@ void StackChanPerception::OnWakeWordDetected()
         ESP_LOGI(kTag, "Wake perception already running; keeping conversation path unblocked");
         return;
     }
+    stop_requested_.store(false, std::memory_order_release);
     snapshot_end_.store(written_frames_.load(std::memory_order_acquire), std::memory_order_release);
     TaskHandle_t task = nullptr;
     if (xTaskCreateWithCaps(WorkerEntry, "perception", 12288, this, 2, &task, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) !=
@@ -123,6 +124,12 @@ void StackChanPerception::OnWakeWordDetected()
         worker_running_.store(false, std::memory_order_release);
         ESP_LOGW(kTag, "Could not start PSRAM perception worker");
     }
+}
+
+void StackChanPerception::OnConversationEnded()
+{
+    stop_requested_.store(true, std::memory_order_release);
+    ESP_LOGI(kTag, "Conversation ended; stopping face tracking");
 }
 
 void StackChanPerception::WorkerEntry(void* context)
@@ -166,8 +173,15 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     const int64_t tracking_started_us = esp_timer_get_time();
     bool conversation_seen            = false;
     bool person_missing_logged        = false;
+    bool face_filter_initialized      = false;
+    bool face_center_locked           = false;
+    int centered_frames               = 0;
+    int face_missing_frames           = 0;
+    float filtered_center_x           = 0.5f;
+    float filtered_center_y           = 0.5f;
     ESP_LOGI(kTag, "Realtime face tracking started");
-    while ((esp_timer_get_time() - tracking_started_us) / 1000 < kTrackingMaxMs) {
+    while (!stop_requested_.load(std::memory_order_acquire) &&
+           (esp_timer_get_time() - tracking_started_us) / 1000 < kTrackingMaxMs) {
         const int64_t frame_started_us = esp_timer_get_time();
         const auto state               = Application::GetInstance().GetDeviceState();
         const bool conversation_active = state == kDeviceStateConnecting || state == kDeviceStateListening ||
@@ -185,31 +199,72 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         float body_score    = 0.0f;
         if (PostVision(center_x, center_y, score, body_target_y, body_score) && score >= kMinimumFaceScore) {
             person_missing_logged = false;
-            const float error_x = center_x - 0.5f;
-            const float error_y = 0.5f - center_y;
+            face_missing_frames   = 0;
+            // 距離や検出枠の揺れをそのままサーボへ渡さず、中心座標を平滑化する。
+            constexpr float kFilterAlpha = 0.35f;
+            if (!face_filter_initialized) {
+                filtered_center_x      = center_x;
+                filtered_center_y      = center_y;
+                face_filter_initialized = true;
+            } else {
+                filtered_center_x += (center_x - filtered_center_x) * kFilterAlpha;
+                filtered_center_y += (center_y - filtered_center_y) * kFilterAlpha;
+            }
+            const float error_x = filtered_center_x - 0.5f;
+            const float error_y = 0.5f - filtered_center_y;
+            // 3フレーム中央なら固定し、大きく外れるまで追従を再開しない。
+            if (face_center_locked) {
+                if (std::abs(error_x) > 0.075f || std::abs(error_y) > 0.10f) {
+                    face_center_locked = false;
+                    centered_frames    = 0;
+                }
+            } else if (std::abs(error_x) < 0.035f && std::abs(error_y) < 0.05f) {
+                if (++centered_frames >= 3) face_center_locked = true;
+            } else {
+                centered_frames = 0;
+            }
             // CoreS3実機のyaw負方向が画像の左、pitch正方向が画像の上を向く。
             // 顔中心を画面中央の約8px以内へ収める。
-            const int yaw_delta = std::abs(error_x) < 0.025f
+            const int yaw_delta = face_center_locked || std::abs(error_x) < 0.025f
                                       ? 0
                                       : static_cast<int>(std::clamp(error_x * 500.0f, -160.0f, 160.0f));
-            const int pitch_delta = std::abs(error_y) < 0.035f
+            const int pitch_delta = face_center_locked || std::abs(error_y) < 0.035f
                                         ? 0
                                         : static_cast<int>(std::clamp(error_y * 360.0f, -110.0f, 110.0f));
-            ESP_LOGI(kTag, "Track face=(%.3f,%.3f) score=%.3f correction=(%d,%d)", center_x, center_y, score,
+            ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d)",
+                     center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
                      yaw_delta, pitch_delta);
             if (yaw_delta != 0 || pitch_delta != 0)
                 stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta);
         } else if (body_score >= kMinimumBodyScore) {
             person_missing_logged = false;
-            const float error_y = 0.5f - body_target_y;
-            const int pitch_delta = std::abs(error_y) < 0.08f
-                                        ? 0
-                                        : static_cast<int>(std::clamp(error_y * 300.0f, -100.0f, 100.0f));
-            ESP_LOGI(kTag, "Track body head_hint_y=%.3f score=%.3f pitch=%d", body_target_y, body_score, pitch_delta);
-            if (pitch_delta != 0) stackchan::stage1::RequestPerceptionLook(0, pitch_delta);
-        } else if (!person_missing_logged) {
-            ESP_LOGI(kTag, "No face or body in view; keeping audio direction and tracking");
-            person_missing_logged = true;
+            ++face_missing_frames;
+            // 顔検出が一瞬抜けただけでは身体追従へ切り替えず、上下の往復を防ぐ。
+            if (face_missing_frames >= 12) {
+                face_filter_initialized = false;
+                face_center_locked      = false;
+                centered_frames         = 0;
+            }
+            if (face_missing_frames >= 4) {
+                const float error_y = 0.5f - body_target_y;
+                const int pitch_delta = std::abs(error_y) < 0.08f
+                                            ? 0
+                                            : static_cast<int>(std::clamp(error_y * 300.0f, -100.0f, 100.0f));
+                ESP_LOGI(kTag, "Track body head_hint_y=%.3f score=%.3f pitch=%d", body_target_y, body_score,
+                         pitch_delta);
+                if (pitch_delta != 0) stackchan::stage1::RequestPerceptionLook(0, pitch_delta);
+            }
+        } else {
+            ++face_missing_frames;
+            if (face_missing_frames >= 12) {
+                face_filter_initialized = false;
+                face_center_locked      = false;
+                centered_frames         = 0;
+            }
+            if (!person_missing_logged) {
+                ESP_LOGI(kTag, "No face or body in view; keeping audio direction and tracking");
+                person_missing_logged = true;
+            }
         }
 
         const int64_t frame_elapsed_ms = (esp_timer_get_time() - frame_started_us) / 1000;

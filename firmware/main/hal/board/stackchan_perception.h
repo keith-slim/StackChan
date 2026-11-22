@@ -15,6 +15,7 @@ public:
 
     void OnAudioInputFrame(const int16_t* samples, size_t frames, size_t channels, size_t microphone_channels);
     void OnWakeWordDetected();
+    void OnConversationEnded();
 
 private:
     static constexpr size_t kSampleRate     = 16000;
@@ -31,4 +32,5 @@ private:
     std::atomic<uint64_t> written_frames_{0};
     std::atomic<uint64_t> snapshot_end_{0};
     std::atomic<bool> worker_running_{false};
+    std::atomic<bool> stop_requested_{false};
 };
