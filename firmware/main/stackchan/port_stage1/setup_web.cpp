@@ -2,6 +2,8 @@
 // Never initialize or erase NVS, and never perform reset/OTA actions here.
 #include "setup_web.h"
 #include "wake_net_threshold.h"
+#include "application.h"
+#include <atomic>
 #include <hal/hal.h>
 #include <hal/hal_toggles.h>
 #include <apps/common/common.h>
@@ -24,6 +26,22 @@ constexpr const char* kTimezones[] = {
 };
 constexpr int kBrightness[] = {1, 15, 30, 45, 60, 75, 90, 100};
 constexpr size_t kMaxBody = 384;
+// Only the main application task performs the new NVS save and SD notification.
+// HTTP requests remain lightweight, using the existing application queue.
+enum WakeSaveState { kWakeIdle, kWakePending, kWakeSaved, kWakeFailed };
+std::atomic<int> wake_save_state{kWakeIdle};
+bool QueueWakeThreshold(int value) {
+    if (wake_save_state.exchange(kWakePending) == kWakePending) return false;
+    if (!Application::GetInstance().Schedule([value]() {
+            const bool saved = WakeNetThreshold::Save(value);
+            ESP_LOGI(kTag, "WakeNet threshold NVS save: %d result=%d", value, saved);
+            wake_save_state.store(saved ? kWakeSaved : kWakeFailed);
+        })) {
+        wake_save_state.store(kWakeFailed);
+        return false;
+    }
+    return true;
+}
 constexpr size_t kMaxServerBase = 192;
 constexpr size_t kMaxEndpoint = 256;
 constexpr const char* kOtaNamespace = "wifi";
@@ -161,6 +179,17 @@ bool SaveServerEndpoints(const char* ota, const char* websocket) {
 }  // namespace
 
 esp_err_t Read(httpd_req_t* request) {
+    // A tiny status response avoids running the full settings read while
+    // the main task is finishing the NVS transaction.
+    char query[32]{};
+    if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK &&
+        std::strcmp(query, "wake_threshold=1") == 0) {
+        const int state = wake_save_state.load();
+        char response[96];
+        std::snprintf(response, sizeof(response),
+                      "{\"state\":%d,\"wake_threshold\":%d}", state, WakeNetThreshold::Get());
+        return Reply(request, "200 OK", response);
+    }
     auto* root = cJSON_CreateObject();
     if (!root) return Reply(request, "503 Service Unavailable", "{\"error\":\"low memory\"}");
 
@@ -307,7 +336,11 @@ esp_err_t Write(httpd_req_t* request) {
         int threshold = 0;
         valid = Number(value, WakeNetThreshold::kDefault, WakeNetThreshold::kMax, 1, threshold) &&
                 WakeNetThreshold::IsValid(threshold);
-        if (valid) saved = WakeNetThreshold::Save(threshold);
+        cJSON_Delete(root);
+        if (!valid) return Reply(request, "400 Bad Request", "{\"error\":\"invalid threshold\"}");
+        if (!QueueWakeThreshold(threshold))
+            return Reply(request, "503 Service Unavailable", "{\"error\":\"save busy or queue unavailable\"}");
+        return Reply(request, "202 Accepted", "{\"queued\":true}");
     } else if (valid && std::strcmp(field, "server_base_url") == 0) {
         const char* base = cJSON_IsString(value) ? value->valuestring : nullptr;
         char ota_url[kMaxEndpoint]{};

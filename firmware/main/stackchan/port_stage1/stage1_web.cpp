@@ -546,8 +546,8 @@ const setupTz=[
 const setupAppNames=[
  ['ai_agent','AI.AGENT'],['avatar','AVATAR'],['espnow_remote','ESPNOW.REMOTE'],
  ['app_center','APP.CENTER'],['ezdata','EZDATA'],['dance','DANCE']];
-async function setupSave(field,value,app,statusElement=setupStatus){
- statusElement.textContent='NVSへ保存中: '+field;
+async function setupSave(field,value,app){
+ setupStatus.textContent='NVSへ保存中: '+field;
  try{
   const payload={field,value};if(app)payload.app=app;
   const response=await fetch('/api/stage1/setup',{method:'POST',
@@ -555,12 +555,9 @@ async function setupSave(field,value,app,statusElement=setupStatus){
   if(!response.ok)throw Error('HTTP '+response.status+': '+await response.text());
   const result=await response.json();
   const loaded=await setupLoad();
-  if(loaded)statusElement.textContent=field==='wake_threshold'?
-   'NVSに保存しました。次の待受処理で適用します。SDバックアップは別途同期します。':
-   'NVSに保存しました。SDバックアップは別途同期'+
+  if(loaded)setupStatus.textContent='NVSに保存しました。SDバックアップは別途同期'+
    (result.reboot_required?'。AI設定の実動作への反映には再起動が必要です。':'。');
-  else if(field==='wake_threshold')statusElement.textContent='NVSに保存しましたが、設定の再読み込みに失敗しました。';
- }catch(e){statusElement.textContent='保存失敗: '+e.message;}
+ }catch(e){setupStatus.textContent='保存失敗: '+e.message;}
 }
 const wakeThreshold=document.getElementById('wakeThreshold');
 const wakeThresholdDefault=document.getElementById('wakeThresholdDefault');
@@ -574,10 +571,29 @@ function updateWakeThreshold(){
 wakeThreshold.addEventListener('input',updateWakeThreshold);
 wakeThresholdDefault.addEventListener('change',updateWakeThreshold);
 wakeThresholdSave.addEventListener('click',async()=>{
+ const value=wakeThresholdDefault.checked?0:Number(wakeThreshold.value);
  wakeThresholdSave.disabled=true;wakeThresholdDefault.disabled=true;updateWakeThreshold();
+ wakeThresholdStatus.textContent='NVSへ保存要求中…';
  try{
-  await setupSave('wake_threshold',wakeThresholdDefault.checked?0:Number(wakeThreshold.value),undefined,wakeThresholdStatus);
- }finally{wakeThresholdDefault.disabled=false;wakeThresholdSave.disabled=false;updateWakeThreshold();}
+  const response=await fetch('/api/stage1/setup',{method:'POST',
+   headers:{'Content-Type':'application/json'},body:JSON.stringify({field:'wake_threshold',value})});
+  if(response.status!==202)throw Error('HTTP '+response.status+': '+await response.text());
+  wakeThresholdStatus.textContent='保存完了を確認中…';
+  for(let i=0;i<30;i++){
+   await new Promise(resolve=>setTimeout(resolve,300));
+   const res=await fetch('/api/stage1/setup?wake_threshold=1',{cache:'no-store'});
+   if(!res.ok)throw Error('HTTP '+res.status);
+   const d=await res.json();
+   if(d.state===1)continue;
+   if(d.state===2&&d.wake_threshold===value){
+    wakeThresholdStatus.textContent='NVSに保存しました。次の待受処理で適用します。SDバックアップは別途同期します。';
+    return;
+   }
+   throw Error('保存結果を確認できません');
+  }
+  wakeThresholdStatus.textContent='保存結果が未確認です。設定を再読み込みしてください。';
+ }catch(e){wakeThresholdStatus.textContent='保存失敗または未確認: '+e.message;}
+ finally{wakeThresholdDefault.disabled=false;wakeThresholdSave.disabled=false;updateWakeThreshold();}
 });
 const setupServerUrl=document.getElementById('setupServerUrl');
 const setupServerSave=document.getElementById('setupServerSave');
