@@ -10,6 +10,14 @@ static State step(Clock& c, uint32_t ms, uint16_t minute,
     return c.Step({ms, minute, true, standby, activity, random});
 }
 
+// Prepare a sleeping clock at the supplied timestamp, with no bedtime speech.
+static State night_sleep(Clock& c, uint32_t ms, uint16_t minute)
+{
+    assert(step(c, ms - kNightDrowsyMs - kSleepYawnMs, minute).phase == Phase::NightDrowsy);
+    assert(step(c, ms - kSleepYawnMs, minute).phase == Phase::NightYawn);
+    return step(c, ms, minute);
+}
+
 int main()
 {
     Clock clock;
@@ -29,7 +37,7 @@ int main()
     assert(Clock::IsDay(10, cross));
     assert(!Clock::IsDay(1000, cross));
     clock.Reset();
-    assert(step(clock, 1, 1000).phase == Phase::NightSleep);
+    assert(night_sleep(clock, 1, 1000).phase == Phase::NightSleep);
     auto s = step(clock, 2, 1400);
     assert(s.phase == Phase::MorningWake && s.wake_reason == WakeReason::Morning);
     assert(step(clock, 3000, 1400).phase == Phase::Awake);
@@ -55,7 +63,7 @@ int main()
     // Touch and wake word are independent wake sources, both with a 2.8s
     // startled presentation. A night wake may return to sleep after 1-3 min.
     clock.Reset();
-    assert(step(clock, 1, 1400).phase == Phase::NightSleep);
+    assert(night_sleep(clock, 1, 1400).phase == Phase::NightSleep);
     assert(clock.RequestWake(WakeReason::Touch, 2));
     s = step(clock, 2, 1400, false);
     assert(s.phase == Phase::NightWake && s.wake_reason == WakeReason::Touch);
@@ -64,17 +72,19 @@ int main()
     assert(step(clock, 2802, 1400, false, false, 1).phase == Phase::NightTemporary);
     assert(step(clock, 2803, 1400).phase == Phase::NightTemporary);
     assert(step(clock, 62802, 1400).phase == Phase::NightTemporary);
-    assert(step(clock, 62803, 1400).phase == Phase::NightSleep);
+    assert(step(clock, 62803, 1400).phase == Phase::NightDrowsy);
+    assert(step(clock, 72803, 1400).phase == Phase::NightYawn);
+    assert(step(clock, 76303, 1400).phase == Phase::NightSleep);
 
     clock.Reset();
-    assert(step(clock, 1, 1400).phase == Phase::NightSleep);
+    assert(night_sleep(clock, 1, 1400).phase == Phase::NightSleep);
     assert(clock.RequestWake(WakeReason::Word, 2));
     s = step(clock, 2, 1400, false);
     assert(s.phase == Phase::NightWake && s.wake_reason == WakeReason::Word);
 
     // S3 morning is a sleepy wake, not a startled/touch wake.
     clock.Reset();
-    assert(step(clock, 1, 1400).phase == Phase::NightSleep);
+    assert(night_sleep(clock, 1, 1400).phase == Phase::NightSleep);
     s = step(clock, 2, 360);
     assert(s.phase == Phase::MorningWake && s.wake_reason == WakeReason::Morning);
     assert(step(clock, 2802, 360).phase == Phase::Awake);
@@ -82,12 +92,14 @@ int main()
     // Night activity holds a temporary wake period instead of instantly
     // resuming its sleep animation.
     clock.Reset();
-    step(clock, 1, 1400);
+    night_sleep(clock, 1, 1400);
     s = step(clock, 2, 1400, false);
     assert(s.phase == Phase::NightTemporary);
     assert(step(clock, 3, 1400, false).phase == Phase::NightTemporary);
     assert(step(clock, 120002, 1400).phase == Phase::NightTemporary);
-    assert(step(clock, 120003, 1400).phase == Phase::NightSleep);
+    assert(step(clock, 120003, 1400).phase == Phase::NightDrowsy);
+    assert(step(clock, 130003, 1400).phase == Phase::NightYawn);
+    assert(step(clock, 133503, 1400).phase == Phase::NightSleep);
 
     // Wraparound while entering the bedtime message and shared yawn.
     clock.Reset();
@@ -138,13 +150,13 @@ int main()
     assert(voiced.Step({17004, 1400, true, true, false, 0, false}).phase == Phase::NightYawn);
 
     voiced.Reset();
-    assert(step(voiced, 1, 1400).phase == Phase::NightSleep);
+    assert(night_sleep(voiced, 1, 1400).phase == Phase::NightSleep);
     assert(voiced.RequestWake(WakeReason::Touch, 2));
     assert(voiced.Step({10002, 1400, true, true, false, 0, true}).phase == Phase::NightWake);
     assert(voiced.Step({10003, 1400, true, true, false, 0, false}).phase == Phase::NightTemporary);
 
     voiced.Reset();
-    assert(step(voiced, 1, 1400).phase == Phase::NightSleep);
+    assert(night_sleep(voiced, 1, 1400).phase == Phase::NightSleep);
     assert(voiced.Step({2, 360, true, true, false, 0, false}).phase == Phase::MorningWake);
     assert(voiced.Step({9000, 360, true, true, false, 0, true}).phase == Phase::MorningWake);
     assert(voiced.Step({9001, 360, true, true, false, 0, false}).phase == Phase::Awake);
@@ -194,19 +206,27 @@ int main()
     assert(step(manual, 1, 500).phase == Phase::Awake);
     assert(!manual.RequestSleep(2, 500, false));
     assert(manual.RequestSleep(2, 500, true));
-    assert(step(manual, 2, 500).phase == Phase::NapYawn);
-    assert(step(manual, 3502, 500).phase == Phase::NapSleep);
-    assert(step(manual, 63502, 500).phase == Phase::NapWake);
-    assert(step(manual, 66302, 500).phase == Phase::Awake);
+    assert(step(manual, 2, 500).phase == Phase::NapDrowsy);
+    assert(manual.DrowsyDurationMs() == kNightDrowsyMs);
+    assert(step(manual, 10002, 500).phase == Phase::NapYawn);
+    // Do not enter sleep until the motion settles (bounded by safety timeout).
+    assert(manual.Step({13502, 500, true, true, false, 0, false, false, false}).phase == Phase::NapYawn);
+    assert(step(manual, 13702, 500).phase == Phase::NapSleep);
+    assert(step(manual, 73702, 500).phase == Phase::NapWake);
+    assert(step(manual, 76502, 500).phase == Phase::Awake);
 
     // A manual night request reuses the existing sleep state instead of
     // changing the bedtime schedule or the quiet-mode suppression flag.
     manual.Reset();
     assert(step(manual, 1, 1400, false).phase == Phase::NightTemporary);
     assert(manual.RequestSleep(2, 1400, true));
-    assert(step(manual, 2, 1400).phase == Phase::NightSleep);
-    assert(manual.RequestWake(WakeReason::Touch, 3));
-    assert(step(manual, 3, 1400, false).phase == Phase::NightWake);
+    assert(step(manual, 2, 1400).phase == Phase::NightDrowsy);
+    assert(step(manual, 10002, 1400).phase == Phase::NightYawn);
+    assert(manual.Step({13502, 1400, true, true, false, 0, false, false, false}).phase == Phase::NightYawn);
+    assert(manual.Step({15501, 1400, true, true, false, 0, false, false, false}).phase == Phase::NightYawn);
+    assert(manual.Step({15502, 1400, true, true, false, 0, false, false, false}).phase == Phase::NightSleep);
+    assert(manual.RequestWake(WakeReason::Touch, 15503));
+    assert(step(manual, 15503, 1400, false).phase == Phase::NightWake);
 
     // No accidental startled wake while already awake.
     assert(!naps.RequestWake(WakeReason::Touch, 700000));

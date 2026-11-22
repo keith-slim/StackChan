@@ -35,6 +35,7 @@ struct Inputs {
     uint32_t random;
     bool voice_busy = false; // Voice generation/queue not yet fully drained.
     bool linked_event_pending = false; // Only blocks independent random events.
+    bool sleep_home_ready = true; // Runtime's final timed neck movement has settled.
 };
 struct State {
     Phase phase = Phase::Boot;
@@ -46,10 +47,12 @@ struct State {
     WakeReason wake_reason = WakeReason::None;
 };
 
-// Shared by the scheduler and night servo sequence; nap timings are unchanged.
+// Shared sleep preparation; preserve the automatic nap and night timings.
 inline constexpr uint32_t kNightDrowsyMs = 10000;
+inline constexpr uint32_t kNapDrowsyMs = 26500;
 inline constexpr uint32_t kNightMessageMinMs = 3000;
-inline constexpr uint32_t kNightYawnMs = 3500;
+inline constexpr uint32_t kSleepYawnMs = 3500;
+inline constexpr uint32_t kSleepSettleMaxMs = 2000;
 
 class Clock {
 public:
@@ -70,6 +73,9 @@ public:
     }
     const Config& GetConfig() const { return cfg_; }
     Phase CurrentPhase() const { return phase_; }
+    uint32_t DrowsyDurationMs() const {
+        return phase_ == Phase::NapDrowsy && !manual_nap_ ? kNapDrowsyMs : kNightDrowsyMs;
+    }
     // An expired independent event is a missed opportunity, not a queue.
     // Keep every deadline that has not expired yet.
     void DiscardDueRandomEvents(uint32_t now, uint32_t random) {
@@ -99,11 +105,13 @@ public:
     bool RequestSleep(uint32_t ms, uint16_t minute, bool clock_valid) {
         if (!clock_valid || minute >= 1440) return false;
         if (IsDay(minute, cfg_)) {
-            if (phase_ == Phase::NapSleep || phase_ == Phase::NapYawn) return true;
-            Enter(Phase::NapYawn, ms); // existing yawn then timed sleep
+            if (phase_ == Phase::NapSleep || phase_ == Phase::NapYawn || phase_ == Phase::NapDrowsy) return true;
+            manual_nap_ = true;
+            Enter(Phase::NapDrowsy, ms);
         } else {
-            if (phase_ == Phase::NightSleep) return true;
-            Enter(Phase::NightSleep, ms); // reuse night face and lighting
+            if (phase_ == Phase::NightSleep || phase_ == Phase::NightDrowsy ||
+                phase_ == Phase::NightMessage || phase_ == Phase::NightYawn) return true;
+            BeginSilentNight(ms); // do not duplicate the just-finished conversation
         }
         return true;
     }
@@ -113,6 +121,7 @@ public:
         dream_ = -1;
         idle_due_ = nap_due_ = phase_at_ = dream_due_ = dream_hide_ = 0;
         night_temp_ms_ = 120000;
+        manual_nap_ = silent_night_ = false;
         last_kind_ = Kind::None;
         wake_reason_ = WakeReason::None;
     }
@@ -129,9 +138,10 @@ public:
         }
         const bool day = IsDay(in.minute, cfg_);
         if (phase_ == Phase::Boot) {
-            Enter(day ? Phase::Awake :
-                  (in.standby && !in.activity ? Phase::NightSleep : Phase::NightTemporary), in.ms);
-            return Snapshot(in.ms, day); // initial sync is silent
+            if (day) Enter(Phase::Awake, in.ms);
+            else if (in.standby && !in.activity) BeginSilentNight(in.ms);
+            else Enter(Phase::NightTemporary, in.ms);
+            return Snapshot(in.ms, day); // initial sync remains silent
         }
         if (!day) {
             if (phase_ == Phase::NightWake) {
@@ -144,24 +154,26 @@ public:
             if (phase_ != Phase::NightPending && phase_ != Phase::NightDrowsy &&
                 phase_ != Phase::NightMessage && phase_ != Phase::NightYawn && phase_ != Phase::NightSleep &&
                 phase_ != Phase::NightTemporary) {
+                silent_night_ = false; // scheduled bedtime includes its greeting
                 Enter(Phase::NightPending, in.ms);
             }
             if (phase_ == Phase::NightPending && in.standby && !in.activity)
                 Enter(Phase::NightDrowsy, in.ms);
             else if (phase_ == Phase::NightDrowsy) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
-                else if (Elapsed(in.ms) >= kNightDrowsyMs) Enter(Phase::NightMessage, in.ms);
+                else if (Elapsed(in.ms) >= DrowsyDurationMs())
+                    Enter(silent_night_ ? Phase::NightYawn : Phase::NightMessage, in.ms);
             } else if (phase_ == Phase::NightMessage) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
                 else if (Elapsed(in.ms) >= kNightMessageMinMs && !in.voice_busy) Enter(Phase::NightYawn, in.ms);
             } else if (phase_ == Phase::NightYawn) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
-                else if (Elapsed(in.ms) >= kNightYawnMs) Enter(Phase::NightSleep, in.ms);
+                else if (SleepYawnFinished(in)) Enter(Phase::NightSleep, in.ms);
             } else if (phase_ == Phase::NightSleep && (!in.standby || in.activity)) {
                 Enter(Phase::NightTemporary, in.ms);
             } else if (phase_ == Phase::NightTemporary) {
                 if (!in.standby || in.activity) phase_at_ = in.ms;
-                else if (Elapsed(in.ms) >= night_temp_ms_) Enter(Phase::NightSleep, in.ms);
+                else if (Elapsed(in.ms) >= night_temp_ms_) BeginSilentNight(in.ms);
             }
             return Snapshot(in.ms, day);
         }
@@ -183,10 +195,10 @@ public:
             if (Elapsed(in.ms) >= TheatreDuration(kind_)) Enter(Phase::Awake, in.ms);
             break;
         case Phase::NapDrowsy:
-            if (Elapsed(in.ms) >= 26500) Enter(Phase::NapYawn, in.ms);
+            if (Elapsed(in.ms) >= DrowsyDurationMs()) Enter(Phase::NapYawn, in.ms);
             break;
         case Phase::NapYawn:
-            if (Elapsed(in.ms) >= 3500) {
+            if (SleepYawnFinished(in)) {
                 Enter(Phase::NapSleep, in.ms);
                 nap_sleep_ms_ = static_cast<uint32_t>(cfg_.nap_sleep_min_minutes) * 60000 +
                     in.random % ((static_cast<uint32_t>(cfg_.nap_sleep_max_minutes) -
@@ -238,7 +250,10 @@ public:
                 if (!nap_due_) nap_due_ = event_timer::Next(in.ms, NapDelay(in.random));
                 if (event_timer::Due(nap_due_, in.ms)) {
                     nap_due_ = 0;
-                    if ((in.random % 100) < cfg_.nap_chance) Enter(Phase::NapDrowsy, in.ms);
+                    if ((in.random % 100) < cfg_.nap_chance) {
+                        manual_nap_ = false;
+                        Enter(Phase::NapDrowsy, in.ms);
+                    }
                 }
             }
             break;
@@ -255,6 +270,15 @@ public:
         }
     }
 private:
+    void BeginSilentNight(uint32_t now) {
+        silent_night_ = true;
+        Enter(Phase::NightDrowsy, now);
+    }
+    bool SleepYawnFinished(const Inputs& in) const {
+        const auto elapsed = Elapsed(in.ms);
+        return elapsed >= kSleepYawnMs &&
+               (in.sleep_home_ready || elapsed >= kSleepYawnMs + kSleepSettleMaxMs);
+    }
     uint32_t TheatreDelay(uint32_t random) const {
         return static_cast<uint32_t>(cfg_.theatre_min_seconds) * 1000 +
             random % ((static_cast<uint32_t>(cfg_.theatre_max_seconds) -
@@ -292,6 +316,7 @@ private:
     uint32_t phase_at_ = 0, idle_due_ = 0, nap_due_ = 0;
     uint32_t nap_sleep_ms_ = 0, dream_due_ = 0, dream_hide_ = 0;
     uint32_t night_temp_ms_ = 120000;
+    bool manual_nap_ = false, silent_night_ = false;
 };
 
 } // namespace stackchan::stage1
