@@ -63,6 +63,18 @@ void Motion::moveWithSpeed(int yawAngle, int pitchAngle, int speed)
     _pitch_servo->moveWithSpeed(pitchAngle, speed);
 }
 
+void Motion::moveWithDuration(int yawAngle, int pitchAngle, uint32_t duration_ms, uint32_t now)
+{
+    _yaw_servo->moveWithDuration(yawAngle, duration_ms, now);
+    _pitch_servo->moveWithDuration(pitchAngle, duration_ms, now);
+}
+
+void Motion::cancelTimedMove()
+{
+    _yaw_servo->cancelTimedMove();
+    _pitch_servo->cancelTimedMove();
+}
+
 void Motion::moveRelativeFrom(const uitk::Vector2i& origin, int yawDelta, int pitchDelta, int speed)
 {
     const auto yaw_limit = _yaw_servo->getAngleLimit();

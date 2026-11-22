@@ -13,7 +13,6 @@
 #include "quiet_mark.h"
 #include "environment.h"
 #include "weather_face.h"
-#include "timed_servo_move.h"
 #include <stackchan/avatar/skins/default/default.h>
 #include <application.h>
 #include <stackchan/stackchan.h>
@@ -250,8 +249,8 @@ struct Runtime {
     uint32_t last_draw_at = 0;
     bool motion_held = false;
     bool sleep_home_pending = false; // Re-home after an in-progress manual move.
-    bool sleep_home_started = false;
-    TimedServoMove sleep_home_move;
+    uitk::Vector2i night_home_origin{0, 0};
+    bool night_yawn_return_started = false;
     // S3 night sleep keeps its face visible for 3 s, then turns off only the
     // backlight. Never persist this transient brightness to NVS.
     bool night_light_armed = false, night_light_off = false;
@@ -338,10 +337,22 @@ struct Runtime {
     static bool Sleeping(Phase p) {
         return p == Phase::NapSleep || p == Phase::NightSleep;
     }
-    static bool SleepSequence(Phase p) {
-        return p == Phase::NapDrowsy || p == Phase::NapYawn || p == Phase::NapSleep ||
-               p == Phase::NightDrowsy || p == Phase::NightMessage ||
-               p == Phase::NightYawn || p == Phase::NightSleep;
+    static bool NightBedtime(Phase p) {
+        return p == Phase::NightDrowsy || p == Phase::NightMessage || p == Phase::NightYawn;
+    }
+    static uitk::Vector2i Home(motion::Motion& motion) {
+        const auto yaw = motion.yawServo().getAngleLimit();
+        const auto pitch = motion.pitchServo().getAngleLimit();
+        return {uitk::clamp(0, yaw.x, yaw.y), uitk::clamp(0, pitch.x, pitch.y)};
+    }
+    void MoveNightHome(motion::Motion& motion, int numerator, int denominator,
+                       uint32_t duration, uint32_t now) {
+        const auto home = Home(motion);
+        const int yaw = night_home_origin.x + (home.x - night_home_origin.x) * numerator / denominator;
+        const int pitch = night_home_origin.y + (home.y - night_home_origin.y) * numerator / denominator;
+        motion.moveWithDuration(yaw, pitch, duration, now);
+        ESP_LOGI(LOG_TAG, "night home: phase=%d target=(%d,%d) duration=%u",
+                 static_cast<int>(phase), yaw, pitch, static_cast<unsigned>(duration));
     }
     static bool Auto(Phase p) {
         return p == Phase::Theatre || p == Phase::NapDrowsy || p == Phase::NapYawn ||
@@ -465,23 +476,26 @@ struct Runtime {
         }
         // Theatre and explicit gestures finish at their final servo position.
         // Restore only the existing sleep/wake sequence when not overridden.
+        if (NightBedtime(phase) || phase == Phase::NightSleep) sc.motion().cancelTimedMove();
         if (own_neck && restore && restore_neck_on_release && !motion_held)
             sc.motion().moveWithSpeed(saved_angles.x, saved_angles.y, 120);
         own_face = own_led = own_neck = false;
         restore_neck_on_release = false;
         sleep_home_pending = false;
-        sleep_home_started = false;
-        sleep_home_move.Cancel();
+        night_yawn_return_started = false;
         motion_held = false; // Manual override belongs to a scene, not permanently.
         owns_auto.store(false);
     }
     void Begin(StackChan& sc, Phase next, Kind next_kind, uint32_t now) {
         if (phase == next && kind == next_kind) return;
         if (next != Phase::NightSleep) RestoreNightBacklight();
-        if (!SleepSequence(next)) {
-            sleep_home_move.Cancel();
-            sleep_home_started = false;
+        if ((NightBedtime(phase) || phase == Phase::NightSleep) &&
+            !NightBedtime(next) && next != Phase::NightSleep) {
+            sc.motion().cancelTimedMove();
+            night_yawn_return_started = false;
         }
+        const bool completed_night_pose = phase == Phase::NightYawn &&
+            night_yawn_return_started && !motion_held;
         // Preserve the pre-automation face/pose across a multi-step night/nap scene.
         const bool continuing = own_face && Auto(next);
         if (own_speech) { sc.avatar().clearSpeech(); own_speech = false; }
@@ -564,43 +578,53 @@ struct Runtime {
             }
         } else if (next == Phase::NapDrowsy || next == Phase::NightDrowsy) {
             av.setEmotion(avatar::Emotion::Sleepy);
-            // Freeze a preceding random head movement and use its *current*
-            // position as the base for the entire sleep/wake sequence.
             if (!motion_held) {
-                if (!continuing) motion.stop();
-                if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
-                const auto yaw_limit = motion.yawServo().getAngleLimit();
-                const auto pitch_limit = motion.pitchServo().getAngleLimit();
-                sleep_home_move.Start(motion,
-                                      uitk::clamp(0, yaw_limit.x, yaw_limit.y),
-                                      uitk::clamp(0, pitch_limit.x, pitch_limit.y),
-                                      30000, now);
-                sleep_home_started = true;
+                if (next == Phase::NapDrowsy) {
+                    // Restore the previous nap motion, unchanged.
+                    if (!continuing) motion.stop();
+                    if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
+                    motion.moveRelativeFrom(saved_angles, 0, -35, 140);
+                } else {
+                    night_home_origin = motion.getCurrentAngles();
+                    if (!own_neck) { saved_angles = night_home_origin; own_neck = true; }
+                    night_yawn_return_started = false;
+                    // Most of the travel happens while becoming drowsy.
+                    MoveNightHome(motion, 2, 3, kNightDrowsyMs - 300, now);
+                }
             }
             color(28,18,20);
             ESP_LOGI(LOG_TAG, "sleep action: drowsy");
         } else if (next == Phase::NightMessage) {
             av.setEmotion(avatar::Emotion::Sleepy);
+            if (!motion_held) MoveNightHome(motion, 5, 6, kNightMessageMinMs - 300, now);
             say(voice::Current() ? voice::Current()->bedtime : "そろそろ寝るね。おやすみなさい。");
             color(28,18,20);
             ESP_LOGI(LOG_TAG, "S3 bedtime message");
         } else if (next == Phase::NapYawn || next == Phase::NightYawn) {
             av.setEmotion(avatar::Emotion::Sleepy);
+            if (!motion_held) {
+                if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
+                if (next == Phase::NapYawn) {
+                    motion.moveRelativeFrom(saved_angles, 0, -85, 170);
+                } else {
+                    const auto home = Home(motion);
+                    const auto limit = motion.pitchServo().getAngleLimit();
+                    night_yawn_return_started = false;
+                    motion.yawServo().moveWithDuration(home.x, kNightYawnMs - 500, now);
+                    // Keep the downward yawn gesture, relative to the current
+                    // gradual home path rather than jumping to the old pose.
+                    const int dip = uitk::clamp(motion.getCurrentPitchAngle() - 85, limit.x, limit.y);
+                    motion.pitchServo().moveWithDuration(dip, 1000, now);
+                }
+            }
             ESP_LOGI(LOG_TAG, "sleep action: yawn");
         } else if (Sleeping(next)) {
             av.setEmotion(avatar::Emotion::Sleepy);
             if (!own_neck) { saved_angles = motion.getCurrentAngles(); own_neck = true; }
-            // 通常経路では眠そうな表情の開始時から継続中。途中から睡眠へ
-            // 復帰した場合も、ここから同じ30秒補間を開始する。
-            if (!sleep_home_started && !motion_held) {
-                const auto yaw_limit = motion.yawServo().getAngleLimit();
-                const auto pitch_limit = motion.pitchServo().getAngleLimit();
-                sleep_home_move.Start(motion,
-                                      uitk::clamp(0, yaw_limit.x, yaw_limit.y),
-                                      uitk::clamp(0, pitch_limit.x, pitch_limit.y),
-                                      30000, now);
-                sleep_home_started = true;
-            }
+            // Normal bedtime already requested the final pose during yawn.
+            // Direct sleep (boot/manual/resleep) and nap retain their old home path.
+            sleep_home_pending = !completed_night_pose || next == Phase::NapSleep;
+            TickSleepHome(sc);
             // S3 sleep state: all 12 neck LEDs must be dark. Explicit sleep
             // overrides any colour left by an earlier autonomous animation.
             own_led = true;
@@ -648,28 +672,32 @@ struct Runtime {
             ESP_LOGI(LOG_TAG, "S3 morning: sleepy face and greeting");
         }
     }
-    void TickSleepHome(StackChan& sc, uint32_t now) {
+    void TickNightYawn(StackChan& sc, uint32_t elapsed, uint32_t now) {
+        if (motion_held || night_yawn_return_started || elapsed < 1200) return;
+        night_yawn_return_started = true;
         auto& motion = sc.motion();
-        if (sleep_home_pending && Sleeping(phase)) {
-            if (motion_held && motion.isMoving()) return; // preserve in-flight manual move
-            motion_held = false;
-            sleep_home_pending = false;
-            sleep_home_started = false;
-        }
-        if (!SleepSequence(phase) || motion_held) return;
+        const auto home = Home(motion);
+        // Leave 500ms for physical settling, not an additional sleep delay.
+        const uint32_t finish = kNightYawnMs - 500;
+        motion.pitchServo().moveWithDuration(home.y, elapsed < finish ? finish - elapsed : 1, now);
+        ESP_LOGI(LOG_TAG, "night home: final yawn target=(%d,%d)", home.x, home.y);
+    }
+    void TickSleepHome(StackChan& sc) {
+        if (!sleep_home_pending || !Sleeping(phase)) return;
+        auto& motion = sc.motion();
+        if (motion_held && motion.isMoving()) return; // preserve in-flight manual move
+        motion_held = false;
+        sleep_home_pending = false;
         const auto yaw_limit = motion.yawServo().getAngleLimit();
         const auto pitch_limit = motion.pitchServo().getAngleLimit();
         // Motion::goHome uses (0,0); Servo::moveWithSpeed clamps each axis
         // to its *current* calibrated/stall-safe limits (pitch min may be 30).
         const int target_yaw = uitk::clamp(0, yaw_limit.x, yaw_limit.y);
         const int target_pitch = uitk::clamp(0, pitch_limit.x, pitch_limit.y);
-        if (!sleep_home_started) {
-            sleep_home_move.Start(motion, target_yaw, target_pitch, 30000, now);
-            sleep_home_started = true;
-            ESP_LOGI(LOG_TAG, "sleep home: gradual current=(%d,%d) target=(%d,%d)",
-                     motion.getCurrentYawAngle(), motion.getCurrentPitchAngle(), target_yaw, target_pitch);
-        }
-        sleep_home_move.Tick(motion, now);
+        ESP_LOGI(LOG_TAG, "sleep home: current=(%d,%d) target=(%d,%d) held=%d",
+                 motion.getCurrentYawAngle(), motion.getCurrentPitchAngle(),
+                 target_yaw, target_pitch, motion_held);
+        motion.goHome(350);
     }
     void TickWake(StackChan& sc, uint32_t elapsed) {
         if (motion_held) return;
@@ -1197,7 +1225,8 @@ void Update(StackChan& sc) {
         const bool expired = static_cast<uint32_t>(now - perception_requested_at.load()) > 3000;
         // Wake-triggered tracking is allowed to replace the wake animation's
         // neck target; sleep and explicit skits retain priority.
-        const bool motion_available = !r.cue_active && !Runtime::Sleeping(r.phase);
+        const bool motion_available = !r.cue_active && !Runtime::Sleeping(r.phase) &&
+                                      !Runtime::NightBedtime(r.phase);
         if (expired) {
             perception_look_pending.store(false, std::memory_order_release);
             ESP_LOGW(LOG_TAG, "perception look expired while motion was busy");
@@ -1299,7 +1328,8 @@ void Update(StackChan& sc) {
     if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||
         state.phase == Phase::MorningWake)
         r.TickWake(sc, state.phase_elapsed_ms);
-    if (Runtime::SleepSequence(state.phase)) r.TickSleepHome(sc, now);
+    if (state.phase == Phase::NightYawn) r.TickNightYawn(sc, state.phase_elapsed_ms, now);
+    if (Runtime::Sleeping(state.phase)) r.TickSleepHome(sc);
     sleep_wake_eligible.store(state.phase == Phase::NapSleep ||
                               state.phase == Phase::NightSleep ||
                               state.phase == Phase::NapYawn ||

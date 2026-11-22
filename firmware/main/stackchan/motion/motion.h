@@ -95,6 +95,9 @@ public:
      */
     void moveWithSpeed(int yawAngle, int pitchAngle, int speed);
 
+    void moveWithDuration(int yawAngle, int pitchAngle, uint32_t duration_ms, uint32_t now);
+    void cancelTimedMove();
+
     // Scene movements keep the captured origin across multiple steps.
     // Both axes use the same runtime-limit clamp as voice commands.
     void moveRelativeFrom(const uitk::Vector2i& origin, int yawDelta, int pitchDelta, int speed);

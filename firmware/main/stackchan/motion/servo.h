@@ -7,6 +7,7 @@
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
 #include <cstdint>
+#include "timed_servo_move.h"
 
 namespace stackchan::motion {
 
@@ -53,6 +54,10 @@ public:
      * @param speed (0-1000)
      */
     void moveWithSpeed(int angle, int speed);
+
+    // One physical position sync at entry, then direct timed setpoints.
+    void moveWithDuration(int angle, uint32_t duration_ms, uint32_t now);
+    void cancelTimedMove();
 
     /**
      * @brief Rotate servo with given velocity
@@ -169,6 +174,7 @@ protected:
 protected:
     uitk::Vector2i _angle_limit;
     uitk::AnimateValue _angle_anim;
+    TimedServoMove _timed_move;
 
     uint32_t _last_tick               = 0;
     uint32_t _last_torque_check_tick  = 0;

@@ -44,6 +44,11 @@ struct State {
     WakeReason wake_reason = WakeReason::None;
 };
 
+// Shared by the scheduler and night servo sequence; nap timings are unchanged.
+inline constexpr uint32_t kNightDrowsyMs = 10000;
+inline constexpr uint32_t kNightMessageMinMs = 3000;
+inline constexpr uint32_t kNightYawnMs = 3500;
+
 class Clock {
 public:
     bool SetConfig(const Config& cfg) {
@@ -135,13 +140,13 @@ public:
                 Enter(Phase::NightDrowsy, in.ms);
             else if (phase_ == Phase::NightDrowsy) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
-                else if (Elapsed(in.ms) >= 10000) Enter(Phase::NightMessage, in.ms);
+                else if (Elapsed(in.ms) >= kNightDrowsyMs) Enter(Phase::NightMessage, in.ms);
             } else if (phase_ == Phase::NightMessage) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
-                else if (Elapsed(in.ms) >= 3000 && !in.voice_busy) Enter(Phase::NightYawn, in.ms);
+                else if (Elapsed(in.ms) >= kNightMessageMinMs && !in.voice_busy) Enter(Phase::NightYawn, in.ms);
             } else if (phase_ == Phase::NightYawn) {
                 if (!in.standby || in.activity) Enter(Phase::NightPending, in.ms);
-                else if (Elapsed(in.ms) >= 3500) Enter(Phase::NightSleep, in.ms);
+                else if (Elapsed(in.ms) >= kNightYawnMs) Enter(Phase::NightSleep, in.ms);
             } else if (phase_ == Phase::NightSleep && (!in.standby || in.activity)) {
                 Enter(Phase::NightTemporary, in.ms);
             } else if (phase_ == Phase::NightTemporary) {

@@ -43,6 +43,17 @@ void Servo::update()
     }
     _last_tick = GetHAL().millis();
 
+    // Keep the existing low-level clamp/stall protection, but do not
+    // start a new spring or read physical position for every timed setpoint.
+    if (_timed_move.Active()) {
+        const int angle = uitk::clamp(_timed_move.Sample(_last_tick), _angle_limit.x, _angle_limit.y);
+        if (angle != static_cast<int>(_angle_anim.directValue())) {
+            _angle_anim.teleport(angle);
+            set_angle_impl(angle);
+        }
+        return;
+    }
+
     // Apply animation
     if (!_angle_anim.done()) {
         _angle_anim.updateWithDelta(0.02f);  // Fixed delta time for consistency
@@ -87,6 +98,24 @@ void Servo::moveWithSpeed(int angle, int speed)
     moveWithSpringParams(angle, spring_options.stiffness, spring_options.damping);
 }
 
+void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
+{
+    const bool was_moving = isMoving();
+    const int current = uitk::clamp(getCurrentAngle(), _angle_limit.x, _angle_limit.y);
+    angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
+    _angle_anim.teleport(current);
+    _snap_to_target_on_rest = false;
+    _timed_move.Start(current, angle, duration_ms, now);
+    if (_timed_move.Active() && !_torque_commanded_enabled) setTorqueEnabled(true);
+    // Replace any in-flight spring target with the sampled starting pose.
+    if (was_moving && _torque_commanded_enabled) set_angle_impl(current);
+}
+
+void Servo::cancelTimedMove()
+{
+    _timed_move.Cancel(); // Last commanded position remains; no stale spring target.
+}
+
 int Servo::getCurrentAngle()
 {
     return _angle_anim.directValue();
@@ -96,7 +125,7 @@ bool Servo::isMoving()
 {
     // Avoid a servo status read while idle or after torque has been released.
     // Interpolation and its pending final write are tracked locally.
-    if (!_angle_anim.done() || _snap_to_target_on_rest) return true;
+    if (_timed_move.Active() || !_angle_anim.done() || _snap_to_target_on_rest) return true;
     return _torque_commanded_enabled && is_moving_impl();
 }
 
@@ -110,6 +139,7 @@ void Servo::apply_default_spring_options()
 
 void Servo::update_angle_anim_target(int angle)
 {
+    cancelTimedMove();
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
 
     if (_auto_angle_sync_enabled) {
@@ -124,6 +154,7 @@ void Servo::update_angle_anim_target(int angle)
 
 void Servo::stop_motion_at_angle(int angle)
 {
+    cancelTimedMove(); // A stall must also stop timed motion.
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(angle);
     _snap_to_target_on_rest = false;
