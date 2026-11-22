@@ -6,6 +6,8 @@
 #include "quiet_mode.h"
 #include "environment.h"
 #include "setup_web.h"
+#include <application.h>
+#include <stackchan/addons/neon_light/rgb_test.h>
 #include "stackchan/wifi/wifi_web.h"
 #include <hal/hal.h>
 #include <esp_http_server.h>
@@ -232,7 +234,19 @@ Webとの接続が切れた場合は新しいIPアドレスから開き直して
 <small>アカウント名と端末名は本体保存済み情報を表示します。ここからサーバーへの再取得、解除、初期化、OTA更新は行いません。</small>
 <h2>ハードウェア・診断</h2>
 <p>サーボの動作確認は上の「サーボテスト」から実行できます。
-マイク・RGBストリップのテスト、Wi-Fi接続テストは本体のSETUPアプリで行えます。</p></section>
+マイク・Wi-Fi接続テストは本体のSETUPアプリで行えます。</p>
+<h3>RGB LEDの実機テスト</h3>
+<small>本体SETUPと同じ左右のLEDを点灯します。会話・発話・睡眠・自動演出中は実行できません。終了時は消灯を選んでください。設定は保存しません。</small>
+<div id="rgbActions" class="buttons">
+<button type="button" data-rgb="Red" style="background:#ed3333">赤</button>
+<button type="button" data-rgb="Green" style="background:#24b64b">緑</button>
+<button type="button" data-rgb="Blue" style="background:#285bd4">青</button>
+<button type="button" data-rgb="Yellow" style="background:#f6d633;color:#242424">黄</button>
+<button type="button" data-rgb="Cyan" style="background:#25d5df;color:#242424">シアン</button>
+<button type="button" data-rgb="Magenta" style="background:#d633bb">マゼンタ</button>
+<button type="button" data-rgb="White" style="background:#fff;color:#242424;border:1px solid #bac5d6">白</button>
+<button type="button" data-rgb="Off" style="background:#303030">消灯</button>
+</div><p id="rgbStatus" class="status" role="status">待機中</p></section>
 <section class="card"><h2>本体SETUPの読込・保存状態</h2>
 <div class="buttons"><button id="setupReload" type="button">設定を再読み込み</button></div>
 <p id="setupStatus" class="status" role="status">読み込み中…</p>
@@ -292,6 +306,22 @@ document.getElementById('servoActions').addEventListener('click',async e=>{
   status.textContent='動作要求を受け付けました。';
  }catch(e){status.textContent='失敗: '+e.message;}
  finally{button.disabled=false;}
+});
+const rgbActions=document.getElementById('rgbActions'),rgbStatus=document.getElementById('rgbStatus');
+rgbActions.addEventListener('click',async e=>{
+ const button=e.target.closest('button[data-rgb]');
+ if(!button||button.disabled)return;
+ const buttons=rgbActions.querySelectorAll('button');
+ buttons.forEach(b=>b.disabled=true);
+ rgbStatus.textContent='要求中…';
+ try{
+  const res=await fetch('/api/stage1/action',{method:'POST',
+   headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({action:'rgb:'+button.dataset.rgb})});
+  if(!res.ok)throw Error(res.status===409?'会話・発話・演出中、または利用できません':'HTTP '+res.status);
+  rgbStatus.textContent=button.textContent+'：LED動作要求を受け付けました。';
+ }catch(e){rgbStatus.textContent='失敗: '+e.message;}
+ finally{buttons.forEach(b=>b.disabled=false);}
 });
 const voiceForm=document.getElementById('voiceSettings'),v=voiceForm.elements;
  const voiceStatus=document.getElementById('voiceStatus'),voiceFields=['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','snore_min','snore_max','talk_min','talk_max','monologue_enabled','monologue_prompt','monologue_min','monologue_max'];
@@ -1136,8 +1166,28 @@ esp_err_t TriggerAction(httpd_req_t* req) {
     }
     cJSON* request = cJSON_Parse(body);
     const cJSON* action = request ? cJSON_GetObjectItemCaseSensitive(request, "action") : nullptr;
-    const bool accepted = cJSON_IsString(action) && action->valuestring &&
-        std::strlen(action->valuestring) <= 32 && RequestCue(action->valuestring);
+    bool accepted = false;
+    if (cJSON_IsString(action) && action->valuestring && std::strlen(action->valuestring) <= 32) {
+        const char* name = action->valuestring;
+        if (std::strncmp(name, "rgb:", 4) == 0) {
+            const auto* color = stackchan::rgb_test::Find(name + 4);
+            if (color) {
+                // Serialize NeonLight writes with StackChan::update(), just like SETUP.
+                LvglLockGuard lock;
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() == kDeviceStateIdle &&
+                    !app.IsAnnouncementActive() && !voice::IsBusy() &&
+                    !IsAutonomousSceneActive() && !IsSleepSceneActive() &&
+                    !IsWakeSequenceActive() && GetStackChan().hasAvatar()) {
+                    stackchan::rgb_test::Apply(*color);
+                    accepted = true;
+                    ESP_LOGI(TAG, "RGB test: %s", color->name);
+                }
+            }
+        } else {
+            accepted = RequestCue(name);
+        }
+    }
     cJSON_Delete(request);
     Reply(req, accepted ? "202 Accepted" : "409 Conflict",
           accepted ? "{\"queued\":true}" : "{\"error\":\"unknown action or busy\"}");
