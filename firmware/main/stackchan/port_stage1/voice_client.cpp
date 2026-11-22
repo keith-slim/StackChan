@@ -1,9 +1,11 @@
 #include "voice_client.h"
 #include "quiet_mode.h"
+#include "../event_timer.h"
 #include <application.h>
 #include <esp_log.h>
 #include <esp_random.h>
 #include <cstring>
+#include <initializer_list>
 
 namespace stackchan::stage1::voice {
 namespace {
@@ -48,15 +50,15 @@ uint32_t MonologueDelay(const Settings& config) {
 }
 void RearmMonologue(const Settings& config, uint32_t now) {
     const uint32_t delay = MonologueDelay(config);
-    next_monologue_at = now + delay;
+    next_monologue_at = event_timer::Next(now, delay);
     ESP_LOGI(TAG, "[SPEECH] kind=monologue phase=scheduled delay_minutes=%u",
              static_cast<unsigned>(delay / 60000U));
 }
 void Rearm(const Settings& config, Kind kind, uint32_t now) {
     if (kind == Kind::Snore)
-        next_snore_at = now + Delay(config.snore_min, config.snore_max);
+        next_snore_at = event_timer::Next(now, Delay(config.snore_min, config.snore_max));
     else if (kind == Kind::SleepTalk)
-        next_talk_at = now + Delay(config.talk_min, config.talk_max);
+        next_talk_at = event_timer::Next(now, Delay(config.talk_min, config.talk_max));
 }
 }
 
@@ -156,7 +158,14 @@ Kind FinishSleepIfIdle(const Settings& config, uint32_t now) {
 bool Due(Kind kind, uint32_t now) {
     const uint32_t due = kind == Kind::Snore ? next_snore_at :
                          kind == Kind::SleepTalk ? next_talk_at : 0;
-    return due && static_cast<int32_t>(now - due) >= 0;
+    return event_timer::Due(due, now);
+}
+void DiscardDueSleep(const Settings& config, uint32_t now) {
+    for (const auto kind : {Kind::Snore, Kind::SleepTalk}) {
+        if (!Due(kind, now)) continue;
+        Rearm(config, kind, now);
+        ESP_LOGI(TAG, "[SPEECH] kind=%s phase=skipped_overlap", Tag(kind));
+    }
 }
 bool RequestSleep(Kind kind, const Settings& config, const char* text, uint32_t now) {
     if (kind != Kind::Snore && kind != Kind::SleepTalk) return false;
@@ -196,17 +205,22 @@ bool TickMonologue(const Settings& config, Phase phase, bool eligible, uint32_t 
         return false;
     }
     if (monologue_paused) {
-        next_monologue_at = now + monologue_remaining;
+        next_monologue_at = event_timer::Next(now, monologue_remaining);
         monologue_paused = false;
     }
-    // Awake/idle is checked again by Application::RequestAnnouncement.
-    if (phase != Phase::Awake || !eligible) return false;
+    const bool available = phase == Phase::Awake && eligible;
     if (!next_monologue_at) {
+        if (available) RearmMonologue(config, now);
+        return false;
+    }
+    if (!event_timer::Due(next_monologue_at, now)) return false;
+    if (!available) {
+        ESP_LOGI(TAG, "[SPEECH] kind=monologue phase=skipped_overlap");
         RearmMonologue(config, now);
         return false;
     }
-    if (static_cast<int32_t>(now - next_monologue_at) < 0) return false;
 
+    // Awake/idle is checked again by Application::RequestAnnouncement.
     const bool accepted = Request(config, "monologue", config.monologue_prompt);
     RearmMonologue(config, now); // A busy/error event never spins or retries immediately.
     return accepted;

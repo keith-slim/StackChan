@@ -185,10 +185,12 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
 
     // During a nap, completion or send failure rearms the same voice kind.
     voice::ResumeNap(*config, now);
-    if (voice::SleepActive() && voice::IsBusy()) return;
+    if (voice::IsBusy()) {
+        voice::DiscardDueSleep(*config, now);
+        return;
+    }
     if (voice::FinishSleepIfIdle(*config, now) == voice::Kind::SleepTalk)
         avatar_dream::EndTalk();
-    if (voice::IsBusy()) return;
 
     // Dream utterances take priority and are tied to the currently visible motif.
     if (voice::Due(voice::Kind::SleepTalk, now)) {
@@ -203,6 +205,8 @@ void VoiceTick(Phase old_phase, const State& state, uint32_t now) {
         if (voice::RequestSleep(voice::Kind::SleepTalk, *config, prompt, now)) {
             ESP_LOGI(LOG_TAG, "[SPEECH] kind=sleep_talk phase=requested dream=%s",
                      avatar_dream::Name(motif) ? avatar_dream::Name(motif) : "なし");
+            // Sleep talk won this tick; any simultaneous snore is discarded.
+            voice::DiscardDueSleep(*config, now);
             return;
         }
         avatar_dream::EndTalk();
@@ -1127,7 +1131,8 @@ bool IsIdleServoMotionBlocked() {
     // Suppress ordinary random head movement for the entire scene and
     // at least 3000ms from theatre start, even for 2.8s skits.
     const uint32_t until = r.theatre_motion_protect_until;
-    return owns_auto.load() ||
+    return owns_auto.load() || voice::IsBusy() || VoicePending() ||
+           dream_remark.motif != avatar_dream::Motif::None ||
            (until != 0 && static_cast<int32_t>(GetHAL().millis() - until) < 0);
 }
 bool RequestSleep() {
@@ -1166,8 +1171,12 @@ void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
     quiet_mode::Tick();
-    if (const auto* config = voice::Current())
-        voice::TickMonologue(*config, r.phase, false, now); // pause/resume even during conversation
+    // Evaluate the monologue deadline exactly once, after the actual
+    // event/scene decision (including the early-return conversation paths).
+    const auto tick_monologue = [&](Phase phase, bool available) {
+        if (const auto* config = voice::Current())
+            voice::TickMonologue(*config, phase, available, now);
+    };
     // While sleeping, the quiet mark is part of the rest face and must not
     // disappear just because an announcement/transport becomes busy.
     // Explicit wake and conversation still control their own overlay.
@@ -1248,6 +1257,8 @@ void Update(StackChan& sc) {
         }
     }
     if (r.cue_active) {
+        r.schedule.DiscardDueRandomEvents(now, esp_random());
+        tick_monologue(r.phase, false);
         r.SyncQuietMark(sc, false);
         r.TickCue(sc, now);
         r.SyncWeather(sc, now, true);
@@ -1256,6 +1267,8 @@ void Update(StackChan& sc) {
     // Explicit conversation state always wins over idle skits and sleep
     // previews; it is released on SPEAKING/STANDBY or other status changes.
     if (r.conversation_pose != ConversationPose::None) {
+        r.schedule.DiscardDueRandomEvents(now, esp_random());
+        tick_monologue(r.phase, false);
         r.SyncQuietMark(sc, false);
         r.DrawConversation(sc, now);
         r.SyncWeather(sc, now, false);
@@ -1270,8 +1283,11 @@ void Update(StackChan& sc) {
     // Xiaozhi can already be CONNECTING/LISTENING after a wake word.
     // Preserve the brief S3 wake animation without blocking microphone I/O.
     const bool pose_standby = standby || accepted_wake || wake_sequence_active.load();
+    const bool linked_event_pending = dream_remark.motif != avatar_dream::Motif::None ||
+                                      manual_sleep_requested.load();
     State state = r.schedule.Step({now,minute,valid,pose_standby,event,esp_random(),
-                                   voice::IsBusy() || VoicePending()});
+                                   voice::IsBusy() || VoicePending(),
+                                   linked_event_pending});
     // Keep S3's explicit "寝て良いよ" separate from temporary quiet mode.
     // Never turn off the face/neck while the Live reply is still speaking.
     if (manual_sleep_requested.load()) {
@@ -1317,12 +1333,11 @@ void Update(StackChan& sc) {
     }
     r.Begin(sc, state.phase, state.kind, now);
     VoiceTick(old_phase, state, now);
-    if (const auto* config = voice::Current()) {
-        const bool monologue_eligible = valid && standby && !event && !accepted_wake &&
-            !wake_sequence_active.load() && !voice::IsBusy() && !VoicePending() &&
-            state.phase == Phase::Awake;
-        voice::TickMonologue(*config, state.phase, monologue_eligible, now);
-    }
+    const bool monologue_eligible = valid && standby && !event && !accepted_wake &&
+        !wake_sequence_active.load() && !voice::IsBusy() && !VoicePending() &&
+        dream_remark.motif == avatar_dream::Motif::None && !manual_sleep_requested.load() &&
+        state.phase == Phase::Awake && old_phase == Phase::Awake;
+    tick_monologue(state.phase, monologue_eligible);
     DreamRemarkTick(sc, state, now, event && !Application::GetInstance().IsAnnouncementActive());
     r.TickNightBacklight(now);
     if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||

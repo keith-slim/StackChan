@@ -2,6 +2,7 @@
 // StackChan stage 1: deterministic, hardware-independent daily / nap / theatre state.
 // All times are monotonic milliseconds; local time is used only for day/night boundaries.
 #include <cstdint>
+#include "../event_timer.h"
 
 namespace stackchan::stage1 {
 
@@ -33,6 +34,7 @@ struct Inputs {
     bool activity;
     uint32_t random;
     bool voice_busy = false; // Voice generation/queue not yet fully drained.
+    bool linked_event_pending = false; // Only blocks independent random events.
 };
 struct State {
     Phase phase = Phase::Boot;
@@ -68,6 +70,14 @@ public:
     }
     const Config& GetConfig() const { return cfg_; }
     Phase CurrentPhase() const { return phase_; }
+    // An expired independent event is a missed opportunity, not a queue.
+    // Keep every deadline that has not expired yet.
+    void DiscardDueRandomEvents(uint32_t now, uint32_t random) {
+        if (cfg_.theatre)
+            event_timer::DiscardDue(idle_due_, now, [&] { return TheatreDelay(random); });
+        if (cfg_.naps)
+            event_timer::DiscardDue(nap_due_, now, [&] { return NapDelay(random); });
+    }
     WakeReason CurrentWakeReason() const { return wake_reason_; }
     bool RequestWake(WakeReason why, uint32_t ms) {
         if (why != WakeReason::Touch && why != WakeReason::Word) return false;
@@ -169,6 +179,7 @@ public:
         }
         switch (phase_) {
         case Phase::Theatre:
+            DiscardDueRandomEvents(in.ms, in.random);
             if (Elapsed(in.ms) >= TheatreDuration(kind_)) Enter(Phase::Awake, in.ms);
             break;
         case Phase::NapDrowsy:
@@ -204,11 +215,13 @@ public:
             if (Elapsed(in.ms) >= 2800 && !in.voice_busy) Enter(Phase::Awake, in.ms);
             break;
         case Phase::Awake:
+            if (in.voice_busy || in.linked_event_pending) {
+                DiscardDueRandomEvents(in.ms, in.random);
+                break;
+            }
             if (cfg_.theatre) {
-                if (!idle_due_) idle_due_ = in.ms + static_cast<uint32_t>(cfg_.theatre_min_seconds) * 1000 +
-                    in.random % ((static_cast<uint32_t>(cfg_.theatre_max_seconds) -
-                                  cfg_.theatre_min_seconds) * 1000 + 1);
-                if (static_cast<int32_t>(in.ms - idle_due_) >= 0) {
+                if (!idle_due_) idle_due_ = event_timer::Next(in.ms, TheatreDelay(in.random));
+                if (event_timer::Due(idle_due_, in.ms)) {
                     const auto last = static_cast<uint8_t>(last_kind_);
                     const auto slot = static_cast<uint8_t>(in.random % (last ? 6 : 7));
                     const auto index = static_cast<uint8_t>(slot + 1 + (last && slot >= last - 1 ? 1 : 0));
@@ -216,14 +229,14 @@ public:
                     last_kind_ = kind_;
                     Enter(Phase::Theatre, in.ms);
                     idle_due_ = 0;
+                    // Theatre retains its existing priority when both are due.
+                    DiscardDueRandomEvents(in.ms, in.random);
                     return Snapshot(in.ms, day);
                 }
             }
             if (cfg_.naps) {
-                if (!nap_due_) nap_due_ = in.ms + static_cast<uint32_t>(cfg_.nap_idle_min_minutes) * 60000 +
-                    in.random % ((static_cast<uint32_t>(cfg_.nap_idle_max_minutes) -
-                                  cfg_.nap_idle_min_minutes) * 60000 + 1);
-                if (static_cast<int32_t>(in.ms - nap_due_) >= 0) {
+                if (!nap_due_) nap_due_ = event_timer::Next(in.ms, NapDelay(in.random));
+                if (event_timer::Due(nap_due_, in.ms)) {
                     nap_due_ = 0;
                     if ((in.random % 100) < cfg_.nap_chance) Enter(Phase::NapDrowsy, in.ms);
                 }
@@ -242,6 +255,16 @@ public:
         }
     }
 private:
+    uint32_t TheatreDelay(uint32_t random) const {
+        return static_cast<uint32_t>(cfg_.theatre_min_seconds) * 1000 +
+            random % ((static_cast<uint32_t>(cfg_.theatre_max_seconds) -
+                       cfg_.theatre_min_seconds) * 1000 + 1);
+    }
+    uint32_t NapDelay(uint32_t random) const {
+        return static_cast<uint32_t>(cfg_.nap_idle_min_minutes) * 60000 +
+            random % ((static_cast<uint32_t>(cfg_.nap_idle_max_minutes) -
+                       cfg_.nap_idle_min_minutes) * 60000 + 1);
+    }
     static uint32_t DreamWait(uint32_t r) { return 15000 + r % 45001; }
     void Enter(Phase phase, uint32_t now) {
         const Phase old = phase_;

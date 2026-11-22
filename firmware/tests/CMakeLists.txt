@@ -21,3 +21,8 @@ add_executable(timed_servo_move_test timed_servo_move_test.cpp)
 target_include_directories(timed_servo_move_test PRIVATE ../main)
 target_compile_features(timed_servo_move_test PRIVATE cxx_std_17)
 add_test(NAME timed_servo_move_test COMMAND $<TARGET_FILE:timed_servo_move_test>)
+
+add_executable(event_timer_test event_timer_test.cpp)
+target_include_directories(event_timer_test PRIVATE ../main)
+target_compile_features(event_timer_test PRIVATE cxx_std_17)
+add_test(NAME event_timer_test COMMAND $<TARGET_FILE:event_timer_test>)

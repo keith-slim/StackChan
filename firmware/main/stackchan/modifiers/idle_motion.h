@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../event_timer.h"
 #include "../port_stage1/port_stage1.h"
 #include "../utils/random.h"
 #include <smooth_ui_toolkit.hpp>
@@ -23,7 +24,7 @@ public:
     IdleMotionModifier(uint32_t interval_min = 4000, uint32_t interval_max = 8000)
         : _interval_min(interval_min), _interval_max(interval_max)
     {
-        _next_tick = GetHAL().millis() + 1000;  // 启动 1 秒后开始第一次动作
+        _next_tick = event_timer::Next(GetHAL().millis(), 1000);  // 启动 1 秒后开始第一次动作
     }
 
     void pause()
@@ -34,34 +35,23 @@ public:
     {
         if (_paused) {
             _paused    = false;
-            _next_tick = GetHAL().millis() + 500;
+            _next_tick = event_timer::Next(GetHAL().millis(), 500);
         }
     }
 
     void _update(Modifiable& stackchan) override
     {
-        if (_paused || !stackchan.hasAvatar() || (stage1::IsIdleServoMotionBlocked() || stage1::IsConversationFaceActive())) return;
+        const uint32_t now = GetHAL().millis();
+        if (!event_timer::Due(_next_tick, now)) return;
 
-        uint32_t now = GetHAL().millis();
+        // Always consume a due opportunity, even if a scene or a previous
+        // movement owns the neck. Never begin a stale motion after it ends.
+        _next_tick = event_timer::Next(now, Random::getInstance().getInt(_interval_min, _interval_max));
+        if (_paused || !stackchan.hasAvatar() || stage1::IsIdleServoMotionBlocked() ||
+            stage1::IsConversationFaceActive() || stackchan.motion().isModifyLocked() ||
+            stackchan.motion().isMoving()) return;
 
-        // 如果时间没到，直接跳过
-        if (now < _next_tick) {
-            return;
-        }
-
-        // 如果上次动作还没做完，就把下一次尝试推迟 500ms，避免指令堆积
-        if (stackchan.motion().isMoving()) {
-            _next_tick = now + 500;
-            return;
-        }
-
-        // 执行动作
         perform_idle_motion(stackchan);
-
-        // 算下一次的时间间隔
-        uint32_t delay = Random::getInstance().getInt(_interval_min, _interval_max);
-        _next_tick     = now + delay;
-        // mclog::info("next idle motion in {} ms", delay);
     }
 
 private:

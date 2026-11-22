@@ -155,6 +155,34 @@ int main()
     assert(naps.Step({640000, 500, true, true, false, 0, true}).phase == Phase::NapWake);
     assert(naps.Step({640001, 500, true, true, false, 0, false}).phase == Phase::Awake);
 
+    // Simultaneous independent events: theatre wins and the missed nap is
+    // rearmed, never started immediately upon theatre completion.
+    Clock overlap;
+    Config oc{};
+    oc.theatre_min_seconds = oc.theatre_max_seconds = 60;
+    oc.nap_idle_min_minutes = oc.nap_idle_max_minutes = 1;
+    oc.nap_chance = 100;
+    assert(overlap.SetConfig(oc));
+    assert(step(overlap, 1, 500).phase == Phase::Awake);
+    assert(step(overlap, 2, 500).phase == Phase::Awake);
+    assert(step(overlap, 60002, 500).phase == Phase::Theatre);
+    assert(step(overlap, 64002, 500).phase == Phase::Awake);
+    assert(step(overlap, 64003, 500).phase == Phase::Awake);
+    assert(step(overlap, 120001, 500).phase == Phase::Awake);
+    assert(step(overlap, 120002, 500).phase == Phase::NapDrowsy);
+
+    // Voice overlap consumes due theatre; a future deadline is not reset.
+    overlap.Reset();
+    oc.naps = false;
+    oc.theatre_min_seconds = oc.theatre_max_seconds = 10;
+    assert(overlap.SetConfig(oc));
+    step(overlap, 1, 500); step(overlap, 2, 500);
+    assert(overlap.Step({9000, 500, true, true, false, 0, true}).phase == Phase::Awake);
+    assert(overlap.Step({10002, 500, true, true, false, 0, true}).phase == Phase::Awake);
+    assert(step(overlap, 10003, 500).phase == Phase::Awake);
+    assert(step(overlap, 20001, 500).phase == Phase::Awake);
+    assert(step(overlap, 20002, 500).phase == Phase::Theatre);
+
     // An explicit spoken nap is allowed even if random naps are disabled.
     Clock manual;
     Config manual_cfg{};
