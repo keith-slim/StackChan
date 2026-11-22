@@ -27,6 +27,7 @@ bool IsWakeSequenceActive(); // Do not let a status/emotion reset erase its face
 bool IsSleepWakeEligible(); // Read-only sleep phase flag for head-pad debounce.
 bool IsNapSleepActive(); // Under LVGL lock: preserve nap on background audio error.
 bool IsNightBedtimeMessageActive(); // Bedtime TTS's trailing neutral must not abort the sleep sequence.
+bool IsSleepSceneActive(); // Under LVGL lock: shared nap/night preparation and sleep.
 void CancelForExternalChange(StackChan& stackchan, const char* source = "unknown"); // Under LVGL lock.
 void NotifyManualMotion();  // External commands take ownership of the neck.
 void NotifyManualLed();     // External commands take ownership of the LEDs.

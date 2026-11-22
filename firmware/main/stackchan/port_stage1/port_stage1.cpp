@@ -1064,11 +1064,12 @@ bool IsNapSleepActive() {
 bool IsNightBedtimeMessageActive() {
     return enabled.load() && r.phase == Phase::NightMessage;
 }
+bool IsSleepSceneActive() {
+    return enabled.load() && (Runtime::SleepPreparing(r.phase) || Runtime::Sleeping(r.phase));
+}
 void CancelForExternalChange(StackChan& sc, const char* source) {
     if (!enabled.load()) return;
-    if (r.phase == Phase::NightSleep || r.phase == Phase::NightTemporary ||
-        r.phase == Phase::NightDrowsy || r.phase == Phase::NightMessage ||
-        r.phase == Phase::NightYawn || r.phase == Phase::NightPending)
+    if (IsSleepSceneActive() || r.phase == Phase::NightTemporary || r.phase == Phase::NightPending)
         ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] reset source=external:%s phase=%d standby=%d",
                  source ? source : "unknown", static_cast<int>(r.phase), idle.load());
     r.EndConversation(sc);
@@ -1189,9 +1190,7 @@ void Update(StackChan& sc) {
     }
     if (manual_led.exchange(false)) r.led_held = true;
     if (event && (r.own_face || r.cue_active)) {
-        if (r.phase == Phase::NightSleep || r.phase == Phase::NightTemporary ||
-            r.phase == Phase::NightDrowsy || r.phase == Phase::NightMessage ||
-            r.phase == Phase::NightYawn || r.phase == Phase::NightPending)
+        if (IsSleepSceneActive() || r.phase == Phase::NightTemporary || r.phase == Phase::NightPending)
             ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] reset source=interrupt phase=%d standby=%d wake_bits=%u",
                      static_cast<int>(r.phase), idle.load(), static_cast<unsigned>(wake_bits));
         r.Release(sc, true); // explicit LED/neck ownership is respected by Release

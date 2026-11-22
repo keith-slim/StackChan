@@ -483,22 +483,18 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
         return true;
     }
 
-    // A snore/sleep-talk TTS can restore neutral AFTER the announcement
-    // transport has been cleared. It is not an external wake action.
-    // The explicit wake sequence still takes precedence.
+    // Audio can enter idle and start a queued sleep scene before its final
+    // neutral display callback arrives. Protect ALL shared sleep preparation
+    // and sleeping phases, not just the old NapSleep/NightMessage paths.
+    // Preserve the existing announcement guards and let real wake requests,
+    // conversation status transitions and non-neutral emotions take precedence.
     if (strcmp(emotion, "neutral") == 0 &&
-        stackchan::stage1::IsNapSleepActive() &&
-        !stackchan::stage1::IsWakeSequenceActive()) {
-        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored nap trailing neutral");
-        return true;
-    }
-
-    // The bedtime announcement finishes before Xiaozhi restores its neutral
-    // emotion. Keep the scheduled NightMessage -> NightYawn -> NightSleep
-    // sequence intact; ordinary emotions still use the existing path.
-    if (strcmp(emotion, "neutral") == 0 &&
-        stackchan::stage1::IsNightBedtimeMessageActive()) {
-        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored bedtime trailing neutral");
+        !stackchan::stage1::IsWakeSequenceActive() &&
+        (stackchan::stage1::IsNapSleepActive() ||
+         stackchan::stage1::IsNightBedtimeMessageActive() ||
+         (Application::GetInstance().GetDeviceState() == kDeviceStateIdle &&
+          stackchan::stage1::IsSleepSceneActive()))) {
+        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored sleep trailing neutral");
         return true;
     }
 
