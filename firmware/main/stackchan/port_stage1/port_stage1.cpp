@@ -14,6 +14,7 @@
 #include "quiet_mark.h"
 #include "environment.h"
 #include "weather_face.h"
+#include "weather_changes.h"
 #include <stackchan/avatar/skins/default/default.h>
 #include <stackchan/avatar/face_snapshot.h>
 #include <application.h>
@@ -22,6 +23,7 @@
 #include <lvgl.h>
 #include <esp_lvgl_port.h>
 #include <esp_random.h>
+#include <esp_timer.h>
 #include <esp_log.h>
 #include <nvs.h>
 #include <esp_err.h>
@@ -139,6 +141,7 @@ struct DreamRemark {
     uint32_t due_at = 0;
 };
 DreamRemark dream_remark{};
+weather::Changes weather_changes;
 std::atomic<bool> dream_remark_cancel_requested{false};
 void CancelDreamRemark() {
     dream_remark = {};
@@ -922,6 +925,7 @@ void Start() {
     environment::Init();
     voice::Reset();
     CancelDreamRemark();
+    weather_changes = weather::Changes{};
     r = Runtime{};
     const Config config = LoadConfig();
     registered_wake_minute.store(config.wake_minute, std::memory_order_release);
@@ -968,6 +972,7 @@ void Stop() {
     voice::Reset();
     voice::Stop();
     CancelDreamRemark();
+    weather_changes = weather::Changes{};
     r.RestoreNightBacklight();
     r.ClearVisuals();
     r = Runtime{};
@@ -1139,10 +1144,29 @@ void Update(StackChan& sc) {
                                   r.conversation_pose == ConversationPose::None &&
                                   !r.cue_active && !wake_sequence_active.load();
     environment::SetIdle(environment_idle);
-    if (r.environment_poll_at == 0 || now - r.environment_poll_at >= 1000) {
+    // Weather-change detection shares the existing one-second environment
+    // tick; it never adds a fetch, worker or independent speech scheduler.
+    const bool weather_check_due =
+        r.environment_poll_at == 0 || now - r.environment_poll_at >= 1000;
+    if (weather_check_due) {
         r.environment_poll_at = now;
         environment::Poll();
     }
+    const auto poll_weather_change = [&](bool active, bool available) {
+        if (!weather_check_due) return false;
+        const int64_t time_us = esp_timer_get_time();
+        weather_changes.Observe(environment::ReadAppearance(), time_us, active);
+        if (!available || !weather_changes.Ready(time_us)) return false;
+        const auto* config = voice::Current();
+        // The existing monologue transport already honors quiet-mode and
+        // playback exclusion in both Stage1 and Xiaozhi.
+        if (!config || !voice::Request(*config, "monologue", weather_changes.Text()))
+            return false;
+        weather_changes.Accepted(time_us);
+        ESP_LOGI(LOG_TAG, "[WEATHER_CHANGE] phase=requested transport=monologue text=%s",
+                 weather_changes.Text());
+        return true;
+    };
     bool event = interrupted.exchange(false);
     const uint8_t wake_bits = wake_intents.exchange(0);
     const WakeReason requested = (wake_bits & 2) ? WakeReason::Word :
@@ -1203,6 +1227,7 @@ void Update(StackChan& sc) {
     if (r.cue_active) {
         r.schedule.DiscardDueRandomEvents(now, esp_random());
         tick_monologue(r.phase, false);
+        poll_weather_change(false, false);
         r.SyncQuietMark(sc, false);
         r.TickCue(sc, now);
         r.SyncWeather(sc, now, true);
@@ -1213,6 +1238,7 @@ void Update(StackChan& sc) {
     if (r.conversation_pose != ConversationPose::None) {
         r.schedule.DiscardDueRandomEvents(now, esp_random());
         tick_monologue(r.phase, false);
+        poll_weather_change(false, false);
         r.SyncQuietMark(sc, false);
         r.DrawConversation(sc, now);
         r.SyncWeather(sc, now, false);
@@ -1288,7 +1314,13 @@ void Update(StackChan& sc) {
         !wake_sequence_active.load() && !voice::IsBusy() && !VoicePending() &&
         dream_remark.motif == avatar_dream::Motif::None && !manual_sleep_requested.load() &&
         state.phase == Phase::Awake && old_phase == Phase::Awake;
-    tick_monologue(state.phase, monologue_eligible);
+    // Weather updates during night, nap, quiet or explicit transitions are
+    // folded into the baseline, never delivered later as stale alerts.
+    const bool weather_active = valid && state.phase == Phase::Awake &&
+        old_phase == Phase::Awake && !quiet_mode::Active() && !event &&
+        !accepted_wake && !wake_sequence_active.load() && !manual_sleep_requested.load();
+    const bool weather_announced = poll_weather_change(weather_active, monologue_eligible);
+    tick_monologue(state.phase, monologue_eligible && !weather_announced);
     DreamRemarkTick(sc, state, now, event && !Application::GetInstance().IsAnnouncementActive());
     r.TickNightBacklight(now);
     if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||
