@@ -266,6 +266,10 @@ void DefaultSpeechBubble::setSpeech(std::string_view text)
     );
 
     setVisible(true);
+    // During sleep Stage1's opaque rest face is a later sibling in this
+    // panel. Bring the existing caption above it when new text is shown,
+    // without recreating it or changing the subtitle/PCM timing.
+    lv_obj_move_foreground(_container->get());
 }
 
 void DefaultSpeechBubble::clearSpeech()

@@ -752,13 +752,19 @@ struct Runtime {
         sc.avatar().mouth().setWeight(mouth);
         sc.avatar().mouth().setRotation(0);
     }
-    void Draw(const State& s) {
+    void Draw(StackChan& sc, const State& s) {
         const bool asleep = Sleeping(s.phase);
         const bool startled_wake = s.phase == Phase::NapWake || s.phase == Phase::NightWake;
         const bool yawn = s.phase == Phase::NapYawn || s.phase == Phase::NightYawn ||
                           (s.phase == Phase::Theatre && s.kind == Kind::Yawn);
         if (asleep || yawn || startled_wake) {
-            if (!rest) rest = std::make_unique<AvatarRestFace>(lv_screen_active());
+            if (!rest) {
+                // The caption belongs to DefaultAvatar's panel. Keep the
+                // full-screen sleep mask in that same parent so the real
+                // speech bubble can be raised above it during snores/talk.
+                auto& avatar = static_cast<avatar::DefaultAvatar&>(sc.avatar());
+                rest = std::make_unique<AvatarRestFace>(avatar.getPanel()->get());
+            }
             if (startled_wake && waking_from_sleep && s.phase_elapsed_ms < 240)
                 rest->RenderWakePop(last_sleep_elapsed, s.phase_elapsed_ms);
             else {
@@ -1336,7 +1342,7 @@ void Update(StackChan& sc) {
     // Limit scene redraws: the app update loop may run faster than animations
     // need, while each render mutates multiple LVGL objects.
     if (r.own_face && (r.last_draw_at == 0 || now - r.last_draw_at >= 100)) {
-        r.Draw(state);
+        r.Draw(sc, state);
         r.ApplyTheatreFace(sc, state);
         r.last_draw_at = now;
     }
