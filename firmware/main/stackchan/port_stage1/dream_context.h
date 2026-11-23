@@ -5,7 +5,7 @@
 
 // 描画済みの夢だけを小さな値で共有する。ワーカーからLVGLの部品を参照しない。
 namespace avatar_dream {
-enum class Motif : uint8_t { Heart, Star, Meat, Coffee, Pudding, Construction, Mask, Dog, Cat, Car, None=255 };
+enum class Motif : uint8_t { Heart, Star, Meat, Coffee, Pudding, Construction, Fries, Dog, Cat, Car, None=255 };
 inline constexpr unsigned COUNT=10;
 namespace detail {
 inline constexpr unsigned ACTIVE=0x100, VISIBLE=0x200, TALK_LOCK=0x400, SUPPRESSED=0x800;
@@ -82,7 +82,7 @@ inline Motif End()
 }
 inline const char *Name(Motif motif)
 {
-    static constexpr const char *names[]={"ハート","星","骨付き肉","コーヒー","プリン","工事現場","マスク","犬","猫","車"};
+    static constexpr const char *names[]={"ハート","星","骨付き肉","コーヒー","プリン","工事現場","フライドポテト","犬","猫","車"};
     const auto index=static_cast<unsigned>(motif);return index<COUNT?names[index]:nullptr;
 }
 inline const char *Remark(Motif motif)
@@ -90,7 +90,7 @@ inline const char *Remark(Motif motif)
     static constexpr const char *lines[]={
         "なんだか、幸せな夢だったよ。","星を見に行く夢だったよ。","大きなお肉の夢を見てたよ。",
         "コーヒーのいい香りがする夢だったよ。","プリン、あとひとくちだったのに。",
-        "夢の中でも工事中だったよ。","夢の中でマスクを探してたよ。","わんこと遊ぶ夢だったよ。","ねことお昼寝する夢だったよ。","車でどこかへ出かける夢だったよ。"};
+        "夢の中でも工事中だったよ。","フライドポテトを食べる夢だったよ。","わんこと遊ぶ夢だったよ。","ねことお昼寝する夢だったよ。","車でどこかへ出かける夢だったよ。"};
     const auto index=static_cast<unsigned>(motif);return index<COUNT?lines[index]:nullptr;
 }
 }

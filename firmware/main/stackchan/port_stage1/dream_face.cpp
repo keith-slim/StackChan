@@ -58,7 +58,7 @@ AvatarDreamFace::AvatarDreamFace(lv_obj_t *parent)
         lv_obj_set_style_line_rounded(detail,true,0);
     }
     fill_=lv_obj_create(root_);lv_obj_remove_style_all(fill_);
-    // 犬・猫・車も既存の塗り部品へ直接描き、画像バッファや常駐オブジェクトを増やさない。
+    // フライドポテト・犬・猫・車も既存の塗り部品へ直接描き、画像バッファや常駐オブジェクトを増やさない。
     lv_obj_add_event_cb(fill_,DrawIllustration,LV_EVENT_DRAW_MAIN,this);
     lv_obj_set_clickable(fill_,false);lv_obj_set_scrollable(fill_,false);
     lv_obj_set_style_bg_opa(fill_,LV_OPA_COVER,0);lv_obj_set_style_radius(fill_,LV_RADIUS_CIRCLE,0);
@@ -145,14 +145,14 @@ void AvatarDreamFace::DrawMotif(unsigned next)
 {
     // 小芝居の初回はまだ雲の割合指定が未計算なので、線と塗りを置く前に寸法を確定する。
     lv_obj_update_layout(root_);
-    if(next==5||next==6){DrawStatus(next==5?AvatarCloudSymbol::Construction:AvatarCloudSymbol::Mask);return;}
+    if(next==5){DrawStatus(AvatarCloudSymbol::Construction);return;}
     const auto px=[this](float n){return static_cast<lv_value_precise_t>(std::lround(n*scale_/avatar_config::SCALE_UNIT));};
-    if(next>=7){
+    if(next>=6){
         for(auto *object:{symbol_,details_[0],details_[1],topping_})lv_obj_set_hidden(object,true);
         lv_obj_set_hidden(fill_,false);lv_obj_set_style_bg_opa(fill_,LV_OPA_TRANSP,0);
         lv_obj_set_style_border_width(fill_,0,0);
         lv_obj_set_size(fill_,px(36),px(30));lv_obj_align(fill_,LV_ALIGN_CENTER,px(95),px(-81));
-        lv_obj_invalidate(fill_); // 犬と猫で大きさが同じでも、顔の描画内容は必ず更新する。
+        lv_obj_invalidate(fill_); // 同じ大きさでも絵柄を切り替えたら必ず再描画する。
         return;
     }
     lv_obj_set_hidden(symbol_,false);lv_obj_set_style_bg_opa(fill_,LV_OPA_COVER,0);
@@ -260,7 +260,7 @@ void AvatarDreamFace::DrawStatus(AvatarCloudSymbol symbol)
 void AvatarDreamFace::DrawIllustration(lv_event_t *event)
 {
     auto *self=static_cast<AvatarDreamFace *>(lv_event_get_user_data(event));
-    if(!self->idea_bulb_&&(self->status_symbol_>=0||self->motif_index_<7||self->motif_index_>=MOTIF_COUNT))return;
+    if(!self->idea_bulb_&&(self->status_symbol_>=0||self->motif_index_<6||self->motif_index_>=MOTIF_COUNT))return;
     auto *layer=lv_event_get_layer(event);
     lv_area_t bounds;lv_obj_get_coords(self->fill_,&bounds);
     const auto px=[self](int n){return stackchan::avatar::scaled(n,self->scale_);};
@@ -308,7 +308,21 @@ void AvatarDreamFace::DrawIllustration(lv_event_t *event)
         rounded(15,31,19,33,2,0x8e9bad);
         return;
     }
-    if(self->motif_index_==7){
+    if(self->motif_index_==6){
+        // マスクの夢を、赤い紙容器に入った金色のフライドポテトへ差し替える。
+        // 既存の透過fill_描画のみを使い、新規LVGL部品を増やさない。
+        rounded(3,7,8,20,2,0xffca49,0xe5a12d);
+        rounded(8,3,13,21,2,0xffd553,0xe3a232);
+        rounded(13,1,18,21,2,0xffe679,0xeeb63e);
+        rounded(18,4,23,21,2,0xffce47,0xe3a12c);
+        rounded(23,2,28,21,2,0xffdc59,0xe5a331);
+        rounded(28,7,33,20,2,0xffcb48,0xe19e29);
+        triangle(4,14,32,14,27,29,0xdf3344);
+        triangle(4,14,27,29,9,29,0xdf3344);
+        rounded(7,15,29,17,1,0xf16a6f);
+        rounded(15,20,21,25,3,0xffefa6);
+        stroke({{11,26},{14,28},{22,28},{25,26}},0xa82436);
+    }else if(self->motif_index_==7){
         // ゴールデンレトリバー：金色の長い垂れ耳、丸い鼻、明るい口元と小さな舌。
         rounded(1,5,10,25,5,0xce914d,0x9b662e);rounded(26,5,35,25,5,0xce914d,0x9b662e);
         rounded(5,2,31,26,11,0xf1ca7d,0xc18c4b);
