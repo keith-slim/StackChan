@@ -14,6 +14,8 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <wifi_manager.h>
 #include <atomic>
 #include <cJSON.h>
@@ -1290,6 +1292,29 @@ esp_err_t TriggerVoiceTest(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// All POST endpoints share the same HTTPD task. Measure their worst-case stack
+// use without changing the established NVS save, SD backup or response paths.
+struct MonitoredPost {
+    const char* name;
+    esp_err_t (*handler)(httpd_req_t*);
+};
+esp_err_t MonitorPost(httpd_req_t* req) {
+    auto* route = static_cast<MonitoredPost*>(req->user_ctx);
+    if (!route || !route->handler) return ESP_ERR_INVALID_ARG;
+    const unsigned before = static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr));
+    ESP_LOGI(TAG, "[HTTPD_STACK] route=%s phase=before min_free_bytes=%u", route->name, before);
+    const esp_err_t result = route->handler(req);
+    const unsigned after = static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr));
+    if (after < 1024) {
+        ESP_LOGW(TAG, "[HTTPD_STACK] route=%s phase=after min_free_bytes=%u result=%s",
+                 route->name, after, esp_err_to_name(result));
+    } else {
+        ESP_LOGI(TAG, "[HTTPD_STACK] route=%s phase=after min_free_bytes=%u result=%s",
+                 route->name, after, esp_err_to_name(result));
+    }
+    return result;
+}
+
 bool Start() {
     // Only called by Application's main event loop, before activation or
     // on a later retry. Never compete with the Wi-Fi provisioning HTTPD.
@@ -1314,7 +1339,7 @@ bool Start() {
     if (attempted.exchange(true)) return true;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.stack_size = 4096;
+    config.stack_size = 8192;
     // IDF 6.1 supports allocating the HTTP server task stack from PSRAM.
     // Keep the HTTPD/lwIP kernel and DMA-only allocations on their default heaps.
     config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
@@ -1331,42 +1356,53 @@ bool Start() {
         attempted.store(false);
         return false;
     }
+    // Static route descriptors stay valid for the lifetime of the HTTP server.
+    static MonitoredPost posts[] = {
+        {"schedule", WriteConfig},
+        {"action", TriggerAction},
+        {"voice", WriteVoice},
+        {"voice_test", TriggerVoiceTest},
+        {"quiet", WriteQuiet},
+        {"environment", WriteEnvironment},
+        {"wifi", stackchan::wifi::web::WriteSettings},
+        {"setup", setup_web::Write},
+    };
     httpd_uri_t page{};
     page.uri = "/"; page.method = HTTP_GET; page.handler = Page;
     httpd_uri_t read{};
     read.uri = "/api/stage1"; read.method = HTTP_GET; read.handler = ReadConfig;
     httpd_uri_t write{};
-    write.uri = "/api/stage1"; write.method = HTTP_POST; write.handler = WriteConfig;
+    write.uri = "/api/stage1"; write.method = HTTP_POST; write.handler = MonitorPost; write.user_ctx = &posts[0];
     httpd_uri_t action{};
-    action.uri = "/api/stage1/action"; action.method = HTTP_POST; action.handler = TriggerAction;
+    action.uri = "/api/stage1/action"; action.method = HTTP_POST; action.handler = MonitorPost; action.user_ctx = &posts[1];
     httpd_uri_t voice_read{};
     voice_read.uri = "/api/stage1/voice"; voice_read.method = HTTP_GET; voice_read.handler = ReadVoice;
     httpd_uri_t voice_write{};
-    voice_write.uri = "/api/stage1/voice"; voice_write.method = HTTP_POST; voice_write.handler = WriteVoice;
+    voice_write.uri = "/api/stage1/voice"; voice_write.method = HTTP_POST; voice_write.handler = MonitorPost; voice_write.user_ctx = &posts[2];
     httpd_uri_t voice_test{};
-    voice_test.uri = "/api/stage1/voice/test"; voice_test.method = HTTP_POST; voice_test.handler = TriggerVoiceTest;
+    voice_test.uri = "/api/stage1/voice/test"; voice_test.method = HTTP_POST; voice_test.handler = MonitorPost; voice_test.user_ctx = &posts[3];
     httpd_uri_t quiet_read{};
     quiet_read.uri = "/api/stage1/quiet"; quiet_read.method = HTTP_GET; quiet_read.handler = ReadQuiet;
     httpd_uri_t quiet_write{};
-    quiet_write.uri = "/api/stage1/quiet"; quiet_write.method = HTTP_POST; quiet_write.handler = WriteQuiet;
+    quiet_write.uri = "/api/stage1/quiet"; quiet_write.method = HTTP_POST; quiet_write.handler = MonitorPost; quiet_write.user_ctx = &posts[4];
     httpd_uri_t environment_read{};
     environment_read.uri = "/api/stage1/environment"; environment_read.method = HTTP_GET;
     environment_read.handler = ReadEnvironment;
     httpd_uri_t environment_write{};
     environment_write.uri = "/api/stage1/environment"; environment_write.method = HTTP_POST;
-    environment_write.handler = WriteEnvironment;
+    environment_write.handler = MonitorPost; environment_write.user_ctx = &posts[5];
     httpd_uri_t wifi_read{};
     wifi_read.uri = "/api/stage1/wifi"; wifi_read.method = HTTP_GET;
     wifi_read.handler = stackchan::wifi::web::ReadSettings;
     httpd_uri_t wifi_write{};
     wifi_write.uri = "/api/stage1/wifi"; wifi_write.method = HTTP_POST;
-    wifi_write.handler = stackchan::wifi::web::WriteSettings;
+    wifi_write.handler = MonitorPost; wifi_write.user_ctx = &posts[6];
     httpd_uri_t setup_read{};
     setup_read.uri = "/api/stage1/setup"; setup_read.method = HTTP_GET;
     setup_read.handler = setup_web::Read;
     httpd_uri_t setup_write{};
     setup_write.uri = "/api/stage1/setup"; setup_write.method = HTTP_POST;
-    setup_write.handler = setup_web::Write;
+    setup_write.handler = MonitorPost; setup_write.user_ctx = &posts[7];
     if (httpd_register_uri_handler(server, &page) != ESP_OK ||
         httpd_register_uri_handler(server, &read) != ESP_OK ||
         httpd_register_uri_handler(server, &write) != ESP_OK ||
