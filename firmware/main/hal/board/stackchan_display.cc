@@ -7,6 +7,7 @@
 #include <application.h>
 #include <stackchan/port_stage1/port_stage1.h>
 #include <stackchan/modifiers/idle_lifecycle.h>
+#include <stackchan/speech_mouth.h>
 #include <stackchan/port_stage1/speech_emotion.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -48,6 +49,12 @@ stackchan::idle_lifecycle::State CurrentIdleState(bool device_idle, bool explici
             stackchan::stage1::IsWakeSequenceActive(),
             explicit_sleep};
 }
+}
+
+// Audio output worker publishes only a scalar; LVGL reads it independently.
+extern "C" void stackchan_speech_pcm_average(uint32_t average)
+{
+    stackchan::speech_mouth::Observe(average, GetHAL().millis());
 }
 
 // Have to register themes, so the asset apply can update the text font
@@ -430,6 +437,7 @@ void StackChanAvatarDisplay::EndWakeFaceSmile(bool resume_listening)
 
 void StackChanAvatarDisplay::FinishSpeakingAnimation()
 {
+    stackchan::speech_mouth::SetPlaying(false);
     // One speech-end path for normal status changes and idle recovery.
     auto& stackchan = GetStackChan();
     auto& avatar = stackchan.avatar();
@@ -1129,8 +1137,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             ResetSubtitleQueue();
         }
         subtitle_speaking_ = true;
+        stackchan::speech_mouth::SetPlaying(true);
         if (speaking_modifier_id_ < 0) {
-            speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
+            speaking_modifier_id_ = stackchan.addModifier(
+                std::make_unique<SpeakingModifier>(0, 180, false, true));
         }
 
         GetHAL().setConversationRgbColor(0, 0, 50);

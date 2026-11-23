@@ -142,6 +142,11 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <div class="buttons"><button type="button" id="testMonologue">独り言を今すぐテスト</button></div>
 <p id="testMonologueStatus" class="status" role="status">待機中</p>
 </section>
+<section class="card"><h2>口パク大きさ</h2>
+<label for="mouthPercent">PCM連動の口の開き具合 <output id="mouthValue">100%</output></label>
+<input name="mouth_percent" id="mouthPercent" type="range" min="30" max="100" step="1" value="100" style="width:100%;max-width:19rem">
+<small>S3と同じ30〜100%。確定時にNVSへ保存、既存SDバックアップにも反映します。</small>
+<p id="mouthStatus" class="status" role="status"></p></section>
 <div class="save"><button type="submit">音声設定を保存</button><p id="voiceStatus" class="status" role="status">読み込み中…</p></div>
 </form>
 <section class="card"><h2>音声テスト（AIサーバー 12800）</h2>
@@ -324,7 +329,7 @@ rgbActions.addEventListener('click',async e=>{
  finally{buttons.forEach(b=>b.disabled=false);}
 });
 const voiceForm=document.getElementById('voiceSettings'),v=voiceForm.elements;
- const voiceStatus=document.getElementById('voiceStatus'),voiceFields=['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','snore_min','snore_max','talk_min','talk_max','monologue_enabled','monologue_prompt','monologue_min','monologue_max'];
+ const voiceStatus=document.getElementById('voiceStatus'),voiceFields=['morning','bedtime','touch','wake_word','timer','snore','sleep_talk_prompt','snore_min','snore_max','talk_min','talk_max','monologue_enabled','monologue_prompt','monologue_min','monologue_max','mouth_percent'];
 async function loadVoice(){
  try{
   const r=await fetch('/api/stage1/voice',{cache:'no-store'});
@@ -332,9 +337,29 @@ async function loadVoice(){
    const data=await r.json();for(const field of voiceFields){
     if(field==='monologue_enabled')v[field].checked=!!data[field];else v[field].value=data[field]??'';
    }
+  document.getElementById('mouthValue').textContent=v.mouth_percent.value+'%';
   voiceStatus.textContent='読み込み完了';
  }catch(e){voiceStatus.textContent='読み込み失敗: '+e.message;}
 }
+// Commit on completed slider changes, not on every input tick.
+const mouthOutput=document.getElementById('mouthValue'),mouthStatus=document.getElementById('mouthStatus');
+let mouthPending=null,mouthSaving=false;
+v.mouth_percent.addEventListener('input',()=>{mouthOutput.textContent=v.mouth_percent.value+'%';});
+v.mouth_percent.addEventListener('change',async()=>{
+ mouthPending=Number(v.mouth_percent.value);
+ if(mouthSaving)return;
+ mouthSaving=true;
+ while(mouthPending!==null){
+  const value=mouthPending;mouthPending=null;mouthStatus.textContent='NVSへ保存中…';
+  try{
+   const r=await fetch('/api/stage1/voice',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mouth_percent:value})});
+   if(!r.ok)throw Error('HTTP '+r.status+': '+await r.text());
+   mouthStatus.textContent=value+'%で保存しました（SD同期は非同期）';
+  }catch(e){mouthStatus.textContent='保存失敗: '+e.message;}
+ }
+ mouthSaving=false;
+});
 voiceForm.addEventListener('submit',async e=>{
  e.preventDefault();if(!voiceForm.reportValidity())return;
   for(const [low,high] of [['snore_min','snore_max'],['talk_min','talk_max'],['monologue_min','monologue_max']]){
@@ -346,7 +371,7 @@ voiceForm.addEventListener('submit',async e=>{
   if(enc.encode(v[field].value).length>max){voiceStatus.textContent=field+'は'+max+'バイト以内にしてください';return;}
  }
   const data={};for(const field of voiceFields)data[field]=field==='monologue_enabled'?v[field].checked:
-   ['snore_min','snore_max','talk_min','talk_max','monologue_min','monologue_max'].includes(field)?Number(v[field].value):v[field].value;
+   ['snore_min','snore_max','talk_min','talk_max','monologue_min','monologue_max','mouth_percent'].includes(field)?Number(v[field].value):v[field].value;
  voiceStatus.textContent='保存中…';
  try{
   const r=await fetch('/api/stage1/voice',{method:'POST',
@@ -946,6 +971,7 @@ esp_err_t ReadVoice(httpd_req_t* req) {
             cJSON_AddNumberToObject(json, "talk_max", c->talk_max);
             cJSON_AddNumberToObject(json, "monologue_min", c->monologue_min);
             cJSON_AddNumberToObject(json, "monologue_max", c->monologue_max);
+            cJSON_AddNumberToObject(json, "mouth_percent", c->mouth_percent);
         }
     }
     char* text = cJSON_PrintUnformatted(json);
@@ -993,8 +1019,27 @@ esp_err_t WriteVoice(httpd_req_t* req) {
     buf[got] = 0;
     cJSON* root = cJSON_Parse(buf);
     heap_caps_free(buf);
+    // Slider-only save reuses this endpoint and the existing SD mirror.
+    if (cJSON_IsObject(root) && root->child && !root->child->next &&
+        root->child->string && std::strcmp(root->child->string,"mouth_percent")==0) {
+        int size=0;
+        const bool valid=Uint(root,"mouth_percent",30,100,1,size);
+        bool saved=false;
+        if(valid) {
+            LvglLockGuard lock;
+            saved=voice::SaveMouthPercent(static_cast<uint8_t>(size));
+        }
+        cJSON_Delete(root);
+        heap_caps_free(memory);
+        Reply(req,!valid?"400 Bad Request":!saved?"500 Internal Server Error":"200 OK",
+              !valid?"{\"error\":\"invalid mouth size\"}":
+              !saved?"{\"error\":\"NVS save failed\"}":"{\"ok\":true}");
+        return ESP_OK;
+    }
     const auto* c = root;
     int snore_lo=0, snore_hi=0, talk_lo=0, talk_hi=0, monologue_lo=0, monologue_hi=0;
+    int mouth_percent=100;
+    const auto* mouth_size=cJSON_GetObjectItemCaseSensitive(c,"mouth_percent");
     const auto* monologue_enabled = cJSON_IsObject(c) ?
         cJSON_GetObjectItemCaseSensitive(c, "monologue_enabled") : nullptr;
     const bool valid = cJSON_IsObject(c) &&
@@ -1010,15 +1055,19 @@ esp_err_t WriteVoice(httpd_req_t* req) {
         Uint(c,"snore_min",1,3600,1,snore_lo) && Uint(c,"snore_max",1,3600,1,snore_hi) &&
         Uint(c,"talk_min",1,3600,1,talk_lo) && Uint(c,"talk_max",1,3600,1,talk_hi) &&
         Uint(c,"monologue_min",1,1440,1,monologue_lo) &&
-        Uint(c,"monologue_max",1,1440,1,monologue_hi);
+        Uint(c,"monologue_max",1,1440,1,monologue_hi) &&
+        (!mouth_size || Uint(c,"mouth_percent",30,100,1,mouth_percent));
     draft->snore_min=snore_lo; draft->snore_max=snore_hi;
     draft->talk_min=talk_lo; draft->talk_max=talk_hi;
     draft->monologue_enabled=cJSON_IsTrue(monologue_enabled);
     draft->monologue_min=monologue_lo; draft->monologue_max=monologue_hi;
     bool saved=false;
-    if (valid && voice::Valid(*draft)) {
+    if (valid) {
         LvglLockGuard lock;
-        saved=voice::Save(*draft);
+        // Older Web clients omit the field; keep the current saved size.
+        if (!mouth_size && voice::Current()) mouth_percent=voice::Current()->mouth_percent;
+        draft->mouth_percent=static_cast<uint8_t>(mouth_percent);
+        if (voice::Valid(*draft)) saved=voice::Save(*draft);
     }
     cJSON_Delete(root);
     heap_caps_free(memory);

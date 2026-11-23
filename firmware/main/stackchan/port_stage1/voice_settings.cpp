@@ -1,4 +1,5 @@
 #include "voice_settings.h"
+#include <stackchan/speech_mouth.h>
 #include <nvs.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -14,7 +15,8 @@ constexpr const char* NS = "sc_voice";
 struct TextField { const char* key; char* value; size_t size; };
 }
 bool Valid(const Settings& s) {
-    if (s.snore_min < 1 || s.snore_min > s.snore_max || s.snore_max > 3600 ||
+    if (s.mouth_percent < speech_mouth::MIN_PERCENT || s.mouth_percent > speech_mouth::MAX_PERCENT ||
+        s.snore_min < 1 || s.snore_min > s.snore_max || s.snore_max > 3600 ||
         s.talk_min < 1 || s.talk_min > s.talk_max || s.talk_max > 3600 ||
         s.monologue_min < 1 || s.monologue_min > s.monologue_max ||
         s.monologue_max > 1440) return false;
@@ -33,7 +35,10 @@ bool Init() {
     if (!mem) { ESP_LOGW("STAGE1-VOICE", "voice settings disabled: PSRAM unavailable"); return false; }
     current = new(mem) Settings();
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return true;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
+        speech_mouth::SetPercent(current->mouth_percent);
+        return true;
+    }
     TextField fields[] = {
         {"morning",current->morning,sizeof(current->morning)},
         {"bedtime",current->bedtime,sizeof(current->bedtime)},
@@ -57,11 +62,13 @@ bool Init() {
     uint8_t monologue_enabled = current->monologue_enabled ? 1 : 0;
     nvs_get_u8(h,"monoenable",&monologue_enabled);
     current->monologue_enabled = monologue_enabled != 0;
+    nvs_get_u8(h,"mouthpct",&current->mouth_percent);
     nvs_close(h);
     if (!Valid(*current)) {
         ESP_LOGW("STAGE1-VOICE","invalid NVS voice settings; restoring defaults in RAM");
         *current = Settings{};
     }
+    speech_mouth::SetPercent(current->mouth_percent);
     return true;
 }
 void Stop() { if(current){current->~Settings();heap_caps_free(current);current=nullptr;} }
@@ -85,13 +92,34 @@ bool Save(const Settings& s) {
     if(err==ESP_OK)err=nvs_set_u16(h,"monolo",s.monologue_min);
     if(err==ESP_OK)err=nvs_set_u16(h,"monohi",s.monologue_max);
     if(err==ESP_OK)err=nvs_set_u8(h,"monoenable",s.monologue_enabled?1:0);
+    if(err==ESP_OK)err=nvs_set_u8(h,"mouthpct",s.mouth_percent);
     if(err==ESP_OK)err=nvs_commit(h);
     nvs_close(h);
     if(err==ESP_OK) {
         *current=s;
+        speech_mouth::SetPercent(s.mouth_percent);
         stackchan_nvs_commit_observer();
     }
     else ESP_LOGE("STAGE1-VOICE","NVS save failed: %s",esp_err_to_name(err));
     return err==ESP_OK;
+}
+bool SaveMouthPercent(uint8_t value) {
+    if (!current || value < speech_mouth::MIN_PERCENT || value > speech_mouth::MAX_PERCENT) return false;
+    if (current->mouth_percent == value) return true; // No redundant flash commit.
+    // Caller holds the existing LVGL lock; avoid rewriting voice prompt strings.
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t err = nvs_set_u8(h,"mouthpct",value);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE("STAGE1-VOICE","mouth NVS save failed: %s",esp_err_to_name(err));
+        return false;
+    }
+    current->mouth_percent = value;
+    speech_mouth::SetPercent(value);
+    // Reuse the existing asynchronous NVS -> SD snapshot, without blocking HTTP.
+    stackchan_nvs_commit_observer();
+    return true;
 }
 }

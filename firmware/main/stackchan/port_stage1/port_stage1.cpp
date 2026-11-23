@@ -9,6 +9,7 @@
 #include "avatar_config.h"
 #include "voice_settings.h"
 #include "voice_client.h"
+#include <stackchan/speech_mouth.h>
 #include "quiet_mode.h"
 #include "quiet_mark.h"
 #include "environment.h"
@@ -770,12 +771,9 @@ struct Runtime {
             else {
                 const uint8_t sleep_sound =
                     s.phase == Phase::NapSleep ? voice::SleepSoundPlaying() : 0;
-                // Both snores and sleep talk hide the nose bubble and drool during playback.
-                // Use a short visual mouth cycle only while audio is playing.
-                const uint8_t mouth = sleep_sound
-                    ? static_cast<uint8_t>(30 + 45 * (1.0f + std::sin(
-                          s.phase_elapsed_ms * 0.019f)) * 0.5f)
-                    : 0;
+                // Snoring and sleep-talk reuse the same speaker PCM level
+                // as ordinary speech rather than an unrelated sine wave.
+                const uint8_t mouth = sleep_sound ? speech_mouth::Opening(GetHAL().millis()) : 0;
                 rest->Render(startled_wake ? AvatarRestPose::Startled :
                              asleep ? AvatarRestPose::Sleeping : AvatarRestPose::Yawning,
                              sleep_sound != 0, mouth, s.phase_elapsed_ms,
@@ -1341,7 +1339,8 @@ void Update(StackChan& sc) {
                               state.phase == Phase::NightYawn);
     // Limit scene redraws: the app update loop may run faster than animations
     // need, while each render mutates multiple LVGL objects.
-    if (r.own_face && (r.last_draw_at == 0 || now - r.last_draw_at >= 100)) {
+    const uint32_t draw_interval_ms = voice::SleepSoundPlaying() ? 30 : 100;
+    if (r.own_face && (r.last_draw_at == 0 || now - r.last_draw_at >= draw_interval_ms)) {
         r.Draw(sc, state);
         r.ApplyTheatreFace(sc, state);
         r.last_draw_at = now;

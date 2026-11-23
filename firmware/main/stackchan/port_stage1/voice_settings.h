@@ -18,10 +18,12 @@ struct Settings {
     uint16_t talk_min = 60, talk_max = 180;
     uint16_t monologue_min = 5, monologue_max = 20;
     bool monologue_enabled = true;
+    uint8_t mouth_percent = 100; // PCM lip-size, 30..100%.
 };
 bool Init();   // Lazily allocate persistent settings in SPIRAM.
 void Stop();   // Not safe while async voice task is running.
 const Settings* Current(); // Caller holds Stage-1 LVGL lock.
 bool Save(const Settings& value); // Persist atomically before applying.
+bool SaveMouthPercent(uint8_t value); // Slider-only NVS update.
 bool Valid(const Settings& value);
 }

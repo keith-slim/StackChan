@@ -15,6 +15,7 @@
 #include <freertos/task.h>
 #include "board/hal_bridge.h"
 #include "stackchan/storage/nvs_snapshot.h"
+#include "stackchan/speech_mouth.h"
 #include "stackchan/wifi/wifi_web.h"
 
 static std::unique_ptr<Hal> _hal_instance;
@@ -262,8 +263,10 @@ static void _stackchan_update_task(void* param)
 
         // Keep the conversation pacing delay OUTSIDE the LVGL lock so
         // subtitles and audio-related UI callbacks are not blocked by it.
+        // Retain the existing task and audio/listening pacing. Speech
+        // gets an approximately 30ms avatar update instead of 120ms.
         if (!hal_bridge::is_xiaozhi_idle()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(stackchan::speech_mouth::Playing() ? 10 : 100));
         }
 
         LvglLockGuard lock;
