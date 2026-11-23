@@ -15,6 +15,7 @@
 #include "environment.h"
 #include "weather_face.h"
 #include <stackchan/avatar/skins/default/default.h>
+#include <stackchan/avatar/face_snapshot.h>
 #include <application.h>
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
@@ -224,28 +225,13 @@ enum class Cue : int { Nod, ShakeHead, TiltHead, Happy, Surprise, Shy, Count };
 const char* const cue_names[] = {"nod", "shake_head", "tilt_head", "happy_move", "surprise_move", "shy_move"};
 
 struct Runtime {
-    struct FeaturePose {
-        uitk::Vector2i position{0, 0};
-        int weight = 0, size = 0, rotation = 0;
-        static FeaturePose Capture(avatar::Feature& f) {
-            return {f.getPosition(), f.getWeight(), f.getSize(), f.getRotation()};
-        }
-        void Restore(avatar::Feature& f) const {
-            f.setPosition(position);
-            f.setSize(size);
-            f.setWeight(weight);
-            f.setRotation(rotation);
-        }
-    };
     bool scene_face_saved = false;
-    FeaturePose saved_left, saved_right, saved_mouth;
+    avatar::FaceSnapshot saved_face;
     // The S3 conversation face owns only visuals; stage-1 still owns
     // scheduling, servo actions, sleep and the existing chat/audio flow.
     ConversationPose conversation_pose = ConversationPose::None;
     bool conversation_saved = false;
-    FeaturePose conv_left, conv_right, conv_mouth;
-    bool conv_left_visible = true, conv_right_visible = true, conv_mouth_visible = true;
-    avatar::Emotion conv_emotion = avatar::Emotion::Neutral;
+    avatar::FaceSnapshot conversation_face;
     uint32_t conversation_at = 0, listening_nod_at = 0;
     bool listening_nod = false;
     std::unique_ptr<AvatarThinkingFace> thinking_face;
@@ -285,7 +271,6 @@ struct Runtime {
     bool restore_neck_on_release = false;
     uint32_t theatre_motion_protect_until = 0;
     uitk::Vector2i saved_angles{0, 0};
-    stackchan::avatar::Emotion saved_emotion = stackchan::avatar::Emotion::Neutral;
     std::unique_ptr<AvatarRestFace> rest;
     std::unique_ptr<AvatarDreamFace> dream;
     std::unique_ptr<AvatarQuietMark> quiet_mark;
@@ -373,15 +358,7 @@ struct Runtime {
     void EndConversation(StackChan& sc) {
         if (conversation_pose == ConversationPose::None) return;
         thinking_face.reset();
-        if (conversation_saved) {
-            sc.avatar().setEmotion(conv_emotion);
-            conv_left.Restore(sc.avatar().leftEye());
-            conv_right.Restore(sc.avatar().rightEye());
-            conv_mouth.Restore(sc.avatar().mouth());
-            sc.avatar().leftEye().setVisible(conv_left_visible);
-            sc.avatar().rightEye().setVisible(conv_right_visible);
-            sc.avatar().mouth().setVisible(conv_mouth_visible);
-        }
+        if (conversation_saved) conversation_face.Restore(sc.avatar());
         conversation_saved = false;
         listening_nod = false;
         conversation_pose = ConversationPose::None;
@@ -395,18 +372,13 @@ struct Runtime {
                          static_cast<int>(phase), static_cast<int>(pose));
             RestoreNightBacklight();
             Release(sc, true);
+            sc.prepareFaceTakeover();
             cue_active = false;
             queued_cue.store(-1);
             phase = Phase::Boot;
             schedule.Reset();
             auto& av = sc.avatar();
-            conv_emotion = av.getEmotion();
-            conv_left = FeaturePose::Capture(av.leftEye());
-            conv_right = FeaturePose::Capture(av.rightEye());
-            conv_mouth = FeaturePose::Capture(av.mouth());
-            conv_left_visible = av.leftEye().getVisible();
-            conv_right_visible = av.rightEye().getVisible();
-            conv_mouth_visible = av.mouth().getVisible();
+            conversation_face = avatar::FaceSnapshot::Capture(av);
             conversation_saved = true;
             // S3 conversation poses replace previous emotions/decorations,
             // not just their eye and mouth geometry. Restore on exit.
@@ -473,12 +445,7 @@ struct Runtime {
             sc.avatar().mouth().setVisible(startled_mouth_visible);
             startled_face_active = false;
         }
-        if (own_face && restore) sc.avatar().setEmotion(saved_emotion);
-        if (scene_face_saved && restore) {
-            saved_left.Restore(sc.avatar().leftEye());
-            saved_right.Restore(sc.avatar().rightEye());
-            saved_mouth.Restore(sc.avatar().mouth());
-        }
+        if (scene_face_saved && restore) saved_face.Restore(sc.avatar());
         scene_face_saved = false;
         if (own_led && !led_held && restore) {
             sc.leftNeonLight().setColor(0,0,0);
@@ -505,6 +472,7 @@ struct Runtime {
         }
         // Preserve the pre-automation face/pose across a multi-step night/nap scene.
         const bool continuing = own_face && Auto(next);
+        if (!continuing && Auto(next)) sc.prepareFaceTakeover();
         if (own_speech) { sc.avatar().clearSpeech(); own_speech = false; }
         if (continuing) ClearVisuals();
         else Release(sc, true);
@@ -526,13 +494,9 @@ struct Runtime {
             night_light_due = now + 3000; // S3 NIGHT_SLEEP_BACKLIGHT_DELAY_MS
         }
         if (!Auto(next)) return;
-        if (!continuing) saved_emotion = sc.avatar().getEmotion();
-        // All autonomous scenes can alter eye/mouth geometry, not only theatre.
-        // Preserve it once across the entire nap/night/wake sequence.
+        // Preserve the complete baseline once across a multi-phase scene.
         if (!continuing) {
-            saved_left = FeaturePose::Capture(sc.avatar().leftEye());
-            saved_right = FeaturePose::Capture(sc.avatar().rightEye());
-            saved_mouth = FeaturePose::Capture(sc.avatar().mouth());
+            saved_face = avatar::FaceSnapshot::Capture(sc.avatar());
             scene_face_saved = true;
         }
         own_face = true;
@@ -792,6 +756,7 @@ struct Runtime {
         // Never discard an autonomous scene's original pose. The caller only
         // starts a cue when no scene is in control.
         Release(sc, true);
+        if (idle.load()) sc.prepareFaceTakeover();
         cue = request;
         cue_at = now;
         cue_step = 0;
@@ -799,11 +764,8 @@ struct Runtime {
         owns_auto.store(true);
         // A live conversation owns the face/LED; gestures only move the neck.
         own_face = idle.load();
-        saved_emotion = sc.avatar().getEmotion();
         if (own_face) {
-            saved_left = FeaturePose::Capture(sc.avatar().leftEye());
-            saved_right = FeaturePose::Capture(sc.avatar().rightEye());
-            saved_mouth = FeaturePose::Capture(sc.avatar().mouth());
+            saved_face = avatar::FaceSnapshot::Capture(sc.avatar());
             scene_face_saved = true;
         }
         auto& motion = sc.motion();

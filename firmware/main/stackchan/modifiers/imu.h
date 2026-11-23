@@ -8,6 +8,7 @@
 #include "../port_stage1/port_stage1.h"
 #include <hal/hal.h>
 #include <cstdint>
+#include <atomic>
 
 namespace stackchan {
 
@@ -31,21 +32,29 @@ public:
         GetHAL().onImuMotionEvent.disconnect(_signal_connection);
     }
 
+    // Restore only what the shake changed, before another face owner captures
+    // its baseline. The pending shake must not replay after the handoff.
+    void onFaceTakeover(Modifiable& stackchan) override
+    {
+        _event_shake.store(false);
+        if (_is_reacting) restore_state(stackchan);
+    }
+
     void _update(Modifiable& stackchan) override
     {
         // Sleep/skits/conversation take priority over the legacy shake
         // reaction. Clear a pre-existing reaction as well as new events;
         // otherwise it can keep rotating the mouth and command goHome().
         if (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive()) {
-            _event_shake = false;
+            _event_shake.store(false);
             if (_is_reacting) restore_state(stackchan);
             return;
         }
         uint32_t now = GetHAL().millis();
 
         // 收到晃动事件
-        if (_event_shake) {
-            _event_shake = false;
+        if (_event_shake.exchange(false) &&
+            (_is_reacting || !stackchan.avatar().isModifyLocked())) {
             handle_shake_start(stackchan, now);
         }
 
@@ -66,6 +75,7 @@ public:
             auto& motion = stackchan.motion();
             if (!motion.isModifyLocked()) {
                 motion.setModifyLock(true);
+                _motion_lock_owned = true;
                 motion.goHome(300);
             }
 
@@ -85,7 +95,12 @@ private:
 
             auto& avatar = stackchan.avatar();
 
+            _saved_left_visible = avatar.leftEye().getVisible();
+            _saved_right_visible = avatar.rightEye().getVisible();
+            _saved_mouth_weight = avatar.mouth().getWeight();
+            _saved_mouth_rotation = avatar.mouth().getRotation();
             avatar.setModifyLock(true);
+            _avatar_lock_owned = true;
             avatar.leftEye().setVisible(false);
             avatar.rightEye().setVisible(false);
 
@@ -111,11 +126,12 @@ private:
         }
 
         auto& avatar = stackchan.avatar();
-        avatar.setModifyLock(false);
-        avatar.leftEye().setVisible(true);
-        avatar.rightEye().setVisible(true);
-        avatar.mouth().setWeight(0);
-        avatar.mouth().setRotation(0);
+        if (_avatar_lock_owned) avatar.setModifyLock(false);
+        _avatar_lock_owned = false;
+        avatar.leftEye().setVisible(_saved_left_visible);
+        avatar.rightEye().setVisible(_saved_right_visible);
+        avatar.mouth().setWeight(_saved_mouth_weight);
+        avatar.mouth().setRotation(_saved_mouth_rotation);
 
         stackchan.avatar().removeDecorator(_dizzy_decorator_id);
         stackchan.avatar().removeDecorator(_shy_decorator_id);
@@ -123,17 +139,23 @@ private:
         _shy_decorator_id   = -1;
 
         auto& motion = stackchan.motion();
-        motion.setModifyLock(false);
-
+        if (_motion_lock_owned) motion.setModifyLock(false);
+        _motion_lock_owned = false;
         _is_reacting = false;
     }
 
     // 信号相关
     int _signal_connection;
-    volatile bool _event_shake = false;
+    std::atomic_bool _event_shake{false};
 
     // 状态控制
     bool _is_reacting          = false;
+    bool _avatar_lock_owned = false;
+    bool _motion_lock_owned = false;
+    bool _saved_left_visible = true;
+    bool _saved_right_visible = true;
+    int _saved_mouth_weight = 0;
+    int _saved_mouth_rotation = 0;
     bool _toggle_phase         = false;
     uint32_t _restore_at       = 0;
     uint32_t _next_toggle_tick = 0;

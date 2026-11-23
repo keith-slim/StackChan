@@ -38,9 +38,18 @@ public:
      *
      * @param rotation
      */
+    // LVGL rotations are in tenths of a degree. Preserve the displayed
+    // angle in the saved state, including mirrored negative eye rotations.
+    // Retain the existing saturation behavior for positive out-of-range input.
+    static int NormalizeRotation(int rotation)
+    {
+        if (rotation >= 0) return uitk::clamp(rotation, 0, 3600);
+        const int wrapped = rotation % 3600;
+        return wrapped == 0 ? 0 : wrapped + 3600;
+    }
     virtual void setRotation(int rotation)
     {
-        _rotation = uitk::clamp(rotation, 0, 3600);
+        _rotation = NormalizeRotation(rotation);
     }
     virtual int getRotation()
     {

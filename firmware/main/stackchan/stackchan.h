@@ -124,6 +124,17 @@ public:
         _modifier_pool.clear();
     }
 
+    // Release temporary head-pet/shake expressions before another owner
+    // snapshots the baseline. Called only with the display lock held.
+    void prepareFaceTakeover()
+    {
+        if (!_avatar) return;
+        _modifier_pool.forEach([this](Modifier* modifier, int) {
+            modifier->onFaceTakeover(*this);
+        });
+        _modifier_pool.cleanup();
+    }
+
     /**
      * @brief Update
      *

@@ -11,6 +11,7 @@
 #include <smooth_ui_toolkit.hpp>
 #include <hal/hal.h>
 #include <cstdint>
+#include <atomic>
 #include <memory>
 
 namespace stackchan {
@@ -38,35 +39,42 @@ public:
         GetHAL().onHeadPetGesture.disconnect(_signal_connection);
     }
 
+    // A higher-priority face takes over only after restoring the pre-pet
+    // emotion. Do not move the neck: its new owner chooses the target.
+    void onFaceTakeover(Modifiable& stackchan) override
+    {
+        _event_swipe.store(false);
+        _event_release.store(false);
+        end_reaction(stackchan, true, false);
+    }
+
     void _update(Modifiable& stackchan) override
     {
-        // Stage-1 sleep/skit/explicit actions own the avatar. Discard pending
-        // pet effects instead of restoring the previous face or servo angle.
+        // A new autonomous scene should call onFaceTakeover before capture;
+        // this guard also prevents stale gestures from editing that scene.
         if (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive()) {
-            _event_swipe = false;
-            _event_release = false;
-            if (_in_happy_state) {
-                stackchan.avatar().removeDecorator(_heart_decorator_id);
-                stackchan.avatar().removeDecorator(_shy_decorator_id);
-                _heart_decorator_id = _shy_decorator_id = -1;
-            }
-            _in_happy_state = false;
-            _is_waiting_restore = false;
+            _event_swipe.store(false);
+            _event_release.store(false);
+            end_reaction(stackchan, false, false);
+            return;
+        }
+        // An IMU reaction locks the avatar. Let it own the face, rather than
+        // leaving a pending pet smile to be restored after the shake.
+        if (stackchan.avatar().isModifyLocked()) {
+            onFaceTakeover(stackchan);
             return;
         }
         uint32_t now = GetHAL().millis();
 
         // 处理“被抚摸中”事件
-        if (_event_swipe) {
-            _event_swipe = false;
+        if (_event_swipe.exchange(false)) {
             handle_swipe(stackchan);
             // 只要在摸，就推迟恢复时间
             _is_waiting_restore = false;
         }
 
         // 处理“手松开”事件
-        if (_event_release) {
-            _event_release = false;
+        if (_event_release.exchange(false)) {
             if (_in_happy_state) {
                 _is_waiting_restore = true;
                 _restore_tick       = now + _restore_delay_ms;
@@ -74,10 +82,13 @@ public:
         }
 
         // 处理恢复逻辑
-        if (_is_waiting_restore && now >= _restore_tick) {
-            _is_waiting_restore = false;
-            restore_original_state(stackchan);
-        }
+        // A missed Release (for example after an I2C read failure) must not
+        // leave Happy permanently active. Normal release timing is unchanged.
+        const bool released = _is_waiting_restore &&
+            static_cast<int32_t>(now - _restore_tick) >= 0;
+        const bool expired = _in_happy_state && _fallback_restore_tick != 0 &&
+            static_cast<int32_t>(now - _fallback_restore_tick) >= 0;
+        if (released || expired) restore_original_state(stackchan);
     }
 
 private:
@@ -89,6 +100,7 @@ private:
         if (!_in_happy_state) {
             _in_happy_state = true;
             _prev_emotion   = avatar.getEmotion();
+            _fallback_restore_tick = GetHAL().millis() + 12000; // lost-release failsafe
             auto angles     = stackchan.motion().getCurrentAngles();
             _prev_yaw       = angles.x;
             _prev_pitch     = angles.y;
@@ -109,16 +121,25 @@ private:
         perform_pet_motion(stackchan);
     }
 
+    void end_reaction(Modifiable& stackchan, bool restore_emotion, bool restore_neck)
+    {
+        if (_in_happy_state && restore_emotion &&
+            stackchan.avatar().getEmotion() == avatar::Emotion::Happy)
+            stackchan.avatar().setEmotion(_prev_emotion);
+        if (_in_happy_state && restore_neck && !stackchan.motion().isModifyLocked())
+            stackchan.motion().moveWithSpeed(_prev_yaw, _prev_pitch, 200);
+        if (_heart_decorator_id >= 0) stackchan.avatar().removeDecorator(_heart_decorator_id);
+        if (_shy_decorator_id >= 0) stackchan.avatar().removeDecorator(_shy_decorator_id);
+        _heart_decorator_id = _shy_decorator_id = -1;
+        _in_happy_state = false;
+        _is_waiting_restore = false;
+        _fallback_restore_tick = 0;
+    }
+
     void restore_original_state(Modifiable& stackchan)
     {
-        if (!_in_happy_state) {
-            return;
-        }
-
-        stackchan.avatar().setEmotion(_prev_emotion);
-        stackchan.motion().moveWithSpeed(_prev_yaw, _prev_pitch, 200);
-
-        _in_happy_state = false;
+        if (!_in_happy_state) return;
+        end_reaction(stackchan, true, true);
     }
 
     void perform_pet_motion(Modifiable& stackchan)
@@ -157,13 +178,14 @@ private:
 
     // 信号相关
     int _signal_connection;
-    volatile bool _event_swipe   = false;
-    volatile bool _event_release = false;
+    std::atomic_bool _event_swipe{false};
+    std::atomic_bool _event_release{false};
 
     // 状态机相关
     bool _in_happy_state     = false;
     bool _is_waiting_restore = false;
     uint32_t _restore_tick   = 0;
+    uint32_t _fallback_restore_tick = 0;
     uint32_t _restore_delay_ms;
     int _heart_decorator_id = -1;
     int _shy_decorator_id   = -1;

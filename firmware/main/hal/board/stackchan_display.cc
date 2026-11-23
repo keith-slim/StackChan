@@ -402,6 +402,7 @@ bool StackChanAvatarDisplay::ShowWakeFaceSmile()
         !stackchan::stage1::IsSleepSceneActive() && !stackchan::stage1::IsWakeSequenceActive()) {
         // The listening pose otherwise redraws neutral eye/mouth geometry on every update.
         stackchan::stage1::SetConversationPose(sc, stackchan::stage1::ConversationPose::None);
+        sc.prepareFaceTakeover();
         wake_face_before_ = sc.avatar().getEmotion();
         sc.avatar().setEmotion(Emotion::Happy);
         if (auto* blink = static_cast<BlinkModifier*>(sc.getModifier(blink_modifier_id_)))
@@ -571,6 +572,8 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     if (!stackchan::stage1::IsWakeSequenceActive() &&
         !Application::GetInstance().IsAnnouncementActive())
         stackchan::stage1::CancelForExternalChange(stackchan, "set_emotion");
+    // A temporary head-pet/shake must not outlive an explicit speech emotion.
+    stackchan.prepareFaceTakeover();
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
     auto& avatar = stackchan.avatar();
@@ -875,6 +878,7 @@ void StackChanAvatarDisplay::SetChatMessage(
             if (stackchan::stage1::SpeechEmotionFromText(content, inferred) &&
                 stackchan.avatar().getEmotion() != inferred) {
                 stackchan::stage1::CancelForExternalChange(stackchan, "text_emotion_fallback");
+                stackchan.prepareFaceTakeover();
                 if (!speech_emotion_active_) {
                     speech_emotion_before_ = stackchan.avatar().getEmotion();
                     speech_emotion_active_ = true;
