@@ -35,6 +35,8 @@ extern "C" void stackchan_nvs_commit_observer(void);
 namespace stackchan::stage1 {
 namespace {
 std::atomic<bool> enabled{false};
+// Read by the audio/WebSocket task without touching Stage1's LVGL-owned clock.
+std::atomic<uint16_t> registered_wake_minute{6 * 60};
 std::atomic<bool> idle{false};
 std::atomic<bool> interrupted{false};
 std::atomic<bool> manual_motion{false};
@@ -956,6 +958,7 @@ void Start() {
     CancelDreamRemark();
     r = Runtime{};
     const Config config = LoadConfig();
+    registered_wake_minute.store(config.wake_minute, std::memory_order_release);
     if (!r.schedule.SetConfig(config)) {
         ESP_LOGE(LOG_TAG, "stage-1 config rejected; using defaults");
     }
@@ -1014,6 +1017,7 @@ bool SetConfig(const Config& config) {
     if (!ValidConfig(config)) return false;
     if (!SaveConfig(config)) return false;
     if (!r.schedule.SetConfig(config)) return false;
+    registered_wake_minute.store(config.wake_minute, std::memory_order_release);
     // Saving settings is not user activity; keep the current scene intact.
     ESP_LOGI(LOG_TAG, "stage-1 config saved and applied");
     return true;
@@ -1354,4 +1358,25 @@ void Update(StackChan& sc) {
     r.SyncWeather(sc, now, r.own_face || Runtime::Sleeping(state.phase));
 }
 
+// Called by the firmware's existing WebSocket transport via a weak hook.
+// Schedule is defined by the registered local wake-up clock, not the time
+// the robot actually woke or whether a morning greeting was played.
+bool InRegisteredWakeWindow()
+{
+    if (!enabled.load(std::memory_order_acquire)) return false;
+    const std::time_t now = std::time(nullptr);
+    if (now < 1700000000) return false;
+    std::tm local{};
+    if (!localtime_r(&now, &local) || local.tm_year < 124) return false;
+    constexpr int kDaySeconds = 24 * 60 * 60;
+    constexpr int kGroggySeconds = 15 * 60;
+    const int current_second = local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec;
+    const int wake_second = registered_wake_minute.load(std::memory_order_acquire) * 60;
+    return (current_second - wake_second + kDaySeconds) % kDaySeconds < kGroggySeconds;
+}
 } // namespace stackchan::stage1
+
+extern "C" bool stackchan_wake_groggy_active()
+{
+    return stackchan::stage1::InRegisteredWakeWindow();
+}
