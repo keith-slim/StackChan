@@ -1158,8 +1158,7 @@ void Update(StackChan& sc) {
     // While sleeping, the quiet mark is part of the rest face and must not
     // disappear just because an announcement/transport becomes busy.
     // Explicit wake and conversation still control their own overlay.
-    const bool quiet_sleep = quiet_mode::Active() && !voice::IsBusy() &&
-                             Runtime::Sleeping(r.phase) &&
+    const bool quiet_sleep = quiet_mode::Active() && Runtime::Sleeping(r.phase) &&
                              !wake_sequence_active.load();
     if (!quiet_sleep &&
         (!quiet_mode::Active() || !idle.load() || voice::IsBusy() ||
@@ -1342,7 +1341,7 @@ void Update(StackChan& sc) {
     // original rule: hide during conversation, actions and playback.
     // Render after face updates so it follows the real mouth position.
     const bool quiet_active = quiet_mode::Active();
-    const bool sleeping_quiet = quiet_active && !voice::IsBusy() && Runtime::Sleeping(state.phase) &&
+    const bool sleeping_quiet = quiet_active && Runtime::Sleeping(state.phase) &&
                                 !wake_sequence_active.load();
     r.SyncQuietMark(sc, sleeping_quiet ||
         (quiet_active && standby && !r.cue_active &&
