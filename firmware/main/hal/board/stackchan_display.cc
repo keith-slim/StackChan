@@ -342,7 +342,8 @@ void StackChanAvatarDisplay::SetupUI()
             self->is_sleeping_));
         if (!decision.audio_finished) return;
         self->EndWakeFaceSmile();
-        if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_) {
+        if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_ ||
+            self->speech_emotion_active_) {
             ESP_LOGW(TAG, "[IDLE_RECOVERY] completing missed speech end (mouth=%d subtitle=%d)",
                      self->speaking_modifier_id_ >= 0, self->subtitle_speaking_);
             self->FinishSpeakingAnimation();
@@ -497,6 +498,7 @@ void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
 
     auto& sc = GetStackChan();
     if (!idle) {
+        idle_non_neutral_pending_ = false;
         if (idle_motion_modifier_id_ >= 0) {
             sc.removeModifier(idle_motion_modifier_id_);
             idle_motion_modifier_id_ = -1;
@@ -506,6 +508,31 @@ void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
             idle_expression_modifier_id_ = -1;
         }
         return;
+    }
+    // Recover any residual expression, not just Doubt. A newly restored
+    // idle lifecycle has no speech/scene owner. During established idle,
+    // allow temporary head-pet reactions (existing 12s failsafe) to finish
+    // before clearing a stuck expression. IMU/locked faces are excluded.
+    const bool new_idle_expression = idle_expression_modifier_id_ < 0 ||
+        !sc.getModifier(idle_expression_modifier_id_);
+    if (sc.avatar().isModifyLocked() || sc.avatar().getEmotion() == Emotion::Neutral) {
+        idle_non_neutral_pending_ = false;
+    } else {
+        const uint32_t now = GetHAL().millis();
+        if (!idle_non_neutral_pending_) {
+            idle_non_neutral_since_ = now;
+            idle_non_neutral_pending_ = true;
+        }
+        if (new_idle_expression || now - idle_non_neutral_since_ >= 15000) {
+            sc.prepareFaceTakeover();
+            sc.avatar().setEmotion(Emotion::Neutral);
+            sc.avatar().leftEye().setSize(0);
+            sc.avatar().rightEye().setSize(0);
+            if (auto* blink = static_cast<BlinkModifier*>(sc.getModifier(blink_modifier_id_)))
+                blink->resyncEyeWeights();
+            idle_non_neutral_pending_ = false;
+            ESP_LOGI(TAG, "[IDLE_RECOVERY] residual expression restored to neutral");
+        }
     }
     // The two modifiers have independent lifetimes (including when the
     // configured motion level is zero). Never infer one from the other.
