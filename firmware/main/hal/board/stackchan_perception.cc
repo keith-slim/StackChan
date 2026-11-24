@@ -198,12 +198,27 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             (!conversation_seen && tracking_elapsed_ms >= kTrackingStartGraceMs))
             break;
 
+        // Keep audio transport bandwidth available during playback and
+        // avoid tracking a deliberately moving expression pose.
+        if (state == kDeviceStateSpeaking || stackchan::stage1::IsSpeechTrackingPaused()) {
+            face_filter_initialized = false;
+            face_center_locked = false;
+            centered_frames = 0;
+            face_missing_frames = 0;
+            vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
+            continue;
+        }
+
         float center_x = 0.5f;
         float center_y = 0.5f;
         float score    = 0.0f;
         float body_target_y = 0.5f;
         float body_score    = 0.0f;
-        if (PostVision(center_x, center_y, score, body_target_y, body_score) && score >= kMinimumFaceScore) {
+        const bool face_detected = PostVision(center_x, center_y, score, body_target_y, body_score);
+        // A request already in flight may complete after speech starts.
+        if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking ||
+            stackchan::stage1::IsSpeechTrackingPaused()) continue;
+        if (face_detected && score >= kMinimumFaceScore) {
             person_missing_logged = false;
             face_missing_frames   = 0;
             if (!wake_face_smile_shown && display_ && !stop_requested_.load(std::memory_order_acquire))

@@ -58,6 +58,7 @@ std::atomic<int> perception_yaw_delta{0};
 std::atomic<int> perception_pitch_delta{0};
 std::atomic<uint32_t> perception_requested_at{0};
 std::atomic<bool> perception_look_pending{false};
+std::atomic<bool> speech_tracking_paused{false};
 // LVGL is owned by Update(). Head pad/voice tasks only set these flags.
 std::atomic<uint8_t> wake_intents{0}; // touch=1, wake word=2
 std::atomic<bool> sleep_wake_eligible{false};
@@ -892,13 +893,14 @@ struct SpeechEffectsRuntime {
     bool MotionAvailable(StackChan& sc) {
         auto& motion = sc.motion();
         if (speech_motion_epoch.load() != motion_epoch || r.cue_active ||
-            queued_cue.load() >= 0 || perception_look_pending.load() ||
+            queued_cue.load() >= 0 ||
             !SceneAvailable() || r.own_neck || motion.isModifyLocked() || sc.avatar().isModifyLocked() ||
-            yaw_revision != motion.yawServo().getCommandRevision() ||
-            pitch_revision != motion.pitchServo().getCommandRevision()) {
+            (owns_neck && (yaw_revision != motion.yawServo().getCommandRevision() ||
+                           pitch_revision != motion.pitchServo().getCommandRevision()))) {
             // A newer owner must never be undone by a delayed speech restore.
             motion_blocked = true;
             owns_neck = false;
+            speech_tracking_paused.store(false);
         }
         return !motion_blocked;
     }
@@ -925,17 +927,16 @@ struct SpeechEffectsRuntime {
             auto& motion = sc.motion();
             if (preset.speed == 0) {
                 if (owns_neck && !at_origin) Target(sc, 0, 0, 200);
-            } else if (owns_neck || !motion.isMoving()) {
+            } else {
                 if (!owns_neck) {
+                    speech_tracking_paused.store(true);
+                    perception_look_pending.store(false);
                     origin = motion.getCurrentAngles();
                     owns_neck = true;
                     yaw_revision = motion.yawServo().getCommandRevision();
                     pitch_revision = motion.pitchServo().getCommandRevision();
                 }
                 Target(sc, preset.yaw, preset.pitch, preset.speed);
-            } else {
-                // Do not steal a neck already moving for another owner.
-                motion_blocked = true;
             }
         }
         ESP_LOGI(LOG_TAG, "[EMOTION_EFFECT] emotion=%d rgb=%u,%u,%u neck=%d",
@@ -945,9 +946,20 @@ struct SpeechEffectsRuntime {
     }
 
     void Tick(StackChan& sc, uint32_t now) {
-        if (!active || !MotionAvailable(sc) || !owns_neck) return;
+        if (!active || !owns_neck || !MotionAvailable(sc)) return;
+        const auto elapsed = now - changed_at;
+        // Release the tracking hold as soon as the finite gesture is done.
+        // The perception worker still avoids HTTP while audio is playing.
+        const uint32_t finish_ms = preset.shake ? 2400 : preset.happy_sway ? 1250 :
+            preset.nods ? preset.nods * 2 * preset.step_ms + 400 : 1200;
+        if (elapsed >= finish_ms) {
+            if (!at_origin) Target(sc, 0, 0, 200);
+            owns_neck = false;
+            speech_tracking_paused.store(false);
+            ESP_LOGI(LOG_TAG, "[EMOTION_EFFECT] gesture complete; tracking released");
+            return;
+        }
         if (preset.shake) {
-            const auto elapsed = now - changed_at;
             if (nod_step < 4 && elapsed >= (nod_step + 1) * kTestShakeStepMs) {
                 ++nod_step;
                 const auto target = TestShakeTarget(nod_step);
@@ -981,6 +993,8 @@ struct SpeechEffectsRuntime {
             if (speech_led_epoch.load() == led_epoch)
                 GetHAL().releaseConversationRgbColor();
         }
+        speech_tracking_paused.store(false);
+        perception_look_pending.store(false);
         *this = SpeechEffectsRuntime{};
     }
 };
@@ -1052,6 +1066,7 @@ void Start() {
     weather_changes = weather::Changes{};
     r = Runtime{};
     speech_effects = SpeechEffectsRuntime{};
+    speech_tracking_paused.store(false);
     const Config config = LoadConfig();
     registered_wake_minute.store(config.wake_minute, std::memory_order_release);
     if (!r.schedule.SetConfig(config)) {
@@ -1102,6 +1117,7 @@ void Stop() {
     r.ClearVisuals();
     r = Runtime{};
     speech_effects = SpeechEffectsRuntime{};
+    speech_tracking_paused.store(false);
     queued_cue.store(-1);
     owns_auto.store(false);
     manual_sleep_requested.store(false);
@@ -1257,6 +1273,8 @@ bool RequestCue(const char* id) {
     return false;
 }
 
+bool IsSpeechTrackingPaused() { return speech_tracking_paused.load(); }
+
 bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
 {
     constexpr int kMaxYawDelta   = 900;
@@ -1267,7 +1285,7 @@ bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
     perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
     perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
     perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
-    speech_motion_epoch.fetch_add(1);
+    if (speech_tracking_paused.load()) return false;
     perception_look_pending.store(true, std::memory_order_release);
     return true;
 }
@@ -1354,7 +1372,7 @@ void Update(StackChan& sc) {
         const bool expired = static_cast<uint32_t>(now - perception_requested_at.load()) > 3000;
         // Wake-triggered tracking is allowed to replace the wake animation's
         // neck target; sleep and explicit skits retain priority.
-        const bool motion_available = !r.cue_active && !Runtime::Sleeping(r.phase) &&
+        const bool motion_available = !speech_tracking_paused.load() && !r.cue_active && !Runtime::Sleeping(r.phase) &&
                                       !Runtime::SleepPreparing(r.phase);
         if (expired) {
             perception_look_pending.store(false, std::memory_order_release);
