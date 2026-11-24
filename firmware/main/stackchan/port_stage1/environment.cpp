@@ -21,6 +21,8 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <ctime>
+#include <mbedtls/base64.h>
 
 extern "C" void stackchan_nvs_commit_observer(void);
 
@@ -483,3 +485,74 @@ weather::Appearance ReadAppearance() {
 }
 
 } // namespace stackchan::stage1::environment
+
+ 
+// Called by Xiaozhi only when opening a new speech/conversation WebSocket.
+// Mirror S3-stackchan's reference context without a fetch, NVS read or
+// change to spoken prompts. Keep Japanese region/weather as reference data.
+extern "C" bool stackchan_ws_environment_context(char* output, size_t capacity) {
+    if (!output || capacity < 8) return false;
+    output[0] = '\0';
+    const auto snapshot = stackchan::stage1::environment::Read();
+
+    char date[160]{};
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+    if (now >= 1704067200 && localtime_r(&now, &local)) {
+        constexpr const char* weekdays[] = {
+            "日曜日", "月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日"
+        };
+        char timezone[48]{};
+        if (!std::strftime(timezone, sizeof(timezone), "%Z UTC%z", &local))
+            std::snprintf(timezone, sizeof(timezone), "本体ローカル時刻");
+        std::snprintf(date, sizeof(date),
+                      "日時：%d年%d月%d日 %d時%02d分%02d秒（%s）\n曜日：%s\n",
+                      local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+                      local.tm_hour, local.tm_min, local.tm_sec, timezone,
+                      weekdays[local.tm_wday]);
+    } else {
+        std::snprintf(date, sizeof(date), "日時：時刻が未同期です\n曜日：未取得です\n");
+    }
+
+    // Avoid allowing control characters in a configured or IP-derived region
+    // name to alter the structure of the reference information.
+    char region[sizeof(snapshot.region_name)]{};
+    size_t index = 0;
+    for (const unsigned char* src =
+             reinterpret_cast<const unsigned char*>(snapshot.region_name);
+         *src && index + 1 < sizeof(region); ++src) {
+        region[index++] = (*src < 0x20 || *src == 0x7f) ? ' ' : static_cast<char>(*src);
+    }
+
+    char weather[196]{};
+    if (snapshot.weather_valid) {
+        const auto condition = stackchan::stage1::weather::Classify(snapshot.condition_code);
+        std::snprintf(weather, sizeof(weather),
+                      "天気：%s%s、気温%.1f度、湿度%uパーセント（%llu分前に取得）\n",
+                      snapshot.weather_stale ? "前回の情報・最新情報は未取得：" : "",
+                      condition.description, snapshot.temperature_c,
+                      snapshot.humidity_percent,
+                      static_cast<unsigned long long>(snapshot.weather_age_minutes));
+    } else {
+        std::snprintf(weather, sizeof(weather), "天気：%s\n",
+                      snapshot.weather_key_set ? "まだ取得できていません" :
+                                                 "天気のAPIキーが未設定です");
+    }
+
+    char information[768]{};
+    const int length = std::snprintf(information, sizeof(information),
+                                     "%s地域：%s\n%s",
+                                     date, region[0] ? region : "未取得", weather);
+    if (length < 0 || static_cast<size_t>(length) >= sizeof(information))
+        return false;
+
+    size_t encoded = 0;
+    if (mbedtls_base64_encode(reinterpret_cast<unsigned char*>(output), capacity - 1,
+                              &encoded,
+                              reinterpret_cast<const unsigned char*>(information),
+                              static_cast<size_t>(length)) != 0 ||
+        encoded >= capacity)
+        return false;
+    output[encoded] = '\0';
+    return true;
+}
