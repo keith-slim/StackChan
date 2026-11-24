@@ -8,7 +8,7 @@
 #include <mutex>
 
 // One synchronized state for the 12 physical neck LEDs. Ordinary NeonLight
-// animations write the base layer. Conversation owns LED 0 only until another
+// animations write the base layer. Conversation owns all 12 LEDs until another
 // base writer takes it over; sleep blackout overrides every layer.
 namespace stackchan::led {
 struct Rgb {
@@ -27,7 +27,7 @@ public:
         if (index >= kCount) return;
         std::lock_guard<std::mutex> lock(mutex_);
         base_[index] = rgb;
-        if (index == 0) conversation_owned_ = false;
+        conversation_owned_ = false;
     }
 
     void SetConversation(Rgb rgb) {
@@ -54,7 +54,7 @@ public:
         bool dirty = false;
         for (unsigned i = 0; i < kCount; ++i) {
             const Rgb rgb = sleep_blackout_ ? Rgb{} :
-                (i == 0 && conversation_owned_ ? conversation_ : base_[i]);
+                (conversation_owned_ ? conversation_ : base_[i]);
             if (initialized_ && rgb == applied_[i]) continue;
             write(i, rgb.r, rgb.g, rgb.b);
             applied_[i] = rgb;

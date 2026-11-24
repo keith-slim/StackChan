@@ -233,7 +233,7 @@ public:
     void setRgbColor(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
     void showRgbColor(uint8_t r, uint8_t g, uint8_t b);
     void refreshRgb();
-    // Conversation LED 0 and sleep blackout are layers of the shared RGB controller.
+    // Conversation LEDs and sleep blackout are layers of the shared RGB controller.
     void setConversationRgbColor(uint8_t r, uint8_t g, uint8_t b);
     void releaseConversationRgbColor();
     void setSleepRgbBlackout(bool enabled);
