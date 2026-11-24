@@ -493,9 +493,22 @@ weather::Appearance ReadAppearance() {
 extern "C" bool stackchan_ws_environment_context(char* output, size_t capacity) {
     if (!output || capacity < 8) return false;
     output[0] = '\0';
-    const auto snapshot = stackchan::stage1::environment::Read();
-
-    char date[160]{};
+    // Format into PSRAM so the WebSocket handshake thread keeps stack headroom.
+    struct Scratch {
+        stackchan::stage1::environment::Snapshot snapshot;
+        char date[160]{};
+        char region[260]{};
+        char weather[196]{};
+        char information[768]{};
+    };
+    auto scratch = std::unique_ptr<Scratch, decltype(&heap_caps_free)>(
+        static_cast<Scratch*>(heap_caps_calloc(1, sizeof(Scratch),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+        heap_caps_free);
+    if (!scratch) return false;
+    scratch->snapshot = stackchan::stage1::environment::Read();
+    const auto& snapshot = scratch->snapshot;
+    auto& date = scratch->date;
     const std::time_t now = std::time(nullptr);
     std::tm local{};
     if (now >= 1704067200 && localtime_r(&now, &local)) {
@@ -516,7 +529,7 @@ extern "C" bool stackchan_ws_environment_context(char* output, size_t capacity) 
 
     // Avoid allowing control characters in a configured or IP-derived region
     // name to alter the structure of the reference information.
-    char region[sizeof(snapshot.region_name)]{};
+    auto& region = scratch->region;
     size_t index = 0;
     for (const unsigned char* src =
              reinterpret_cast<const unsigned char*>(snapshot.region_name);
@@ -524,7 +537,7 @@ extern "C" bool stackchan_ws_environment_context(char* output, size_t capacity) 
         region[index++] = (*src < 0x20 || *src == 0x7f) ? ' ' : static_cast<char>(*src);
     }
 
-    char weather[196]{};
+    auto& weather = scratch->weather;
     if (snapshot.weather_valid) {
         const auto condition = stackchan::stage1::weather::Classify(snapshot.condition_code);
         std::snprintf(weather, sizeof(weather),
@@ -539,7 +552,7 @@ extern "C" bool stackchan_ws_environment_context(char* output, size_t capacity) 
                                                  "天気のAPIキーが未設定です");
     }
 
-    char information[768]{};
+    auto& information = scratch->information;
     const int length = std::snprintf(information, sizeof(information),
                                      "%s地域：%s\n%s",
                                      date, region[0] ? region : "未取得", weather);
