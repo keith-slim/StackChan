@@ -100,6 +100,7 @@ void Servo::moveWithSpeed(int angle, int speed)
 
 void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
 {
+    _command_revision.fetch_add(1, std::memory_order_relaxed);
     const bool was_moving = isMoving();
     const int current = uitk::clamp(getCurrentAngle(), _angle_limit.x, _angle_limit.y);
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
@@ -113,6 +114,7 @@ void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
 
 void Servo::cancelTimedMove()
 {
+    _command_revision.fetch_add(1, std::memory_order_relaxed);
     _timed_move.Cancel(); // Last commanded position remains; no stale spring target.
 }
 

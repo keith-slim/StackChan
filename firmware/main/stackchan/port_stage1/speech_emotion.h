@@ -18,7 +18,9 @@ inline bool SpeechEmotionFromText(const char* text, avatar::Emotion& result)
     };
     // Match S3's intentionally narrow rules: questions by themselves do not
     // imply doubt, and ordinary statements must not switch expressions.
-    if (contains({"ぷんぷん", "許せない", "腹が立", "怒って", "怒った"})) {
+    if (contains({"びっくり", "驚いた", "驚きました"})) {
+        result = avatar::Emotion::Surprise;
+    } else if (contains({"ぷんぷん", "許せない", "腹が立", "怒って", "怒った"})) {
         result = avatar::Emotion::Angry;
     } else if (contains({"悲しい", "悲しく", "寂しい", "寂しく", "残念", "つらい", "ごめん"})) {
         result = avatar::Emotion::Sad;

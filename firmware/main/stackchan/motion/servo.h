@@ -7,6 +7,7 @@
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
 #include <cstdint>
+#include <atomic>
 #include "timed_servo_move.h"
 
 namespace stackchan::motion {
@@ -58,6 +59,9 @@ public:
     // One physical position sync at entry, then direct timed setpoints.
     void moveWithDuration(int angle, uint32_t duration_ms, uint32_t now);
     void cancelTimedMove();
+    // An expression may restore only a target it still owns. This revision
+    // changes on external commands, cancellation and stall protection.
+    uint32_t getCommandRevision() const { return _command_revision.load(std::memory_order_relaxed); }
 
     /**
      * @brief Rotate servo with given velocity
@@ -175,6 +179,7 @@ protected:
     uitk::Vector2i _angle_limit;
     uitk::AnimateValue _angle_anim;
     TimedServoMove _timed_move;
+    std::atomic<uint32_t> _command_revision{0};
 
     uint32_t _last_tick               = 0;
     uint32_t _last_torque_check_tick  = 0;

@@ -26,3 +26,8 @@ add_executable(event_timer_test event_timer_test.cpp)
 target_include_directories(event_timer_test PRIVATE ../main)
 target_compile_features(event_timer_test PRIVATE cxx_std_17)
 add_test(NAME event_timer_test COMMAND $<TARGET_FILE:event_timer_test>)
+
+add_executable(speech_effects_test speech_effects_test.cpp)
+target_include_directories(speech_effects_test PRIVATE ../main)
+target_compile_features(speech_effects_test PRIVATE cxx_std_17)
+add_test(NAME speech_effects_test COMMAND $<TARGET_FILE:speech_effects_test>)

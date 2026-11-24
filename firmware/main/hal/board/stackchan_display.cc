@@ -442,6 +442,7 @@ void StackChanAvatarDisplay::FinishSpeakingAnimation()
     // One speech-end path for normal status changes and idle recovery.
     auto& stackchan = GetStackChan();
     auto& avatar = stackchan.avatar();
+    stackchan::stage1::EndSpeechEffects(stackchan);
     if (stackchan::stage1::IsNapSleepActive() &&
         !stackchan::stage1::IsWakeSequenceActive()) {
         avatar.setEmotion(Emotion::Sleepy);
@@ -570,8 +571,12 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     // A connecting/listening state often sets neutral immediately after a
     // wake word. Do not erase the S3 startled wake animation in that window.
     if (!stackchan::stage1::IsWakeSequenceActive() &&
-        !Application::GetInstance().IsAnnouncementActive())
-        stackchan::stage1::CancelForExternalChange(stackchan, "set_emotion");
+        !Application::GetInstance().IsAnnouncementActive()) {
+        if (speech_conversation_running_)
+            stackchan::stage1::PrepareSpeechExpression(stackchan, "set_emotion");
+        else
+            stackchan::stage1::CancelForExternalChange(stackchan, "set_emotion");
+    }
     // A temporary head-pet/shake must not outlive an explicit speech emotion.
     stackchan.prepareFaceTakeover();
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
@@ -589,6 +594,8 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
         avatar.setEmotion(Emotion::Happy);
     } else if (strcmp(emotion, "laughing") == 0) {
         avatar.setEmotion(Emotion::Fun);
+    } else if (strcmp(emotion, "surprised") == 0) {
+        avatar.setEmotion(Emotion::Surprise);
     } else if (strcmp(emotion, "angry") == 0) {
         avatar.setEmotion(Emotion::Angry);
     } else if (strcmp(emotion, "sad") == 0) {
@@ -628,6 +635,9 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
         }
         speech_emotion_explicit_ = true;
         ESP_LOGI(TAG, "[EMOTION] explicit=%s", emotion);
+        if (!stackchan::stage1::IsWakeSequenceActive() &&
+            !stackchan::stage1::IsSleepSceneActive())
+            stackchan::stage1::UpdateSpeechEffects(stackchan, avatar.getEmotion());
     }
 
     // Resync blink modifier base eye weights
@@ -877,7 +887,7 @@ void StackChanAvatarDisplay::SetChatMessage(
             avatar::Emotion inferred;
             if (stackchan::stage1::SpeechEmotionFromText(content, inferred) &&
                 stackchan.avatar().getEmotion() != inferred) {
-                stackchan::stage1::CancelForExternalChange(stackchan, "text_emotion_fallback");
+                stackchan::stage1::PrepareSpeechExpression(stackchan, "text_emotion_fallback");
                 stackchan.prepareFaceTakeover();
                 if (!speech_emotion_active_) {
                     speech_emotion_before_ = stackchan.avatar().getEmotion();
@@ -887,6 +897,7 @@ void StackChanAvatarDisplay::SetChatMessage(
                 if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
                     blink->resyncEyeWeights();
                 ESP_LOGI(TAG, "[EMOTION] S3 text fallback=%d", static_cast<int>(inferred));
+                stackchan::stage1::UpdateSpeechEffects(stackchan, inferred);
             }
         }
 
@@ -1098,8 +1109,12 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // The boot notice must not be interpreted as a wake-word event, nor
     // reset an active night/nap scene just because its speech socket opens.
     if (strcmp(status, Lang::Strings::STANDBY) != 0 && !wake_visual &&
-        !standalone_speech)
-        stackchan::stage1::CancelForExternalChange(stackchan, "display_status");
+        !standalone_speech) {
+        if (strcmp(status, Lang::Strings::SPEAKING) == 0)
+            stackchan::stage1::PrepareSpeechExpression(stackchan, "display_status");
+        else
+            stackchan::stage1::CancelForExternalChange(stackchan, "display_status");
+    }
     if (strcmp(status, Lang::Strings::STANDBY) != 0)
         startup_hint_text_.clear();
 
@@ -1109,6 +1124,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         FinishSpeakingAnimation();
+        stackchan::stage1::BeginSpeechTurn(stackchan);
 
         GetHAL().setConversationRgbColor(0, 50, 0);
 
@@ -1147,7 +1163,12 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
                 std::make_unique<SpeakingModifier>(0, 180, false, true));
         }
 
-        GetHAL().setConversationRgbColor(0, 0, 50);
+        if (!wake_visual && !stackchan::stage1::IsSleepSceneActive() &&
+            (!standalone_speech || !stackchan::stage1::IsAutonomousSceneActive()))
+            stackchan::stage1::StartSpeechEffects(stackchan, speech_emotion_active_ ?
+                avatar.getEmotion() : Emotion::Neutral);
+        else
+            GetHAL().setConversationRgbColor(0, 0, 50);
     } else if (!preserve_touch_caption &&
                !(standalone_speech && strcmp(status, Lang::Strings::CONNECTING) == 0)) {
         avatar.setSpeech(status);

@@ -99,7 +99,12 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
         }
     };
 
+    // Reset the extra size only when leaving the new surprise expression.
+    const bool was_surprise = _size == 60;
+    if (emotion == Emotion::Surprise) setSize(60);
+    else if (was_surprise) setSize(0);
     switch (emotion) {
+        case Emotion::Surprise:
         case Emotion::Neutral:
             apply_style(100, 0);
             break;

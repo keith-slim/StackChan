@@ -15,6 +15,7 @@
 #include "environment.h"
 #include "weather_face.h"
 #include "weather_changes.h"
+#include "speech_effects.h"
 #include <stackchan/avatar/skins/default/default.h>
 #include <stackchan/avatar/face_snapshot.h>
 #include <application.h>
@@ -45,6 +46,10 @@ std::atomic<bool> idle{false};
 std::atomic<bool> interrupted{false};
 std::atomic<bool> manual_motion{false};
 std::atomic<bool> manual_led{false};
+// Keep manual/explicit requests newer than the current speech turn visible
+// even after Update consumes the original one-shot interruption flags.
+std::atomic<uint32_t> speech_motion_epoch{0};
+std::atomic<uint32_t> speech_led_epoch{0};
 std::atomic<bool> owns_auto{false};
 std::atomic<int> queued_cue{-1};
 std::atomic<bool> manual_sleep_requested{false};
@@ -788,13 +793,13 @@ struct Runtime {
         };
         switch (request) {
         // Both actions return to the same position they started at.
-        case Cue::Nod: preset(0,-200,285,avatar::Emotion::Neutral,40,50,70); break;
-        case Cue::ShakeHead: preset(-125,0,320,avatar::Emotion::Doubt,50,50,60); break;
-        case Cue::TiltHead: preset(120,0,150,avatar::Emotion::Doubt,75,65,35); break;
-        case Cue::Happy: preset(-90,55,180,avatar::Emotion::Happy,110,30,65); break;
+        case Cue::Nod: preset(kTestNod.yaw,kTestNod.pitch,kTestNod.speed,avatar::Emotion::Neutral,40,50,70); break;
+        case Cue::ShakeHead: preset(kTestShakeLeft.yaw,kTestShakeLeft.pitch,kTestShakeLeft.speed,avatar::Emotion::Doubt,50,50,60); break;
+        case Cue::TiltHead: preset(kTestTilt.yaw,kTestTilt.pitch,kTestTilt.speed,avatar::Emotion::Doubt,75,65,35); break;
+        case Cue::Happy: preset(kTestHappy.yaw,kTestHappy.pitch,kTestHappy.speed,avatar::Emotion::Happy,110,30,65); break;
         case Cue::Surprise:
             // Fast upward startle; clamp in MoveRelative protects the neck.
-            preset(0,200,510,avatar::Emotion::Neutral,100,100,100);
+            preset(kTestSurprise.yaw,kTestSurprise.pitch,kTestSurprise.speed,avatar::Emotion::Neutral,100,100,100);
             if (own_face) {
                 // S3 AvatarRestPose::Startled: crossed eyes, sweat and
                 // dedicated mouth. Hide the normal face underneath it.
@@ -809,7 +814,7 @@ struct Runtime {
                 rest->Render(AvatarRestPose::Startled, false, 0, 0);
             }
             break;
-        case Cue::Shy: preset(110,-30,140,avatar::Emotion::Happy,90,35,55); break;
+        case Cue::Shy: preset(kTestShy.yaw,kTestShy.pitch,kTestShy.speed,avatar::Emotion::Happy,90,35,55); break;
         default: break;
         }
     }
@@ -818,18 +823,10 @@ struct Runtime {
         auto& motion = sc.motion();
         if (cue == Cue::ShakeHead) {
             // Two complete left/right sweeps, then the exact starting target.
-            if (cue_step == 0 && elapsed >= 420) {
-                motion.moveRelativeFrom(saved_angles, 125, 0, 320);
-                cue_step = 1;
-            } else if (cue_step == 1 && elapsed >= 840) {
-                motion.moveRelativeFrom(saved_angles, -125, 0, 320);
-                cue_step = 2;
-            } else if (cue_step == 2 && elapsed >= 1260) {
-                motion.moveRelativeFrom(saved_angles, 125, 0, 320);
-                cue_step = 3;
-            } else if (cue_step == 3 && elapsed >= 1680) {
-                motion.moveRelativeFrom(saved_angles, 0, 0, 300);
-                cue_step = 4;
+            if (cue_step < 4 && elapsed >= (cue_step + 1) * kTestShakeStepMs) {
+                ++cue_step;
+                const auto target = TestShakeTarget(cue_step);
+                motion.moveRelativeFrom(saved_angles, target.yaw, target.pitch, target.speed);
             }
         } else if (cue == Cue::Nod) {
             // A deeper nod than the previous -80 unit movement.
@@ -839,7 +836,7 @@ struct Runtime {
             }
         } else if (cue_step == 0 && elapsed >= 400) {
             cue_step = 1;
-            if (cue == Cue::Happy) motion.moveRelativeFrom(saved_angles, 90, 55, 170);
+            if (cue == Cue::Happy) motion.moveRelativeFrom(saved_angles, kTestHappySecond.yaw, kTestHappySecond.pitch, kTestHappySecond.speed);
         }
         const uint32_t finish_ms =
             cue == Cue::ShakeHead ? 2400 :
@@ -862,6 +859,133 @@ struct Runtime {
     }
 };
 Runtime r;
+
+struct SpeechEffectsRuntime {
+    bool armed = false;
+    bool active = false;
+    bool has_emotion = false;
+    bool owns_neck = false;
+    bool motion_blocked = false;
+    bool at_origin = true;
+    avatar::Emotion emotion = avatar::Emotion::Neutral;
+    SpeechEffectPreset preset = SpeechEffectFor(avatar::Emotion::Neutral);
+    uitk::Vector2i origin{0, 0};
+    uint32_t motion_epoch = 0, led_epoch = 0;
+    uint32_t yaw_revision = 0, pitch_revision = 0;
+    uint32_t changed_at = 0;
+    unsigned nod_step = 0;
+
+    void Arm(StackChan& sc) {
+        *this = SpeechEffectsRuntime{};
+        armed = true;
+        motion_epoch = speech_motion_epoch.load();
+        led_epoch = speech_led_epoch.load();
+        yaw_revision = sc.motion().yawServo().getCommandRevision();
+        pitch_revision = sc.motion().pitchServo().getCommandRevision();
+    }
+
+    bool SceneAvailable() const {
+        return enabled.load() && !IsSleepSceneActive() && !IsWakeSequenceActive() &&
+               !r.own_face;
+    }
+
+    bool MotionAvailable(StackChan& sc) {
+        auto& motion = sc.motion();
+        if (speech_motion_epoch.load() != motion_epoch || r.cue_active ||
+            queued_cue.load() >= 0 || perception_look_pending.load() ||
+            !SceneAvailable() || r.own_neck || motion.isModifyLocked() || sc.avatar().isModifyLocked() ||
+            yaw_revision != motion.yawServo().getCommandRevision() ||
+            pitch_revision != motion.pitchServo().getCommandRevision()) {
+            // A newer owner must never be undone by a delayed speech restore.
+            motion_blocked = true;
+            owns_neck = false;
+        }
+        return !motion_blocked;
+    }
+
+    void Target(StackChan& sc, int yaw, int pitch, int speed) {
+        if (!MotionAvailable(sc)) return;
+        auto& motion = sc.motion();
+        motion.moveRelativeFrom(origin, yaw, pitch, speed);
+        yaw_revision = motion.yawServo().getCommandRevision();
+        pitch_revision = motion.pitchServo().getCommandRevision();
+        at_origin = yaw == 0 && pitch == 0;
+    }
+
+    void Set(StackChan& sc, avatar::Emotion next, uint32_t now) {
+        if (!active || (has_emotion && emotion == next)) return;
+        has_emotion = true;
+        emotion = next;
+        preset = SpeechEffectFor(next);
+        changed_at = now;
+        nod_step = 0;
+        if (speech_led_epoch.load() == led_epoch && SceneAvailable())
+            GetHAL().setConversationRgbColor(preset.red, preset.green, preset.blue);
+        if (MotionAvailable(sc)) {
+            auto& motion = sc.motion();
+            if (preset.speed == 0) {
+                if (owns_neck && !at_origin) Target(sc, 0, 0, 200);
+            } else if (owns_neck || !motion.isMoving()) {
+                if (!owns_neck) {
+                    origin = motion.getCurrentAngles();
+                    owns_neck = true;
+                    yaw_revision = motion.yawServo().getCommandRevision();
+                    pitch_revision = motion.pitchServo().getCommandRevision();
+                }
+                Target(sc, preset.yaw, preset.pitch, preset.speed);
+            } else {
+                // Do not steal a neck already moving for another owner.
+                motion_blocked = true;
+            }
+        }
+        ESP_LOGI(LOG_TAG, "[EMOTION_EFFECT] emotion=%d rgb=%u,%u,%u neck=%d",
+                 static_cast<int>(next), static_cast<unsigned>(preset.red),
+                 static_cast<unsigned>(preset.green), static_cast<unsigned>(preset.blue),
+                 owns_neck && !motion_blocked);
+    }
+
+    void Tick(StackChan& sc, uint32_t now) {
+        if (!active || !MotionAvailable(sc) || !owns_neck) return;
+        if (preset.shake) {
+            const auto elapsed = now - changed_at;
+            if (nod_step < 4 && elapsed >= (nod_step + 1) * kTestShakeStepMs) {
+                ++nod_step;
+                const auto target = TestShakeTarget(nod_step);
+                Target(sc, target.yaw, target.pitch, target.speed);
+            }
+            return;
+        }
+        if (preset.happy_sway) {
+            const auto elapsed = now - changed_at;
+            if (nod_step < 2 && elapsed >= 850) {
+                nod_step = 2;
+                Target(sc, 0, 0, 200);
+            } else if (nod_step == 0 && elapsed >= preset.step_ms) {
+                nod_step = 1;
+                Target(sc, kTestHappySecond.yaw, kTestHappySecond.pitch, kTestHappySecond.speed);
+            }
+            return;
+        }
+        if (!preset.nods) return;
+        const auto step = SpeechNodStep(preset.nods, now - changed_at, preset.step_ms);
+        if (step == nod_step) return;
+        nod_step = step;
+        const bool home = SpeechNodAtOrigin(step);
+        Target(sc, home ? 0 : preset.yaw, home ? 0 : preset.pitch, preset.speed);
+    }
+
+    void End(StackChan& sc) {
+        if (active) {
+            if (MotionAvailable(sc) && owns_neck && !at_origin)
+                Target(sc, 0, 0, 200);
+            if (speech_led_epoch.load() == led_epoch)
+                GetHAL().releaseConversationRgbColor();
+        }
+        *this = SpeechEffectsRuntime{};
+    }
+};
+SpeechEffectsRuntime speech_effects;
+
 void DreamRemarkTick(StackChan& sc, const State& state, uint32_t now, bool interrupted_by_user) {
     if (dream_remark.motif == avatar_dream::Motif::None) return;
     const bool greeting = Application::GetInstance().IsAnnouncementActive();
@@ -927,6 +1051,7 @@ void Start() {
     CancelDreamRemark();
     weather_changes = weather::Changes{};
     r = Runtime{};
+    speech_effects = SpeechEffectsRuntime{};
     const Config config = LoadConfig();
     registered_wake_minute.store(config.wake_minute, std::memory_order_release);
     if (!r.schedule.SetConfig(config)) {
@@ -976,6 +1101,7 @@ void Stop() {
     r.RestoreNightBacklight();
     r.ClearVisuals();
     r = Runtime{};
+    speech_effects = SpeechEffectsRuntime{};
     queued_cue.store(-1);
     owns_auto.store(false);
     manual_sleep_requested.store(false);
@@ -1058,13 +1184,36 @@ void CancelForExternalChange(StackChan& sc, const char* source) {
     interrupted.store(true); // Reset idle deadlines even if the caller is a touch event.
 }
 void NotifyManualMotion() {
+    speech_motion_epoch.fetch_add(1);
     if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=manual_motion");
     manual_motion.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true);
 }
 void NotifyManualLed() {
+    speech_led_epoch.fetch_add(1);
     if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=manual_led");
     manual_led.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true);
 }
+void PrepareSpeechExpression(StackChan& sc, const char* source) {
+    // An explicit voice gesture may arrive before the first TTS status or
+    // another emotion. Keep it queued/active while releasing the old face.
+    if (r.cue_active || queued_cue.load() >= 0) {
+        r.EndConversation(sc);
+        return;
+    }
+    CancelForExternalChange(sc, source);
+}
+void BeginSpeechTurn(StackChan& sc) { speech_effects.Arm(sc); }
+void StartSpeechEffects(StackChan& sc, avatar::Emotion emotion) {
+    if (speech_effects.active) return;
+    if (!speech_effects.armed) speech_effects.Arm(sc);
+    speech_effects.active = true;
+    speech_effects.Set(sc, emotion, GetHAL().millis());
+}
+void UpdateSpeechEffects(StackChan& sc, avatar::Emotion emotion) {
+    speech_effects.Set(sc, emotion, GetHAL().millis());
+}
+void EndSpeechEffects(StackChan& sc) { speech_effects.End(sc); }
+
 void SetConversationPose(StackChan& sc, ConversationPose pose) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     CancelDreamRemark();
@@ -1101,7 +1250,9 @@ bool RequestCue(const char* id) {
         if (std::strcmp(id, cue_names[i]) != 0) continue;
         int empty = -1;
         // Refuse overlapping requests rather than replacing a queued action.
-        return queued_cue.compare_exchange_strong(empty, i);
+        if (!queued_cue.compare_exchange_strong(empty, i)) return false;
+        speech_motion_epoch.fetch_add(1);
+        return true;
     }
     return false;
 }
@@ -1116,6 +1267,7 @@ bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
     perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
     perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
     perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
+    speech_motion_epoch.fetch_add(1);
     perception_look_pending.store(true, std::memory_order_release);
     return true;
 }
@@ -1223,6 +1375,12 @@ void Update(StackChan& sc) {
             // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
             motion.moveWithSpeed(yaw_target, pitch_target, 1000);
         }
+    }
+    if (speech_effects.active) {
+        if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking)
+            speech_effects.Tick(sc, now);
+        else
+            speech_effects.End(sc);
     }
     if (r.cue_active) {
         r.schedule.DiscardDueRandomEvents(now, esp_random());

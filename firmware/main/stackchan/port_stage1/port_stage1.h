@@ -3,6 +3,7 @@
 // under the existing LVGL lock through StackChan::update(). No new task.
 #include <cstdint>
 #include "stage1_clock.h"
+#include "../avatar/avatar/elements/emotion.h"
 
 namespace stackchan {
 class StackChan;
@@ -12,6 +13,12 @@ namespace stage1 {
 enum class ConversationPose : uint8_t { None, Listening, Thinking };
 void SetConversationPose(StackChan& stackchan, ConversationPose pose);
 void BeginListeningComplete(StackChan& stackchan);
+// Normal conversational speech only; all calls hold the existing display lock.
+void PrepareSpeechExpression(StackChan& stackchan, const char* source);
+void BeginSpeechTurn(StackChan& stackchan);
+void StartSpeechEffects(StackChan& stackchan, avatar::Emotion emotion);
+void UpdateSpeechEffects(StackChan& stackchan, avatar::Emotion emotion);
+void EndSpeechEffects(StackChan& stackchan);
 bool IsConversationFaceActive();
 Config GetConfig(); // Call under LVGL lock after Start().
 bool SetConfig(const Config& config); // Persist to NVS and apply; caller holds LVGL lock.
