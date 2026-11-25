@@ -1464,7 +1464,7 @@ void Update(StackChan& sc) {
                 ps.End(sc, false); // stall protection or another owner
             } else if (!ps.commanded) {
                 ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
-                search_motion.moveYawWithSpeed(ps.target, 1000);
+                search_motion.moveYawWithSpeed(ps.target, 500);
                 ps.revision = search_yaw.getCommandRevision();
                 ps.commanded = true;
                 ps.commanded_at = now;
