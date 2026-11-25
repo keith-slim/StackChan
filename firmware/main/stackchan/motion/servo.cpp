@@ -98,6 +98,16 @@ void Servo::moveWithSpeed(int angle, int speed)
     moveWithSpringParams(angle, spring_options.stiffness, spring_options.damping);
 }
 
+void Servo::moveDirect(int angle)
+{
+    cancelTimedMove();
+    angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
+    _angle_anim.teleport(angle);
+    _snap_to_target_on_rest = false;
+    if (!_torque_commanded_enabled) setTorqueEnabled(true);
+    set_angle_impl(angle);
+}
+
 void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
 {
     _command_revision.fetch_add(1, std::memory_order_relaxed);

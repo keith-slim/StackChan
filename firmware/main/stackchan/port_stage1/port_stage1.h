@@ -50,7 +50,7 @@ void StopPersonSearch();
 bool IsPersonSearchActive();
 bool IsPersonSearchStopping();
 bool IsSpeechTrackingPaused(); // Lock-free for perception worker.
-bool RequestPerceptionLook(int yaw_delta, int pitch_delta);  // 0.1-degree units.
+bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool direct = false);  // 0.1-degree units.
 void Update(StackChan& stackchan);
 } // namespace stage1
 } // namespace stackchan

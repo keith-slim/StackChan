@@ -55,6 +55,8 @@ public:
      * @param speed (0-1000)
      */
     void moveWithSpeed(int angle, int speed);
+    // Immediate position command using the existing hardware safety path.
+    void moveDirect(int angle);
 
     // One physical position sync at entry, then direct timed setpoints.
     void moveWithDuration(int angle, uint32_t duration_ms, uint32_t now);
