@@ -6,6 +6,8 @@
 #include "motion.h"
 #include "motion_math.h"
 #include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
+#include <esp_heap_caps.h>
 #include <freertos/task.h>
 #include <esp_log.h>
 
@@ -18,9 +20,10 @@ void Motion::init()
     _pitch_servo->init();
     _worker_stop.store(false);
     _worker_running.store(true);
-    if (xTaskCreate(UpdateWorker, "servo_update", 4096, this, 2, nullptr) != pdPASS) {
+    if (xTaskCreateWithCaps(UpdateWorker, "servo_update", 4096, this, 2, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         _worker_running.store(false);
-        ESP_LOGW("Motion", "Servo task allocation failed; using existing update path");
+        ESP_LOGW("Motion", "Servo PSRAM task allocation failed; using existing update path");
     }
 }
 
@@ -39,7 +42,7 @@ void Motion::UpdateWorker(void* arg)
         vTaskDelayUntil(&next, pdMS_TO_TICKS(20));
     }
     self->_worker_running.store(false);
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 void Motion::update()
