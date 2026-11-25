@@ -32,7 +32,7 @@ constexpr int kTrackingStartGraceMs   = 3000;
 constexpr int kTrackingMaxMs          = 5 * 60 * 1000;
 constexpr float kMinimumDoaConfidence = 0.04f;
 constexpr float kMinimumFaceScore     = 0.55f;
-constexpr float kMinimumBodyScore     = 0.35f;
+constexpr float kMinimumBodyScore     = 0.50f;
 
 std::string Endpoint(const char* path)
 {
