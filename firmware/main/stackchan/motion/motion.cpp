@@ -63,10 +63,10 @@ void Motion::moveWithSpeed(int yawAngle, int pitchAngle, int speed)
     _pitch_servo->moveWithSpeed(pitchAngle, speed);
 }
 
-void Motion::moveDirect(int yawAngle, int pitchAngle)
+void Motion::moveDirect(int yawAngle, int pitchAngle, int speed)
 {
-    _yaw_servo->moveDirect(yawAngle);
-    _pitch_servo->moveDirect(pitchAngle);
+    _yaw_servo->moveDirect(yawAngle, speed);
+    _pitch_servo->moveDirect(pitchAngle, speed);
 }
 
 void Motion::moveWithDuration(int yawAngle, int pitchAngle, uint32_t duration_ms, uint32_t now)

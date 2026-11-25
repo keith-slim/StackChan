@@ -94,7 +94,7 @@ public:
      * @param speed (0-1000)
      */
     void moveWithSpeed(int yawAngle, int pitchAngle, int speed);
-    void moveDirect(int yawAngle, int pitchAngle);
+    void moveDirect(int yawAngle, int pitchAngle, int speed);
 
     void moveWithDuration(int yawAngle, int pitchAngle, uint32_t duration_ms, uint32_t now);
     void cancelTimedMove();

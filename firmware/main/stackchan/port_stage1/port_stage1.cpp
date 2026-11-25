@@ -1527,7 +1527,7 @@ void Update(StackChan& sc) {
                      pitch_target);
             // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
             if (perception_look_direct.load(std::memory_order_relaxed)) {
-                motion.moveDirect(yaw_target, pitch_target);
+                motion.moveDirect(yaw_target, pitch_target, 300);
             } else {
                 motion.moveWithSpeed(yaw_target, pitch_target, 1000);
             }
