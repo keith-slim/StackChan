@@ -1333,7 +1333,7 @@ bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool direct)
     constexpr int kMaxPitchDelta = 450;
     yaw_delta                    = std::clamp(yaw_delta, -kMaxYawDelta, kMaxYawDelta);
     pitch_delta                  = std::clamp(pitch_delta, -kMaxPitchDelta, kMaxPitchDelta);
-    if (yaw_delta == 0 && pitch_delta == 0) return false;
+    if (yaw_delta == 0 && pitch_delta == 0 && !direct) return false;
     perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
     perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
     perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
@@ -1527,7 +1527,17 @@ void Update(StackChan& sc) {
                      pitch_target);
             // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
             if (perception_look_direct.load(std::memory_order_relaxed)) {
-                motion.moveDirect(yaw_target, pitch_target, 300);
+                // Follow a bounded correction over the existing camera frame interval.
+                // SCS position mode supports a travel time; do not use unbounded PWM.
+                constexpr int kFaceMaxSpeed = 300;
+                constexpr uint32_t kFaceFrameMs = 250;
+                const int distance = std::max(std::abs(yaw_target - yaw_before),
+                                              std::abs(pitch_target - pitch_before));
+                // 0.3125 degrees per raw step, angle units are tenths of a degree.
+                const uint32_t speed_limited_ms =
+                    (static_cast<uint32_t>(distance) * 320 + kFaceMaxSpeed - 1) / kFaceMaxSpeed;
+                const uint32_t duration = std::max(kFaceFrameMs, speed_limited_ms);
+                motion.moveDirect(yaw_target, pitch_target, kFaceMaxSpeed, distance == 0 ? 0 : duration);
             } else {
                 motion.moveWithSpeed(yaw_target, pitch_target, 1000);
             }

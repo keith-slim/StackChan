@@ -10,6 +10,7 @@
 #include <mooncake_log.h>
 #include <settings.h>
 #include <mutex>
+#include <algorithm>
 
 using namespace smooth_ui_toolkit;
 using namespace stackchan::motion;
@@ -78,9 +79,9 @@ public:
         write_angle(angle, 20, 0);
     }
 
-    void set_direct_angle_impl(int angle, int speed) override
+    void set_direct_angle_impl(int angle, int speed, uint32_t duration_ms) override
     {
-        write_angle(angle, 0, speed);
+        write_angle(angle, static_cast<int>(std::min<uint32_t>(duration_ms, 65535)), speed);
     }
 
     void write_angle(int angle, int time, int speed)

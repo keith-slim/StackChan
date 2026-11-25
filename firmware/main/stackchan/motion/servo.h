@@ -56,7 +56,7 @@ public:
      */
     void moveWithSpeed(int angle, int speed);
     // Immediate position command using the existing hardware safety path.
-    void moveDirect(int angle, int speed);
+    void moveDirect(int angle, int speed, uint32_t duration_ms = 0);
 
     // One physical position sync at entry, then direct timed setpoints.
     void moveWithDuration(int angle, uint32_t duration_ms, uint32_t now);
@@ -172,7 +172,7 @@ protected:
      * @param angle
      */
     virtual void set_angle_impl(int angle) = 0;
-    virtual void set_direct_angle_impl(int angle, int speed) { set_angle_impl(angle); }
+    virtual void set_direct_angle_impl(int angle, int speed, uint32_t duration_ms) { set_angle_impl(angle); }
     virtual bool is_moving_impl()
     {
         return false;
