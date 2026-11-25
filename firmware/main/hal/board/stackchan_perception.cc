@@ -119,6 +119,7 @@ void StackChanPerception::OnWakeWordDetected()
         return;
     }
     stop_requested_.store(false, std::memory_order_release);
+    stackchan::stage1::RequestWakeSearchPitch();
     // Only an actual wake from idle can start a pre-conversation greeting.
     if (display_ && Application::GetInstance().GetDeviceState() == kDeviceStateIdle)
         display_->ArmWakeFaceSmile();
@@ -134,6 +135,7 @@ void StackChanPerception::OnWakeWordDetected()
 void StackChanPerception::OnConversationEnded()
 {
     stop_requested_.store(true, std::memory_order_release);
+    stackchan::stage1::StopPersonSearch();
     ESP_LOGI(kTag, "Conversation ended; stopping face tracking");
 }
 

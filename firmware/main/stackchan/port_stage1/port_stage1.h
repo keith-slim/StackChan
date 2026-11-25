@@ -44,6 +44,7 @@ bool RequestCue(const char* id); // Validated named action; future Live integrat
 bool RequestSleep(); // Queue manual sleep until active speech/conversation drains.
 // Queue a bounded relative neck correction from Xavier perception. The actual
 // servo write is serialized by Update() under the existing LVGL/motion lock.
+void RequestWakeSearchPitch(); // Queue absolute 10-degree pitch once per wake.
 void StartPersonSearch(int yaw_delta);
 void StopPersonSearch();
 bool IsPersonSearchActive();

@@ -64,6 +64,7 @@ std::atomic<uint32_t> search_start_epoch{0};
 std::atomic<int> search_start{0}; // signed DOA in tenths of degrees, 1001 = zero
 std::atomic<bool> search_cancel{false};
 std::atomic<bool> search_active{false};
+std::atomic<bool> wake_pitch_pending{false};
 struct PersonSearch {
     enum Phase { First = 1, Reverse, Return };
     Phase phase = First;
@@ -1096,6 +1097,7 @@ void Start() {
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
     search_start.store(0); search_cancel.store(false); search_active.store(false);
+    wake_pitch_pending.store(false);
     const Config config = LoadConfig();
     registered_wake_minute.store(config.wake_minute, std::memory_order_release);
     if (!r.schedule.SetConfig(config)) {
@@ -1149,6 +1151,7 @@ void Stop() {
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
     search_start.store(0); search_cancel.store(false); search_active.store(false);
+    wake_pitch_pending.store(false);
     queued_cue.store(-1);
     owns_auto.store(false);
     manual_sleep_requested.store(false);
@@ -1306,6 +1309,7 @@ bool RequestCue(const char* id) {
 }
 
 bool IsSpeechTrackingPaused() { return speech_tracking_paused.load(); }
+void RequestWakeSearchPitch() { wake_pitch_pending.store(true); }
 void StartPersonSearch(int yaw_delta) {
     search_cancel.store(false);
     search_active.store(true);
@@ -1313,6 +1317,7 @@ void StartPersonSearch(int yaw_delta) {
     search_start.store(yaw_delta == 0 ? 1001 : std::clamp(yaw_delta, -700, 700));
 }
 void StopPersonSearch() {
+    wake_pitch_pending.store(false);
     search_start.store(0);
     search_cancel.store(true);
     search_active.store(false);
@@ -1429,6 +1434,12 @@ void Update(StackChan& sc) {
         ps.End(sc, true);
         search_cancel.store(false);
     }
+    if (!search_blocked && wake_pitch_pending.exchange(false)) {
+        const auto pitch_limits = search_motion.pitchServo().getAngleLimit();
+        const int target = std::clamp(100, pitch_limits.x, pitch_limits.y);
+        search_motion.movePitchWithSpeed(target, 150);
+        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] wake pitch=%d", target);
+    }
     const int start = search_blocked ? 0 : search_start.exchange(0);
     if (start != 0) {
         ps.End(sc, true);
@@ -1451,12 +1462,8 @@ void Update(StackChan& sc) {
         } else {
             if (ps.commanded && search_yaw.getCommandRevision() != ps.revision) {
                 ps.End(sc, false); // stall protection or another owner
-            } else if (!ps.commanded) {
-                ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
-                search_motion.moveYawWithSpeed(ps.target, 150);
-                ps.revision = search_yaw.getCommandRevision();
-                ps.commanded = true;
-            } else if (std::abs(search_yaw.getCurrentAngle() - ps.target) <= 5 || !search_yaw.isMoving()) {
+            } else if (ps.commanded &&
+                       (std::abs(search_yaw.getCurrentAngle() - ps.target) <= 5 || !search_yaw.isMoving())) {
                 // Endpoint is a motion event, never a camera-response gate.
                 if (ps.phase == PersonSearch::Return) {
                     ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: no person");
@@ -1472,6 +1479,14 @@ void Update(StackChan& sc) {
                     ps.commanded = false;
                     ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d target=%d", ps.phase, ps.target);
                 }
+            }
+            // Initial move and each reversal use the same command path.
+            // Issue the next target in this update, without a wait state.
+            if (ps.running && !ps.commanded && !search_cancel.load()) {
+                ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
+                search_motion.moveYawWithSpeed(ps.target, 150);
+                ps.revision = search_yaw.getCommandRevision();
+                ps.commanded = true;
             }
         }
     }
