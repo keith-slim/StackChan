@@ -10,7 +10,6 @@
 #include <mooncake_log.h>
 #include <settings.h>
 #include <mutex>
-#include <algorithm>
 
 using namespace smooth_ui_toolkit;
 using namespace stackchan::motion;
@@ -76,16 +75,6 @@ public:
 
     void set_angle_impl(int angle) override
     {
-        write_angle(angle, 20, 0);
-    }
-
-    void set_direct_angle_impl(int angle, int speed, uint32_t duration_ms) override
-    {
-        write_angle(angle, static_cast<int>(std::min<uint32_t>(duration_ms, 65535)), speed);
-    }
-
-    void write_angle(int angle, int time, int speed)
-    {
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int mapped_angle = _zero_pos + angle * 16 / 5 / 10;  // 一步对应 0.3125度, 0.3125 = 5/16
         mapped_angle     = uitk::clamp(mapped_angle, _runtime_raw_pos_limit.x, _runtime_raw_pos_limit.y);
@@ -97,7 +86,7 @@ public:
         }
 
         check_mode(Mode::Position);
-        _scs_bus.WritePos(_config.id, mapped_angle, time, speed);
+        _scs_bus.WritePos(_config.id, mapped_angle, 20, 0);
     }
 
     int getCurrentAngle() override

@@ -181,7 +181,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     bool conversation_seen            = false;
     bool person_missing_logged        = false;
     bool face_filter_initialized      = false;
-    bool face_motion_requested        = false;
     bool wake_face_smile_shown         = false;
     bool face_center_locked           = false;
     int centered_frames               = 0;
@@ -281,24 +280,9 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d)",
                      center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
                      yaw_delta, pitch_delta);
-            // Never continue a stale filtered correction past the measured center.
-            const auto bounded = [](int filtered, int measured) {
-                if ((filtered > 0 && measured <= 0) || (filtered < 0 && measured >= 0)) return 0;
-                return std::clamp(filtered, std::min(0, measured), std::max(0, measured));
-            };
-            const int yaw_now = std::abs(center_x - 0.5f) < 0.025f ? 0 :
-                static_cast<int>(std::clamp((center_x - 0.5f) * 500.0f, -160.0f, 160.0f));
-            const int pitch_now = std::abs(0.5f - center_y) < 0.035f ? 0 :
-                static_cast<int>(std::clamp((0.5f - center_y) * 360.0f, -110.0f, 110.0f));
-            const int yaw_command = bounded(yaw_delta, yaw_now);
-            const int pitch_command = bounded(pitch_delta, pitch_now);
-            if (yaw_command != 0 || pitch_command != 0 || face_motion_requested) {
-                stackchan::stage1::RequestPerceptionLook(yaw_command, pitch_command, true);
-            }
-            face_motion_requested = yaw_command != 0 || pitch_command != 0;
+            if (yaw_delta != 0 || pitch_delta != 0)
+                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta);
         } else if (body_score >= kMinimumBodyScore) {
-            if (face_motion_requested) stackchan::stage1::RequestPerceptionLook(0, 0, true);
-            face_motion_requested = false;
             person_missing_logged = false;
             ++face_missing_frames;
             // 顔検出が一瞬抜けただけでは身体追従へ切り替えず、上下の往復を防ぐ。
@@ -317,8 +301,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 if (pitch_delta != 0) stackchan::stage1::RequestPerceptionLook(0, pitch_delta);
             }
         } else {
-            if (face_motion_requested) stackchan::stage1::RequestPerceptionLook(0, 0, true);
-            face_motion_requested = false;
             ++face_missing_frames;
             if (face_missing_frames >= 12) {
                 face_filter_initialized = false;
