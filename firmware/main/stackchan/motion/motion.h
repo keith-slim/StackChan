@@ -8,6 +8,7 @@
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
 #include <memory>
+#include <atomic>
 
 namespace stackchan::motion {
 
@@ -27,6 +28,7 @@ public:
      *
      */
     void init();
+    ~Motion();
 
     /**
      * @brief
@@ -94,6 +96,7 @@ public:
      * @param speed (0-1000)
      */
     void moveWithSpeed(int yawAngle, int pitchAngle, int speed);
+    void trackWithSpeed(int yawAngle, int pitchAngle, int speed);
 
     void moveWithDuration(int yawAngle, int pitchAngle, uint32_t duration_ms, uint32_t now);
     void cancelTimedMove();
@@ -170,6 +173,10 @@ private:
     std::unique_ptr<Servo> _yaw_servo;
     std::unique_ptr<Servo> _pitch_servo;
     bool _is_modify_locked = false;
+    std::atomic<bool> _worker_stop{false};
+    std::atomic<bool> _worker_running{false};
+    static void UpdateWorker(void* arg);
+    void updateServos();
 };
 
 }  // namespace stackchan::motion

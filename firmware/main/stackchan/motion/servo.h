@@ -8,6 +8,7 @@
 #include <uitk/short_namespace.hpp>
 #include <cstdint>
 #include <atomic>
+#include <mutex>
 #include "timed_servo_move.h"
 
 namespace stackchan::motion {
@@ -55,6 +56,8 @@ public:
      * @param speed (0-1000)
      */
     void moveWithSpeed(int angle, int speed);
+    // Face tracking retargets an existing spring without discarding its momentum.
+    void trackWithSpeed(int angle, int speed);
 
     // One physical position sync at entry, then direct timed setpoints.
     void moveWithDuration(int angle, uint32_t duration_ms, uint32_t now);
@@ -86,6 +89,7 @@ public:
      */
     virtual uitk::Vector2i getAngleLimit() const
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         return _angle_limit;
     }
 
@@ -104,6 +108,7 @@ public:
      */
     virtual void setTorqueEnabled(bool enabled)
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         _torque_commanded_enabled = enabled;
     }
     virtual bool getTorqueEnabled()
@@ -118,6 +123,7 @@ public:
      */
     void setAutoTorqueReleaseEnabled(bool enabled)
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         _auto_torque_release_enabled = enabled;
     }
 
@@ -135,6 +141,7 @@ public:
      */
     void setAutoAngleSyncEnabled(bool enabled)
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         _auto_angle_sync_enabled = enabled;
     }
 
@@ -161,6 +168,7 @@ protected:
 
     void set_angle_limit(uitk::Vector2i angleLimit)
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         _angle_limit = angleLimit;
     }
 
@@ -176,6 +184,8 @@ protected:
     }
 
 protected:
+    // Always acquire this before the shared hardware bus mutex.
+    mutable std::recursive_mutex _state_mutex;
     uitk::Vector2i _angle_limit;
     uitk::AnimateValue _angle_anim;
     TimedServoMove _timed_move;
@@ -184,13 +194,14 @@ protected:
     uint32_t _last_tick               = 0;
     uint32_t _last_torque_check_tick  = 0;
     bool _snap_to_target_on_rest      = false;
+    bool _tracking_target = false;
     bool _auto_torque_release_enabled = true;
     bool _auto_angle_sync_enabled     = true;
     // Track commands instead of polling the servo while idle with torque off.
     bool _torque_commanded_enabled    = false;
 
     void apply_default_spring_options();
-    void update_angle_anim_target(int angle);
+    void update_angle_anim_target(int angle, bool tracking = false);
     void stop_motion_at_angle(int angle);
     uitk::SpringOptions_t map_speed_to_spring_options(int speed);
 };

@@ -58,6 +58,7 @@ std::atomic<int> perception_yaw_delta{0};
 std::atomic<int> perception_pitch_delta{0};
 std::atomic<uint32_t> perception_requested_at{0};
 std::atomic<bool> perception_look_pending{false};
+std::atomic<bool> perception_face_tracking{false};
 std::atomic<bool> speech_tracking_paused{false};
 // Worker publishes requests/results; only the existing Stage1 update owns servos.
 std::atomic<uint32_t> search_start_epoch{0};
@@ -1326,7 +1327,7 @@ bool IsPersonSearchActive() { return search_active.load(); }
 bool IsPersonSearchStopping() { return search_cancel.load(); }
 
 
-bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
+bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking)
 {
     constexpr int kMaxYawDelta   = 900;
     constexpr int kMaxPitchDelta = 450;
@@ -1337,6 +1338,7 @@ bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
     perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
     perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
     if (speech_tracking_paused.load() || search_active.load() || search_cancel.load()) return false;
+    perception_face_tracking.store(face_tracking, std::memory_order_relaxed);
     perception_look_pending.store(true, std::memory_order_release);
     return true;
 }
@@ -1524,7 +1526,11 @@ void Update(StackChan& sc) {
             ESP_LOGI(LOG_TAG, "perception look yaw=%d->%d pitch=%d->%d", yaw_before, yaw_target, pitch_before,
                      pitch_target);
             // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
-            motion.moveWithSpeed(yaw_target, pitch_target, 1000);
+            if (perception_face_tracking.load(std::memory_order_relaxed)) {
+                motion.trackWithSpeed(yaw_target, pitch_target, 1000);
+            } else {
+                motion.moveWithSpeed(yaw_target, pitch_target, 1000);
+            }
         }
     }
     if (speech_effects.active) {

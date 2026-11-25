@@ -38,6 +38,7 @@ public:
 
     void init() override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         reset_runtime_limits();
         set_angle_limit(_config.angleLimit);
         get_zero_pos_from_nvs();
@@ -75,6 +76,7 @@ public:
 
     void set_angle_impl(int angle) override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int mapped_angle = _zero_pos + angle * 16 / 5 / 10;  // 一步对应 0.3125度, 0.3125 = 5/16
         mapped_angle     = uitk::clamp(mapped_angle, _runtime_raw_pos_limit.x, _runtime_raw_pos_limit.y);
@@ -91,6 +93,7 @@ public:
 
     int getCurrentAngle() override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         uint8_t communication_error = 0;
         int current_pos = read_position_with_retry(communication_error);
@@ -111,6 +114,7 @@ public:
 
     bool is_moving_impl() override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int moving = _scs_bus.ReadMove(_config.id);
         // A failed UART read returns -1; it is not evidence of movement.
@@ -120,6 +124,7 @@ public:
 
     void setTorqueEnabled(bool enabled) override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         // The bus is configured for no write ACK. Record the command locally
         // and avoid adding a 10 ms timeout to every animation frame.
@@ -131,6 +136,7 @@ public:
 
     bool getTorqueEnabled() override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int torque_enable = _scs_bus.ReadToqueEnable(_config.id);
         // mclog::tagInfo(_tag, "id: {} torque enable: {}", _id, torque_enable);
@@ -139,6 +145,7 @@ public:
 
     void setCurrentAngleAsZero() override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         uint8_t communication_error = 0;
         int current_pos = read_position_with_retry(communication_error);
@@ -161,6 +168,7 @@ public:
 
     void resetZeroCalibration() override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         _zero_pos = _config.defaultZeroPos;
         reset_runtime_limits();
 
@@ -172,6 +180,7 @@ public:
 
     void rotate(int velocity) override
     {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         velocity = uitk::clamp(velocity, -1000, 1000);
 

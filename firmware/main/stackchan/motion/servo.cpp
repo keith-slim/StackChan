@@ -27,6 +27,7 @@ static SpringOptions_t _default_spring_options = {
 
 void Servo::init()
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     apply_default_spring_options();
 
     _angle_anim.teleport(getCurrentAngle());
@@ -37,6 +38,7 @@ void Servo::init()
 
 void Servo::update()
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     // Keep update in at most 50Hz
     if (GetHAL().millis() - _last_tick < 20) {
         return;
@@ -79,12 +81,14 @@ void Servo::update()
 
 void Servo::move(int angle)
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     apply_default_spring_options();
     update_angle_anim_target(angle);
 }
 
 void Servo::moveWithSpringParams(int angle, float stiffness, float damping)
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     _angle_anim.springOptions().visualDuration = 0.0f;  // Disable timing override
     _angle_anim.springOptions().stiffness      = stiffness;
     _angle_anim.springOptions().damping        = damping;
@@ -94,13 +98,26 @@ void Servo::moveWithSpringParams(int angle, float stiffness, float damping)
 
 void Servo::moveWithSpeed(int angle, int speed)
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     auto spring_options = map_speed_to_spring_options(speed);
     moveWithSpringParams(angle, spring_options.stiffness, spring_options.damping);
 }
 
+void Servo::trackWithSpeed(int angle, int speed)
+{
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+    auto options = map_speed_to_spring_options(speed);
+    _angle_anim.springOptions().visualDuration = 0.0f;
+    _angle_anim.springOptions().stiffness = options.stiffness;
+    _angle_anim.springOptions().damping = options.damping;
+    update_angle_anim_target(angle, true);
+}
+
 void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     _command_revision.fetch_add(1, std::memory_order_relaxed);
+    _tracking_target = false;
     const bool was_moving = isMoving();
     const int current = uitk::clamp(getCurrentAngle(), _angle_limit.x, _angle_limit.y);
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
@@ -114,17 +131,21 @@ void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
 
 void Servo::cancelTimedMove()
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     _command_revision.fetch_add(1, std::memory_order_relaxed);
     _timed_move.Cancel(); // Last commanded position remains; no stale spring target.
+    _tracking_target = false;
 }
 
 int Servo::getCurrentAngle()
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     return _angle_anim.directValue();
 }
 
 bool Servo::isMoving()
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     // Avoid a servo status read while idle or after torque has been released.
     // Interpolation and its pending final write are tracked locally.
     if (_timed_move.Active() || !_angle_anim.done() || _snap_to_target_on_rest) return true;
@@ -139,12 +160,14 @@ void Servo::apply_default_spring_options()
     options.damping        = _default_spring_options.damping;
 }
 
-void Servo::update_angle_anim_target(int angle)
+void Servo::update_angle_anim_target(int angle, bool tracking)
 {
+    const bool preserve_momentum = tracking && _tracking_target && !_angle_anim.done() && _torque_commanded_enabled;
     cancelTimedMove();
+    _tracking_target = tracking;
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
 
-    if (_auto_angle_sync_enabled) {
+    if (_auto_angle_sync_enabled && !preserve_momentum) {
         _angle_anim.teleport(getCurrentAngle());  // Use current angle as start
     }
     // Initialization and auto-release leave the actuator torque OFF.
@@ -156,6 +179,7 @@ void Servo::update_angle_anim_target(int angle)
 
 void Servo::stop_motion_at_angle(int angle)
 {
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     cancelTimedMove(); // A stall must also stop timed motion.
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(angle);

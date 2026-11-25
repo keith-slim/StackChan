@@ -5,6 +5,9 @@
  */
 #include "motion.h"
 #include "motion_math.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_log.h>
 
 using namespace uitk;
 using namespace stackchan::motion;
@@ -13,9 +16,39 @@ void Motion::init()
 {
     _yaw_servo->init();
     _pitch_servo->init();
+    _worker_stop.store(false);
+    _worker_running.store(true);
+    if (xTaskCreate(UpdateWorker, "servo_update", 4096, this, 2, nullptr) != pdPASS) {
+        _worker_running.store(false);
+        ESP_LOGW("Motion", "Servo task allocation failed; using existing update path");
+    }
+}
+
+Motion::~Motion()
+{
+    _worker_stop.store(true);
+    while (_worker_running.load()) vTaskDelay(1);
+}
+
+void Motion::UpdateWorker(void* arg)
+{
+    auto* self = static_cast<Motion*>(arg);
+    TickType_t next = xTaskGetTickCount();
+    while (!self->_worker_stop.load()) {
+        self->updateServos();
+        vTaskDelayUntil(&next, pdMS_TO_TICKS(20));
+    }
+    self->_worker_running.store(false);
+    vTaskDelete(nullptr);
 }
 
 void Motion::update()
+{
+    // Preserve the original path if task allocation fails.
+    if (!_worker_running.load()) updateServos();
+}
+
+void Motion::updateServos()
 {
     _yaw_servo->update();
     _pitch_servo->update();
@@ -61,6 +94,12 @@ void Motion::moveWithSpeed(int yawAngle, int pitchAngle, int speed)
 {
     _yaw_servo->moveWithSpeed(yawAngle, speed);
     _pitch_servo->moveWithSpeed(pitchAngle, speed);
+}
+
+void Motion::trackWithSpeed(int yawAngle, int pitchAngle, int speed)
+{
+    _yaw_servo->trackWithSpeed(yawAngle, speed);
+    _pitch_servo->trackWithSpeed(pitchAngle, speed);
 }
 
 void Motion::moveWithDuration(int yawAngle, int pitchAngle, uint32_t duration_ms, uint32_t now)

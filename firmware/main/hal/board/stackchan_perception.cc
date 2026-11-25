@@ -281,7 +281,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                      center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
                      yaw_delta, pitch_delta);
             if (yaw_delta != 0 || pitch_delta != 0)
-                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta);
+                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true);
         } else if (body_score >= kMinimumBodyScore) {
             person_missing_logged = false;
             ++face_missing_frames;
