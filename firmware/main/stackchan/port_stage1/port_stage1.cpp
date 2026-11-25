@@ -68,8 +68,8 @@ std::atomic<uint32_t> search_frame_epoch{0};
 std::atomic<bool> search_active{false};
 std::atomic<bool> search_hold{false};
 struct PersonSearch {
-    enum Phase { Aim, First, Reverse, Return };
-    Phase phase = Aim;
+    enum Phase { First = 1, Reverse, Return };
+    Phase phase = First;
     int direction = 1, origin = 0, target = 0;
     bool running = false, commanded = false, settled = false;
     uint32_t revision = 0, epoch = 0, commanded_at = 0;
@@ -1447,11 +1447,11 @@ void Update(StackChan& sc) {
         ps.running = true;
         ps.direction = delta < 0 ? -1 : 1;
         ps.origin = std::clamp(search_motion.getCurrentYawAngle() + delta, search_limits.x, search_limits.y);
-        ps.target = ps.origin;
+        ps.target = ps.direction > 0 ? search_limits.y : search_limits.x;
         ps.epoch = search_start_epoch.load();
         search_active.store(true);
-        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d aim=%d limits=%d,%d",
-                 ps.direction, ps.origin, search_limits.x, search_limits.y);
+        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d target=%d return=%d limits=%d,%d",
+                 ps.direction, ps.target, ps.origin, search_limits.x, search_limits.y);
     }
     if (ps.running) {
         if (ps.epoch != speech_motion_epoch.load()) {
@@ -1485,10 +1485,7 @@ void Update(StackChan& sc) {
                 ESP_LOGW(LOG_TAG, "[PERSON_SEARCH] motion timeout");
                 ps.End(sc, true);
             } else if (ps.settled && search_miss.exchange(false)) {
-                if (ps.phase == PersonSearch::Aim) {
-                    ps.phase = PersonSearch::First;
-                    ps.target = ps.direction > 0 ? search_limits.y : search_limits.x;
-                } else if (ps.phase == PersonSearch::First) {
+                if (ps.phase == PersonSearch::First) {
                     ps.phase = PersonSearch::Reverse;
                     ps.target = ps.direction > 0 ? search_limits.x : search_limits.y;
                 } else if (ps.phase == PersonSearch::Reverse) {
