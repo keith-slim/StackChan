@@ -69,7 +69,7 @@ struct PersonSearch {
     Phase phase = First;
     int direction = 1, origin = 0, target = 0;
     bool running = false, commanded = false;
-    uint32_t revision = 0, epoch = 0, commanded_at = 0;
+    uint32_t revision = 0, epoch = 0;
     void StopOwned(StackChan& sc) {
         if (commanded && sc.motion().yawServo().getCommandRevision() == revision)
             sc.motion().moveYawWithSpeed(sc.motion().getCurrentYawAngle(), 1000);
@@ -1456,13 +1456,9 @@ void Update(StackChan& sc) {
                 search_motion.moveYawWithSpeed(ps.target, 150);
                 ps.revision = search_yaw.getCommandRevision();
                 ps.commanded = true;
-                ps.commanded_at = now;
             } else if (std::abs(search_yaw.getCurrentAngle() - ps.target) <= 5 || !search_yaw.isMoving()) {
                 // Endpoint is a motion event, never a camera-response gate.
-                if (std::abs(search_yaw.getCurrentAngle() - ps.target) > 5) {
-                    ESP_LOGW(LOG_TAG, "[PERSON_SEARCH] stopped before target=%d", ps.target);
-                    ps.End(sc, true);
-                } else if (ps.phase == PersonSearch::Return) {
+                if (ps.phase == PersonSearch::Return) {
                     ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: no person");
                     ps.End(sc, false);
                 } else {
@@ -1476,9 +1472,6 @@ void Update(StackChan& sc) {
                     ps.commanded = false;
                     ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d target=%d", ps.phase, ps.target);
                 }
-            } else if (now - ps.commanded_at > 10000) {
-                ESP_LOGW(LOG_TAG, "[PERSON_SEARCH] motion timeout");
-                ps.End(sc, true);
             }
         }
     }
