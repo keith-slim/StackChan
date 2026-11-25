@@ -63,15 +63,12 @@ std::atomic<bool> speech_tracking_paused{false};
 std::atomic<uint32_t> search_start_epoch{0};
 std::atomic<int> search_start{0}; // signed DOA in tenths of degrees, 1001 = zero
 std::atomic<bool> search_cancel{false};
-std::atomic<bool> search_miss{false};
-std::atomic<uint32_t> search_frame_epoch{0};
 std::atomic<bool> search_active{false};
-std::atomic<bool> search_hold{false};
 struct PersonSearch {
     enum Phase { First = 1, Reverse, Return };
     Phase phase = First;
     int direction = 1, origin = 0, target = 0;
-    bool running = false, commanded = false, settled = false;
+    bool running = false, commanded = false;
     uint32_t revision = 0, epoch = 0, commanded_at = 0;
     void StopOwned(StackChan& sc) {
         if (commanded && sc.motion().yawServo().getCommandRevision() == revision)
@@ -82,15 +79,10 @@ struct PersonSearch {
         if (stop) StopOwned(sc);
         *this = PersonSearch{};
         search_active.store(false);
-        search_hold.store(false);
-        search_miss.store(false);
     }
     void Pause(StackChan& sc) {
         if (!running) return;
         StopOwned(sc);
-        settled = false;
-        search_miss.store(false);
-        search_hold.store(true);
     }
 };
 PersonSearch person_search;
@@ -1104,7 +1096,6 @@ void Start() {
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
     search_start.store(0); search_cancel.store(false); search_active.store(false);
-    search_hold.store(false); search_miss.store(false);
     const Config config = LoadConfig();
     registered_wake_minute.store(config.wake_minute, std::memory_order_release);
     if (!r.schedule.SetConfig(config)) {
@@ -1158,7 +1149,6 @@ void Stop() {
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
     search_start.store(0); search_cancel.store(false); search_active.store(false);
-    search_hold.store(false); search_miss.store(false);
     queued_cue.store(-1);
     owns_auto.store(false);
     manual_sleep_requested.store(false);
@@ -1318,15 +1308,9 @@ bool RequestCue(const char* id) {
 bool IsSpeechTrackingPaused() { return speech_tracking_paused.load(); }
 void StartPersonSearch(int yaw_delta) {
     search_cancel.store(false);
-    search_miss.store(false);
-    search_hold.store(false);
     search_active.store(true);
     search_start_epoch.store(speech_motion_epoch.load());
     search_start.store(yaw_delta == 0 ? 1001 : std::clamp(yaw_delta, -700, 700));
-}
-uint32_t PersonSearchFrameEpoch() { return search_frame_epoch.load(); }
-void ReportPersonSearchMiss(uint32_t epoch) {
-    if (search_active.load() && !search_hold.load() && epoch == search_frame_epoch.load()) search_miss.store(true);
 }
 void StopPersonSearch() {
     search_start.store(0);
@@ -1334,6 +1318,7 @@ void StopPersonSearch() {
     search_active.store(false);
 }
 bool IsPersonSearchActive() { return search_active.load(); }
+bool IsPersonSearchStopping() { return search_cancel.load(); }
 
 
 bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
@@ -1346,7 +1331,7 @@ bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
     perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
     perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
     perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
-    if (speech_tracking_paused.load()) return false;
+    if (speech_tracking_paused.load() || search_active.load() || search_cancel.load()) return false;
     perception_look_pending.store(true, std::memory_order_release);
     return true;
 }
@@ -1439,11 +1424,16 @@ void Update(StackChan& sc) {
     const bool search_blocked = device_state == kDeviceStateSpeaking || speech_tracking_paused.load() ||
         r.cue_active || r.own_neck || IsWakeSequenceActive() || Runtime::Sleeping(r.phase) ||
         Runtime::SleepPreparing(r.phase) || search_motion.isModifyLocked() || sc.avatar().isModifyLocked();
-    if (search_cancel.exchange(false)) ps.End(sc, true);
+    if (search_cancel.load()) {
+        perception_look_pending.store(false);
+        ps.End(sc, true);
+        search_cancel.store(false);
+    }
     const int start = search_blocked ? 0 : search_start.exchange(0);
     if (start != 0) {
         ps.End(sc, true);
         const int delta = start == 1001 ? 0 : start;
+        perception_look_pending.store(false);
         ps.running = true;
         ps.direction = delta < 0 ? -1 : 1;
         ps.origin = std::clamp(search_motion.getCurrentYawAngle() + delta, search_limits.x, search_limits.y);
@@ -1459,7 +1449,6 @@ void Update(StackChan& sc) {
         } else if (search_blocked) {
             ps.Pause(sc);
         } else {
-            search_hold.store(false);
             if (ps.commanded && search_yaw.getCommandRevision() != ps.revision) {
                 ps.End(sc, false); // stall protection or another owner
             } else if (!ps.commanded) {
@@ -1468,32 +1457,28 @@ void Update(StackChan& sc) {
                 ps.revision = search_yaw.getCommandRevision();
                 ps.commanded = true;
                 ps.commanded_at = now;
-                search_frame_epoch.fetch_add(1);
-                ps.settled = false;
-                search_miss.store(false);
-            } else if (!ps.settled && !search_yaw.isMoving()) {
-                // Require a fresh successful negative frame at each endpoint.
-                // Do not reverse on an HTTP failure or on a moving frame.
-                ps.settled = true;
-                search_frame_epoch.fetch_add(1);
-                search_miss.store(false);
-                if (ps.phase == PersonSearch::Return) {
+            } else if (std::abs(search_yaw.getCurrentAngle() - ps.target) <= 5 || !search_yaw.isMoving()) {
+                // Endpoint is a motion event, never a camera-response gate.
+                if (std::abs(search_yaw.getCurrentAngle() - ps.target) > 5) {
+                    ESP_LOGW(LOG_TAG, "[PERSON_SEARCH] stopped before target=%d", ps.target);
+                    ps.End(sc, true);
+                } else if (ps.phase == PersonSearch::Return) {
                     ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: no person");
                     ps.End(sc, false);
+                } else {
+                    if (ps.phase == PersonSearch::First) {
+                        ps.phase = PersonSearch::Reverse;
+                        ps.target = ps.direction > 0 ? search_limits.x : search_limits.y;
+                    } else {
+                        ps.phase = PersonSearch::Return;
+                        ps.target = ps.origin;
+                    }
+                    ps.commanded = false;
+                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d target=%d", ps.phase, ps.target);
                 }
-            } else if (!ps.settled && now - ps.commanded_at > 10000) {
+            } else if (now - ps.commanded_at > 10000) {
                 ESP_LOGW(LOG_TAG, "[PERSON_SEARCH] motion timeout");
                 ps.End(sc, true);
-            } else if (ps.settled && search_miss.exchange(false)) {
-                if (ps.phase == PersonSearch::First) {
-                    ps.phase = PersonSearch::Reverse;
-                    ps.target = ps.direction > 0 ? search_limits.x : search_limits.y;
-                } else if (ps.phase == PersonSearch::Reverse) {
-                    ps.phase = PersonSearch::Return;
-                    ps.target = ps.origin;
-                }
-                ps.commanded = false;
-                ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d target=%d", ps.phase, ps.target);
             }
         }
     }

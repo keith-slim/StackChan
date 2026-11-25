@@ -45,10 +45,9 @@ bool RequestSleep(); // Queue manual sleep until active speech/conversation drai
 // Queue a bounded relative neck correction from Xavier perception. The actual
 // servo write is serialized by Update() under the existing LVGL/motion lock.
 void StartPersonSearch(int yaw_delta);
-uint32_t PersonSearchFrameEpoch();
-void ReportPersonSearchMiss(uint32_t epoch);
 void StopPersonSearch();
 bool IsPersonSearchActive();
+bool IsPersonSearchStopping();
 bool IsSpeechTrackingPaused(); // Lock-free for perception worker.
 bool RequestPerceptionLook(int yaw_delta, int pitch_delta);  // 0.1-degree units.
 void Update(StackChan& stackchan);

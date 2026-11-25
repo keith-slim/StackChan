@@ -214,23 +214,30 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         float score    = 0.0f;
         float body_target_y = 0.5f;
         float body_score    = 0.0f;
-        const auto search_frame_epoch = stackchan::stage1::PersonSearchFrameEpoch();
+        const bool was_searching = stackchan::stage1::IsPersonSearchActive();
         bool valid_frame = false;
         const bool face_detected = PostVision(center_x, center_y, score, body_target_y, body_score, valid_frame);
         // A request already in flight may complete after speech starts.
         if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking ||
             stackchan::stage1::IsSpeechTrackingPaused()) continue;
         if (stop_requested_.load(std::memory_order_acquire)) break;
-        if (stackchan::stage1::IsPersonSearchActive() && valid_frame) {
-            if ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore) {
+        if (stackchan::stage1::IsPersonSearchActive()) {
+            if (valid_frame && ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore)) {
                 stackchan::stage1::StopPersonSearch();
                 ESP_LOGI(kTag, "[PERSON_SEARCH] found %s", face_detected && score >= kMinimumFaceScore ? "face" : "body");
                 face_filter_initialized = false;
                 face_center_locked = false;
                 centered_frames = 0;
-            } else {
-                stackchan::stage1::ReportPersonSearchMiss(search_frame_epoch);
+                face_missing_frames = 0;
             }
+            // No tracking corrections from a frame captured during a sweep.
+            // Use a fresh image after the stop is applied by Stage1.
+            vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
+            continue;
+        }
+        if (was_searching || stackchan::stage1::IsPersonSearchStopping()) {
+            vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
+            continue;
         }
         if (face_detected && score >= kMinimumFaceScore) {
             person_missing_logged = false;
