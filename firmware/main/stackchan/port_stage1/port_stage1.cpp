@@ -59,6 +59,41 @@ std::atomic<int> perception_pitch_delta{0};
 std::atomic<uint32_t> perception_requested_at{0};
 std::atomic<bool> perception_look_pending{false};
 std::atomic<bool> speech_tracking_paused{false};
+// Worker publishes requests/results; only the existing Stage1 update owns servos.
+std::atomic<uint32_t> search_start_epoch{0};
+std::atomic<int> search_start{0}; // signed DOA in tenths of degrees, 1001 = zero
+std::atomic<bool> search_cancel{false};
+std::atomic<bool> search_miss{false};
+std::atomic<uint32_t> search_frame_epoch{0};
+std::atomic<bool> search_active{false};
+std::atomic<bool> search_hold{false};
+struct PersonSearch {
+    enum Phase { Aim, First, Reverse, Return };
+    Phase phase = Aim;
+    int direction = 1, origin = 0, target = 0;
+    bool running = false, commanded = false, settled = false;
+    uint32_t revision = 0, epoch = 0, commanded_at = 0;
+    void StopOwned(StackChan& sc) {
+        if (commanded && sc.motion().yawServo().getCommandRevision() == revision)
+            sc.motion().moveYawWithSpeed(sc.motion().getCurrentYawAngle(), 1000);
+        commanded = false;
+    }
+    void End(StackChan& sc, bool stop) {
+        if (stop) StopOwned(sc);
+        *this = PersonSearch{};
+        search_active.store(false);
+        search_hold.store(false);
+        search_miss.store(false);
+    }
+    void Pause(StackChan& sc) {
+        if (!running) return;
+        StopOwned(sc);
+        settled = false;
+        search_miss.store(false);
+        search_hold.store(true);
+    }
+};
+PersonSearch person_search;
 // LVGL is owned by Update(). Head pad/voice tasks only set these flags.
 std::atomic<uint8_t> wake_intents{0}; // touch=1, wake word=2
 std::atomic<bool> sleep_wake_eligible{false};
@@ -1067,6 +1102,9 @@ void Start() {
     r = Runtime{};
     speech_effects = SpeechEffectsRuntime{};
     speech_tracking_paused.store(false);
+    person_search = PersonSearch{};
+    search_start.store(0); search_cancel.store(false); search_active.store(false);
+    search_hold.store(false); search_miss.store(false);
     const Config config = LoadConfig();
     registered_wake_minute.store(config.wake_minute, std::memory_order_release);
     if (!r.schedule.SetConfig(config)) {
@@ -1118,6 +1156,9 @@ void Stop() {
     r = Runtime{};
     speech_effects = SpeechEffectsRuntime{};
     speech_tracking_paused.store(false);
+    person_search = PersonSearch{};
+    search_start.store(0); search_cancel.store(false); search_active.store(false);
+    search_hold.store(false); search_miss.store(false);
     queued_cue.store(-1);
     owns_auto.store(false);
     manual_sleep_requested.store(false);
@@ -1221,6 +1262,7 @@ void PrepareSpeechExpression(StackChan& sc, const char* source) {
 void BeginSpeechTurn(StackChan& sc) { speech_effects.Arm(sc); }
 void StartSpeechEffects(StackChan& sc, avatar::Emotion emotion) {
     if (speech_effects.active) return;
+    person_search.Pause(sc);
     if (!speech_effects.armed) speech_effects.Arm(sc);
     speech_effects.active = true;
     speech_effects.Set(sc, emotion, GetHAL().millis());
@@ -1274,6 +1316,25 @@ bool RequestCue(const char* id) {
 }
 
 bool IsSpeechTrackingPaused() { return speech_tracking_paused.load(); }
+void StartPersonSearch(int yaw_delta) {
+    search_cancel.store(false);
+    search_miss.store(false);
+    search_hold.store(false);
+    search_active.store(true);
+    search_start_epoch.store(speech_motion_epoch.load());
+    search_start.store(yaw_delta == 0 ? 1001 : std::clamp(yaw_delta, -700, 700));
+}
+uint32_t PersonSearchFrameEpoch() { return search_frame_epoch.load(); }
+void ReportPersonSearchMiss(uint32_t epoch) {
+    if (search_active.load() && !search_hold.load() && epoch == search_frame_epoch.load()) search_miss.store(true);
+}
+void StopPersonSearch() {
+    search_start.store(0);
+    search_cancel.store(true);
+    search_active.store(false);
+}
+bool IsPersonSearchActive() { return search_active.load(); }
+
 
 bool RequestPerceptionLook(int yaw_delta, int pitch_delta)
 {
@@ -1368,11 +1429,82 @@ void Update(StackChan& sc) {
             r.BeginCue(sc, static_cast<Cue>(cue), now);
         else ESP_LOGW(LOG_TAG, "cue skipped: autonomous scene is active");
     }
+    // Handle search before ordinary corrections, so detection cancels the
+    // sweep even when the detected face needs no positional correction.
+    auto& ps = person_search;
+    auto& search_motion = sc.motion();
+    auto& search_yaw = search_motion.yawServo();
+    const auto search_limits = search_yaw.getAngleLimit();
+    const auto device_state = Application::GetInstance().GetDeviceState();
+    const bool search_blocked = device_state == kDeviceStateSpeaking || speech_tracking_paused.load() ||
+        r.cue_active || r.own_neck || IsWakeSequenceActive() || Runtime::Sleeping(r.phase) ||
+        Runtime::SleepPreparing(r.phase) || search_motion.isModifyLocked() || sc.avatar().isModifyLocked();
+    if (search_cancel.exchange(false)) ps.End(sc, true);
+    const int start = search_blocked ? 0 : search_start.exchange(0);
+    if (start != 0) {
+        ps.End(sc, true);
+        const int delta = start == 1001 ? 0 : start;
+        ps.running = true;
+        ps.direction = delta < 0 ? -1 : 1;
+        ps.origin = std::clamp(search_motion.getCurrentYawAngle() + delta, search_limits.x, search_limits.y);
+        ps.target = ps.origin;
+        ps.epoch = search_start_epoch.load();
+        search_active.store(true);
+        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d aim=%d limits=%d,%d",
+                 ps.direction, ps.origin, search_limits.x, search_limits.y);
+    }
+    if (ps.running) {
+        if (ps.epoch != speech_motion_epoch.load()) {
+            ps.End(sc, false); // manual/explicit command now owns the neck
+        } else if (search_blocked) {
+            ps.Pause(sc);
+        } else {
+            search_hold.store(false);
+            if (ps.commanded && search_yaw.getCommandRevision() != ps.revision) {
+                ps.End(sc, false); // stall protection or another owner
+            } else if (!ps.commanded) {
+                ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
+                search_motion.moveYawWithSpeed(ps.target, 1000);
+                ps.revision = search_yaw.getCommandRevision();
+                ps.commanded = true;
+                ps.commanded_at = now;
+                search_frame_epoch.fetch_add(1);
+                ps.settled = false;
+                search_miss.store(false);
+            } else if (!ps.settled && !search_yaw.isMoving()) {
+                // Require a fresh successful negative frame at each endpoint.
+                // Do not reverse on an HTTP failure or on a moving frame.
+                ps.settled = true;
+                search_frame_epoch.fetch_add(1);
+                search_miss.store(false);
+                if (ps.phase == PersonSearch::Return) {
+                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: no person");
+                    ps.End(sc, false);
+                }
+            } else if (!ps.settled && now - ps.commanded_at > 10000) {
+                ESP_LOGW(LOG_TAG, "[PERSON_SEARCH] motion timeout");
+                ps.End(sc, true);
+            } else if (ps.settled && search_miss.exchange(false)) {
+                if (ps.phase == PersonSearch::Aim) {
+                    ps.phase = PersonSearch::First;
+                    ps.target = ps.direction > 0 ? search_limits.y : search_limits.x;
+                } else if (ps.phase == PersonSearch::First) {
+                    ps.phase = PersonSearch::Reverse;
+                    ps.target = ps.direction > 0 ? search_limits.x : search_limits.y;
+                } else if (ps.phase == PersonSearch::Reverse) {
+                    ps.phase = PersonSearch::Return;
+                    ps.target = ps.origin;
+                }
+                ps.commanded = false;
+                ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d target=%d", ps.phase, ps.target);
+            }
+        }
+    }
     if (perception_look_pending.load(std::memory_order_acquire)) {
         const bool expired = static_cast<uint32_t>(now - perception_requested_at.load()) > 3000;
         // Wake-triggered tracking is allowed to replace the wake animation's
         // neck target; sleep and explicit skits retain priority.
-        const bool motion_available = !speech_tracking_paused.load() && !r.cue_active && !Runtime::Sleeping(r.phase) &&
+        const bool motion_available = device_state != kDeviceStateSpeaking && !ps.running && !speech_tracking_paused.load() && !r.cue_active && !Runtime::Sleeping(r.phase) &&
                                       !Runtime::SleepPreparing(r.phase);
         if (expired) {
             perception_look_pending.store(false, std::memory_order_release);
