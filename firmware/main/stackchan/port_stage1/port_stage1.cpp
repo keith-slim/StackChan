@@ -1462,22 +1462,33 @@ void Update(StackChan& sc) {
         } else {
             if (ps.commanded && search_yaw.getCommandRevision() != ps.revision) {
                 ps.End(sc, false); // stall protection or another owner
-            } else if (ps.commanded &&
-                       (std::abs(search_yaw.getCurrentAngle() - ps.target) <= 5 || !search_yaw.isMoving())) {
-                // Endpoint is a motion event, never a camera-response gate.
-                if (ps.phase == PersonSearch::Return) {
-                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: no person");
-                    ps.End(sc, false);
-                } else {
-                    if (ps.phase == PersonSearch::First) {
-                        ps.phase = PersonSearch::Reverse;
-                        ps.target = ps.direction > 0 ? search_limits.x : search_limits.y;
+            } else if (ps.commanded) {
+                const int current = search_yaw.getCurrentAngle();
+                // Keep the full-limit motion target, but reverse 10 degrees
+                // before it so the spring does not settle at the endpoint.
+                constexpr int kSearchTurnMargin = 100; // 0.1-degree units
+                const bool sweep = ps.phase != PersonSearch::Return;
+                const int direction = ps.phase == PersonSearch::First ? ps.direction : -ps.direction;
+                const int margin = std::min(kSearchTurnMargin, (search_limits.y - search_limits.x) / 2);
+                const bool reached = sweep
+                    ? (direction > 0 ? current >= search_limits.y - margin
+                                     : current <= search_limits.x + margin)
+                    : std::abs(current - ps.target) <= 5;
+                if (reached || !search_yaw.isMoving()) {
+                    if (ps.phase == PersonSearch::Return) {
+                        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: no person");
+                        ps.End(sc, false);
                     } else {
-                        ps.phase = PersonSearch::Return;
-                        ps.target = ps.origin;
+                        if (ps.phase == PersonSearch::First) {
+                            ps.phase = PersonSearch::Reverse;
+                            ps.target = ps.direction > 0 ? search_limits.x : search_limits.y;
+                        } else {
+                            ps.phase = PersonSearch::Return;
+                            ps.target = ps.origin;
+                        }
+                        ps.commanded = false;
+                        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d yaw=%d target=%d", ps.phase, current, ps.target);
                     }
-                    ps.commanded = false;
-                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d target=%d", ps.phase, ps.target);
                 }
             }
             // Initial move and each reversal use the same command path.
