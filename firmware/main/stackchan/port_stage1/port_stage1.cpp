@@ -74,6 +74,18 @@ constexpr int kPerceptionRate = 200; // tenths of a degree per second
 constexpr int kFaceTrackingRate = 200; // face following only
 constexpr int kFacePitchSearchRate = 200; // vertical face search only
 constexpr int kPersonSearchRate = 400; // horizontal search only
+// Physical servo resolution and settled offset differ by axis (0.1-degree units).
+constexpr int kYawArrivalTolerance = 30;
+constexpr int kPitchArrivalTolerance = 20;
+// Yaw stopped 1.2-1.8 degrees short in the measured native sweeps.
+// Use a 2-degree outward command allowance inside the existing mechanical limits.
+constexpr int kYawEndpointAllowance = 20;
+static bool search_arrived(int actual, int target, int tolerance) {
+    return std::abs(actual - target) <= tolerance;
+}
+static int search_endpoint_command(int target, int direction, int allowance, int lower, int upper) {
+    return std::clamp(target + direction * allowance, lower, upper);
+}
 struct OwnedTracking {
     bool commanded = false;
     uint32_t revision = 0;
@@ -123,10 +135,7 @@ struct OwnedTracking {
         last_angle = angle;
         return true;
     }
-    // Only valid, settled hardware feedback can finish a segment early.
-    bool Settled(motion::Servo& servo, int angle, int goal, uint32_t now) const {
-        if (servo.isTrackingCommandActive()) return false;
-        if (std::abs(angle - goal) <= 5) return true;
+    bool Stalled(uint32_t now) const {
         return stationary && now - stationary_since >= 750;
     }
 };
@@ -137,6 +146,7 @@ struct PersonSearch : OwnedTracking {
     enum class Finish { None, Turn, End };
     Finish finish = Finish::None;
     int finish_angle = 0;
+    bool abnormal_end = false;
     int direction = 1, origin = 0, target = 0;
     bool running = false;
     bool pausing = false;
@@ -1574,10 +1584,17 @@ void Update(StackChan& sc) {
         }
         ps.origin = std::clamp(measured_origin + delta, search_limits.x, search_limits.y);
         ps.target = ps.direction > 0 ? sweep_right : sweep_left;
+        // Already at or beyond the first boundary: start the opposite leg.
+        // Keep the original origin and first-direction semantics for the return.
+        if (ps.running && (ps.direction > 0 ? measured_origin >= sweep_right - kYawArrivalTolerance
+                                            : measured_origin <= sweep_left + kYawArrivalTolerance)) {
+            ps.phase = PersonSearch::Reverse;
+            ps.target = ps.direction > 0 ? sweep_left : sweep_right;
+        }
         ps.epoch = search_start_epoch.load();
         search_active.store(true);
-        if (ps.running) ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d target=%d return=%d limits=%d,%d resume=%d rate=%d",
-                 ps.direction, ps.target, ps.origin, search_limits.x, search_limits.y, resume, kPersonSearchRate);
+        if (ps.running) ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d phase=%d target=%d return=%d limits=%d,%d resume=%d rate=%d",
+                 ps.phase == PersonSearch::Reverse ? -ps.direction : ps.direction, ps.phase, ps.target, ps.origin, search_limits.x, search_limits.y, resume, kPersonSearchRate);
     }
     if (ps.running && !search_cancel.load()) {
         if (ps.epoch != speech_motion_epoch.load()) {
@@ -1590,16 +1607,19 @@ void Update(StackChan& sc) {
         } else {
             int current = 0;
             if (ps.Superseded(search_yaw)) {
-                ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] cancelled: revision=%u current=%u", ps.revision, search_yaw.getCommandRevision());
+                if (ps.finish == PersonSearch::Finish::End) {
+                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] %s actual=%d target=%d ownership_released=1", ps.abnormal_end ? "aborted: stationary" : "arrival recorded", ps.finish_angle, ps.target);
+                } else ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] cancelled: revision=%u current=%u", ps.revision, search_yaw.getCommandRevision());
                 ps.End(sc, false); // stall protection or another owner
             } else if (ps.finish == PersonSearch::Finish::None && ps.commanded &&
                        ps.Sample(search_yaw, now, current, "yaw")) {
-                // The actual native destination is the search boundary.
-                // Allow one raw position quantum plus rounding.
-                const bool reached = std::abs(current - ps.target) <= 7;
-                if (!reached && ps.stationary && now - ps.stationary_since >= 750) {
+                // Compare actual feedback to the logical boundary, not the
+                // compensated physical command. Normal endpoint settlement is arrival.
+                const bool reached = search_arrived(current, ps.target, kYawArrivalTolerance);
+                if (!reached && ps.Stalled(now)) {
                     ESP_LOGW(LOG_TAG, "[SWEEP_STATIONARY] yaw=%d target=%d phase=%d", current, ps.target, ps.phase);
                     ps.finish = PersonSearch::Finish::End;
+                    ps.abnormal_end = true;
                     ps.finish_angle = current;
                 } else if (reached) {
                     ps.finish = ps.phase == PersonSearch::Return
@@ -1608,15 +1628,20 @@ void Update(StackChan& sc) {
                 }
             }
             if (ps.running && ps.finish == PersonSearch::Finish::End) {
-                if (ps.commanded) search_yaw.requestHardwareStop("search_complete");
-                if (ps.StopOwned(sc)) ps.End(sc, false);
+                if (ps.commanded) search_yaw.requestHardwareStop(ps.abnormal_end ? "search_stalled" : "search_complete");
+                if (ps.StopOwned(sc)) {
+                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] %s actual=%d target=%d", ps.abnormal_end ? "aborted: stationary" : "complete", ps.finish_angle, ps.target);
+                    ps.End(sc, false);
+                }
             } else if (ps.running && ps.finish == PersonSearch::Finish::Turn && !search_cancel.load()) {
                 const auto next_phase = ps.phase == PersonSearch::First ? PersonSearch::Reverse : PersonSearch::Return;
                 const int next_target = next_phase == PersonSearch::Reverse
                     ? (ps.direction > 0 ? sweep_left : sweep_right) : ps.origin;
                 // A direct retarget replaces the previous position instruction.
                 // Never insert a hold command in between the two segments.
-                if (search_yaw.startHardwareSweep(next_target, kPersonSearchRate, ps.revision, ps.commanded)) {
+                const int command_target = next_phase == PersonSearch::Return ? next_target
+                    : search_endpoint_command(next_target, -ps.direction, kYawEndpointAllowance, search_limits.x, search_limits.y);
+                if (search_yaw.startHardwareSweep(command_target, kPersonSearchRate, ps.revision, ps.commanded)) {
                     ps.commanded = true;
                     ps.phase = next_phase;
                     ps.target = next_target;
@@ -1625,7 +1650,7 @@ void Update(StackChan& sc) {
                     ps.sampled = false;
                     ps.stationary = false;
                     last_yaw_direction.store(next_target < ps.finish_angle ? -1 : 1);
-                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d yaw=%d target=%d", ps.phase, ps.finish_angle, ps.target);
+                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d yaw=%d target=%d command=%d tolerance=%d", ps.phase, ps.finish_angle, ps.target, command_target, kYawArrivalTolerance);
                 }
             }
             // Initial move and each reversal use the same command path.
@@ -1641,11 +1666,14 @@ void Update(StackChan& sc) {
                     if (search_yaw.tryGetCurrentAngle(actual) && actual != ps.target)
                         last_yaw_direction.store(ps.target < actual ? -1 : 1);
                 }
-                if (search_yaw.startHardwareSweep(ps.target, kPersonSearchRate, ps.revision)) {
+                const int command_target = ps.phase == PersonSearch::Return ? ps.target
+                    : search_endpoint_command(ps.target, direction, kYawEndpointAllowance, search_limits.x, search_limits.y);
+                if (search_yaw.startHardwareSweep(command_target, kPersonSearchRate, ps.revision)) {
                     ps.commanded = true;
                     ps.last_poll = now;
                     ps.sampled = false;
                     ps.stationary = false;
+                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] segment phase=%d target=%d command=%d tolerance=%d", ps.phase, ps.target, command_target, kYawArrivalTolerance);
                 }
             }
         }
@@ -1678,12 +1706,14 @@ void Update(StackChan& sc) {
             bool segment_sample_valid = false;
             // Pitch has a 0.3125-degree hardware position quantum and can
             // settle slightly short of the requested endpoint. Reverse on
-            // measured directional arrival, without waiting for the spring.
-            constexpr int kPitchArrivalTolerance = 30; // 3 degrees
-            if (fps.commanded && fps.Sample(search_pitch, now, measured, "pitch") &&
-                ((fps.upward ? measured >= goal - kPitchArrivalTolerance
-                             : measured <= goal + kPitchArrivalTolerance) ||
-                 fps.Settled(search_pitch, measured, goal, now))) {
+            // measured arrival within the pitch tolerance, not animation state.
+            const bool valid_sample = fps.commanded && fps.Sample(search_pitch, now, measured, "pitch");
+            const bool reached = valid_sample && search_arrived(measured, goal, kPitchArrivalTolerance);
+            if (valid_sample && !reached && fps.Stalled(now) && !search_pitch.isTrackingCommandActive()) {
+                fps.Stop(search_pitch, &measured);
+                face_pitch_requested.store(false);
+                ESP_LOGW(LOG_TAG, "[FACE_PITCH_SEARCH] aborted: stationary actual=%d target=%d", measured, goal);
+            } else if (reached) {
                 segment_sample_valid = true;
                 fps.Stop(search_pitch, &measured);
                 ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] segment complete actual=%d target=%d", measured, goal);
@@ -1699,12 +1729,15 @@ void Update(StackChan& sc) {
                 Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
                 int current = measured;
                 const bool measured_ok = segment_sample_valid || search_pitch.tryGetCurrentAngle(current);
-                if (measured_ok && fps.upward && current >= upper) fps.upward = false;
+                if (measured_ok && fps.upward && current >= upper - kPitchArrivalTolerance) fps.upward = false;
                 const int target = fps.upward ? upper : limits.x;
-                if (limits.x < upper) {
-                    fps.Issue(search_pitch, target, now, kFacePitchSearchRate, measured_ok ? &current : nullptr);
-                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d rate=%d", current, measured_ok, target, kFacePitchSearchRate);
-                } else {
+                if (limits.x < upper && measured_ok) {
+                    // At both existing search bounds there is no safe outward
+                    // allowance. Start from measured feedback and use the bound
+                    // itself rather than moving outside the permitted range.
+                    fps.Issue(search_pitch, target, now, kFacePitchSearchRate, &current);
+                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d tolerance=%d rate=%d", current, measured_ok, target, kPitchArrivalTolerance, kFacePitchSearchRate);
+                } else if (limits.x >= upper) {
                     face_pitch_requested.store(false);
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] no available pitch range; returning to body tracking");
                 }
