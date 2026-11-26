@@ -247,6 +247,7 @@ private:
     uint32_t _feedback_tick = 0;
     uint32_t _read_ok = 0, _read_retry_ok = 0, _read_fail = 0, _read_shared = 0;
     uint32_t _stall_ok = 0, _stall_fail = 0, _diag_tick = 0;
+    uint32_t _stall_errors[5] = {}; // 0: invalid range/other, 1..4: SCS_ERR_LIST
 
     static constexpr uint32_t kStallFeedbackIntervalMs = 50;
     static constexpr int kStallMinTargetDeltaRaw       = 8;
@@ -301,6 +302,11 @@ private:
         _diag_tick = now;
         mclog::tagInfo(_tag, "[SERVO_BUS] id={} pos_ok={} retry_ok={} pos_fail={} shared={} stall_ok={} stall_fail={}",
                        _config.id, _read_ok, _read_retry_ok, _read_fail, _read_shared, _stall_ok, _stall_fail);
+        if (_config.enableStallProtection) {
+            mclog::tagInfo(_tag, "[SERVO_STALL_BUS] id={} no_reply={} checksum={} wrong_id={} wrong_length={} invalid_other={}",
+                           _config.id, _stall_errors[ERR_NO_REPLY], _stall_errors[ERR_CRC_CMP],
+                           _stall_errors[ERR_SLAVE_ID], _stall_errors[ERR_BUFF_LEN], _stall_errors[0]);
+        }
     }
 
     static int abs_int(int value)
@@ -349,6 +355,9 @@ private:
         _feedback_position = -1;
         if (_scs_bus.FeedBack(_config.id) < 0) {
             ++_stall_fail;
+            const unsigned error = _scs_bus.getLastError();
+            ++_stall_errors[error <= ERR_BUFF_LEN ? error : 0];
+            report_bus_stats();
             reset_stall_detection();
             return false;
         }
@@ -359,12 +368,15 @@ private:
 
         if (!is_raw_pos_valid(current_raw_pos)) {
             ++_stall_fail;
+            ++_stall_errors[0];
+            report_bus_stats();
             reset_stall_detection();
             return false;
         }
         ++_stall_ok;
         _feedback_position = current_raw_pos;
         _feedback_tick = GetHAL().millis();
+        report_bus_stats();
 
         const int target_delta = target_raw_pos - current_raw_pos;
         if (abs_int(target_delta) < kStallMinTargetDeltaRaw) {

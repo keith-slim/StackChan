@@ -9,6 +9,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 
 static const char *TAG = "FT_SCSerial";
 
@@ -33,6 +34,7 @@ SCSerial::SCSerial(u8 End, u8 Level):SCS(End, Level)
 bool SCSerial::begin(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin, int buf_size)
 {
 	this->uart_num = uart_num;
+	last_tx_done_us = 0;
 
 	uart_config_t uart_config = {
 		.baud_rate = baud_rate,
@@ -140,6 +142,14 @@ void SCSerial::rFlushSCS()
 		return;
 	}
 
+	// Separate transactions, including unacknowledged writes. Drain late
+	// bytes only after the previous instruction has had time to finish.
+	constexpr int64_t kTransactionGapUs = 1000;
+	if (last_tx_done_us != 0) {
+		const int64_t elapsed = esp_timer_get_time() - last_tx_done_us;
+		if (elapsed >= 0 && elapsed < kTransactionGapUs)
+			esp_rom_delay_us(static_cast<uint32_t>(kTransactionGapUs - elapsed));
+	}
 	uart_flush_input(uart_num);
 }
 
@@ -149,5 +159,7 @@ void SCSerial::wFlushSCS()
 		return;
 	}
 
-	uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100));
+	const esp_err_t result = uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100));
+	last_tx_done_us = esp_timer_get_time();
+	if (result != ESP_OK) ESP_LOGW(TAG, "servo TX completion failed: %s", esp_err_to_name(result));
 }

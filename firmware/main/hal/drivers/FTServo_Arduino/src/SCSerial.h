@@ -25,6 +25,7 @@ public:
 	void end();
 
 private:
+	int64_t last_tx_done_us = 0;
 	int readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bool interByteTimeout);
 protected:
 	int writeSCS(unsigned char *nDat, int nLen);//输出nLen字节
