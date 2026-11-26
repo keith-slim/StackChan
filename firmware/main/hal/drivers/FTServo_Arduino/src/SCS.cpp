@@ -6,6 +6,8 @@
  */
 
 #include <stddef.h>
+#include <string.h>
+#include "esp_timer.h"
 #include "SCS.h"
 
 SCS::SCS()
@@ -60,32 +62,21 @@ u16 SCS::SCS2Host(u8 DataL, u8 DataH)
 
 void SCS::writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun)
 {
-	u8 msgLen = 2;
-	u8 bBuf[6];
-	u8 CheckSum = 0;
-	bBuf[0] = 0xff;
-	bBuf[1] = 0xff;
-	bBuf[2] = ID;
-	bBuf[4] = Fun;
-	if(nDat){
-		msgLen += nLen + 1;
-		bBuf[3] = msgLen;
-		bBuf[5] = MemAddr;
-		writeSCS(bBuf, 6);
-		
-	}else{
-		bBuf[3] = msgLen;
-		writeSCS(bBuf, 5);
+	if (nDat && nLen > 252) return;
+	u8 packet[259];
+	const unsigned length = (nDat ? unsigned(nLen) + 1 : 0) + 2;
+	packet[0] = packet[1] = 0xff;
+	packet[2] = ID;
+	packet[3] = static_cast<u8>(length);
+	packet[4] = Fun;
+	if (nDat) {
+		packet[5] = MemAddr;
+		memcpy(packet + 6, nDat, nLen);
 	}
-	CheckSum = ID + msgLen + Fun + MemAddr;
-	u8 i = 0;
-	if(nDat){
-		for(i=0; i<nLen; i++){
-			CheckSum += nDat[i];
-		}
-		writeSCS(nDat, nLen);
-	}
-	writeSCS(~CheckSum);
+	u8 sum = 0;
+	for (unsigned i = 2; i < length + 3; ++i) sum += packet[i];
+	packet[length + 3] = static_cast<u8>(~sum);
+	writeSCS(packet, length + 4);
 }
 
 //普通写指令
@@ -169,51 +160,62 @@ int SCS::writeWord(u8 ID, u8 MemAddr, u16 wDat)
 
 //读指令
 //舵机ID，MemAddr内存表地址，返回数据nData，数据长度nLen
+int SCS::receiveStatus(u8 ID, u8 *data, u8 nLen, u8 *replyID)
+{
+	u8Error = ERR_NO_REPLY;
+	u8Status = 0;
+	if (nLen > 253) { u8Error = ERR_BUFF_LEN; return 0; }
+	u8 packet[259];
+	unsigned used = 0;
+	const int64_t deadline = esp_timer_get_time() + 20000;
+	while (esp_timer_get_time() < deadline) {
+		const int64_t remaining = deadline - esp_timer_get_time();
+		if (remaining <= 0) break;
+		u8 byte;
+		if (readSCS(&byte, 1, static_cast<unsigned long>((remaining + 999) / 1000)) != 1) break;
+		packet[used++] = byte;
+		while (used >= 2) {
+			if (packet[0] != 0xff || packet[1] != 0xff ||
+			    (used >= 3 && packet[2] == 0xff)) {
+				memmove(packet, packet + 1, --used);
+				continue;
+			}
+			if (used < 4) break;
+			if ((ID != 0xfe && packet[2] != ID) || packet[2] >= 0xfe) {
+				u8Error = ERR_SLAVE_ID;
+				memmove(packet, packet + 1, --used);
+				continue;
+			}
+			if (packet[3] != unsigned(nLen) + 2) {
+				u8Error = ERR_BUFF_LEN;
+				memmove(packet, packet + 1, --used);
+				continue;
+			}
+			const unsigned total = unsigned(nLen) + 6;
+			if (used < total) break;
+			u8 sum = 0;
+			for (unsigned i = 2; i < total; ++i) sum += packet[i];
+			if (sum != 0xff) {
+				u8Error = ERR_CRC_CMP;
+				memmove(packet, packet + 1, --used);
+				continue;
+			}
+			if (data && nLen) memcpy(data, packet + 5, nLen);
+			if (replyID) *replyID = packet[2];
+			u8Status = packet[4];
+			u8Error = 0;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int SCS::Read(u8 ID, u8 MemAddr, u8 *nData, u8 nLen)
 {
 	rFlushSCS();
 	writeBuf(ID, MemAddr, &nLen, 1, INST_READ);
 	wFlushSCS();
-	u8Error = 0;
-	if(!checkHead()){
-		u8Error = ERR_NO_REPLY;
-		return 0;
-	}
-	u8 bBuf[4];
-	u8Status = 0;
-	if(readSCS(bBuf, 3)!=3){
-		u8Error = ERR_NO_REPLY;
-		return 0;
-	}
-	if(bBuf[0]!=ID && ID!=0xfe){
-		u8Error = ERR_SLAVE_ID;
-		return 0;
-	}
-	if(bBuf[1]!=(nLen+2)){
-		u8Error = ERR_BUFF_LEN;
-		return 0;
-	}
-	int Size = readSCS(nData, nLen);
-	if(Size!=nLen){
-		u8Error = ERR_NO_REPLY;
-		return 0;
-	}
-	if(readSCS(bBuf+3, 1)!=1){
-		u8Error = ERR_NO_REPLY;
-		return 0;
-	}
-	u8 calSum = bBuf[0]+bBuf[1]+bBuf[2];
-	u8 i;
-	for(i=0; i<Size; i++){
-		calSum += nData[i];
-	}
-	calSum = ~calSum;
-	if(calSum!=bBuf[3]){
-		u8Error = ERR_CRC_CMP;
-		return 0;
-	}
-	u8Status = bBuf[2];
-	return Size;
+	return receiveStatus(ID, nData, nLen, NULL) ? nLen : 0;
 }
 
 //读1字节，超时返回-1
@@ -242,37 +244,13 @@ int SCS::readWord(u8 ID, u8 MemAddr)
 }
 
 //Ping指令，返回舵机ID，超时返回-1
-int	SCS::Ping(u8 ID)
+int SCS::Ping(u8 ID)
 {
 	rFlushSCS();
 	writeBuf(ID, 0, NULL, 0, INST_PING);
 	wFlushSCS();
-	u8Status = 0;
-	if(!checkHead()){
-		u8Error = ERR_NO_REPLY;
-		return -1;
-	}
-	u8 bBuf[4];
-	u8Error = 0;
-	if(readSCS(bBuf, 4)!=4){
-		u8Error = ERR_NO_REPLY;
-		return -1;
-	}
-	if(bBuf[0]!=ID && ID!=0xfe){
-		u8Error = ERR_SLAVE_ID;
-		return -1;
-	}
-	if(bBuf[1]!=2){
-		u8Error = ERR_BUFF_LEN;
-		return -1;
-	}
-	u8 calSum = ~(bBuf[0]+bBuf[1]+bBuf[2]);
-	if(calSum!=bBuf[3]){
-		u8Error = ERR_CRC_CMP;
-		return -1;			
-	}
-	u8Status = bBuf[2];
-	return bBuf[0];
+	u8 replyID = 0;
+	return receiveStatus(ID, NULL, 0, &replyID) ? replyID : -1;
 }
 
 int SCS::checkHead()
@@ -297,35 +275,10 @@ int SCS::checkHead()
 	return 1;
 }
 
-int	SCS::Ack(u8 ID)
+int SCS::Ack(u8 ID)
 {
 	u8Error = 0;
-	if(ID!=0xfe && Level){
-		if(!checkHead()){
-			u8Error = ERR_NO_REPLY;
-			return 0;
-		}
-		u8Status = 0;
-		u8 bBuf[4];
-		if(readSCS(bBuf, 4)!=4){
-			u8Error = ERR_NO_REPLY;
-			return 0;
-		}
-		if(bBuf[0]!=ID){
-			u8Error = ERR_SLAVE_ID;
-			return 0;
-		}
-		if(bBuf[1]!=2){
-			u8Error = ERR_BUFF_LEN;
-			return 0;
-		}
-		u8 calSum = ~(bBuf[0]+bBuf[1]+bBuf[2]);
-		if(calSum!=bBuf[3]){
-			u8Error = ERR_CRC_CMP;
-			return 0;
-		}
-		u8Status = bBuf[2];
-	}
+	if (ID != 0xfe && Level) return receiveStatus(ID, NULL, 0, NULL);
 	return 1;
 }
 
