@@ -1497,7 +1497,7 @@ void Update(StackChan& sc) {
             // Issue the next target in this update, without a wait state.
             if (ps.running && !ps.commanded && !search_cancel.load()) {
                 ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
-                search_motion.moveYawWithSpeed(ps.target, 150);
+                search_motion.moveYawWithSpeed(ps.target, 100);
                 ps.revision = search_yaw.getCommandRevision();
                 ps.commanded = true;
             }
@@ -1527,7 +1527,7 @@ void Update(StackChan& sc) {
                      pitch_target);
             // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
             if (perception_face_tracking.load(std::memory_order_relaxed)) {
-                motion.trackWithSpeed(yaw_target, pitch_target, 500);
+                motion.trackWithSpeed(yaw_target, pitch_target, 100);
             } else {
                 motion.moveWithSpeed(yaw_target, pitch_target, 1000);
             }
