@@ -70,6 +70,7 @@ std::atomic<bool> search_active{false};
 std::atomic<bool> wake_pitch_pending{false};
 // The same owned command and feedback path is used by yaw and pitch search.
 constexpr int kPerceptionRate = 150; // tenths of a degree per second
+constexpr int kFaceTrackingRate = 195; // face following only
 constexpr int kPersonSearchRate = 400; // horizontal search only
 struct OwnedTracking {
     bool commanded = false;
@@ -1696,9 +1697,10 @@ void Update(StackChan& sc) {
                 const int target = std::clamp(actual + delta, limits.x, limits.y);
                 if (&servo == &yaw && target != actual)
                     last_yaw_direction.store(target < actual ? -1 : 1);
-                owned.Issue(servo, target, now, kPerceptionRate, &actual);
+                const int rate = face ? kFaceTrackingRate : kPerceptionRate;
+                owned.Issue(servo, target, now, rate, &actual);
                 ESP_LOGI(LOG_TAG, "[TRACK_CORRECTION] kind=%s axis=%s actual=%d target=%d rate=%d",
-                         face ? "face" : "body", axis, actual, target, kPerceptionRate);
+                         face ? "face" : "body", axis, actual, target, rate);
             };
             correct(yaw, perception_yaw, yaw_delta, "yaw");
             correct(pitch, perception_pitch, pitch_delta, "pitch");
