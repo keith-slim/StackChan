@@ -1565,9 +1565,9 @@ void Update(StackChan& sc) {
                 ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] cancelled: revision=%u current=%u", ps.revision, search_yaw.getCommandRevision());
                 ps.End(sc, false); // stall protection or another owner
             } else if (ps.commanded && ps.Sample(search_yaw, now, current, "yaw")) {
-                // Keep the full-limit motion target, but reverse 10 degrees
+                // Keep the full-limit motion target, but reverse 20 degrees
                 // before it so the spring does not settle at the endpoint.
-                constexpr int kSearchTurnMargin = 100; // 0.1-degree units
+                constexpr int kSearchTurnMargin = 200; // 0.1-degree units
                 const bool sweep = ps.phase != PersonSearch::Return;
                 const int direction = ps.phase == PersonSearch::First ? ps.direction : -ps.direction;
                 const int margin = std::min(kSearchTurnMargin, (search_limits.y - search_limits.x) / 2);
