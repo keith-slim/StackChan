@@ -1547,20 +1547,28 @@ void Update(StackChan& sc) {
             ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] cancelled by motion owner");
         } else {
             if (fps.commanded && !search_pitch.isMoving()) {
-                fps.upward = !fps.upward;
                 fps.commanded = false;
+                if (fps.upward) {
+                    fps.upward = false;
+                } else {
+                    face_pitch_requested.store(false);
+                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] complete: no face; returning to body tracking pitch=%d",
+                             search_pitch.getCurrentAngle());
+                }
             }
             if (!fps.commanded && face_pitch_requested.load()) {
                 const auto limits = search_pitch.getAngleLimit();
                 const int current = search_pitch.getCurrentAngle();
                 if (fps.upward && current >= limits.y) fps.upward = false;
-                else if (!fps.upward && current <= limits.x) fps.upward = true;
                 const int target = fps.upward ? limits.y : limits.x;
                 if (limits.x < limits.y) {
                     search_pitch.trackWithSpeed(target, 100);
                     fps.revision = search_pitch.getCommandRevision();
                     fps.commanded = true;
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d target=%d rate=100", current, target);
+                } else {
+                    face_pitch_requested.store(false);
+                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] no available pitch range; returning to body tracking");
                 }
             }
         }
