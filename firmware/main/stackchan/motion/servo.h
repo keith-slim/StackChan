@@ -57,11 +57,11 @@ public:
      */
     void moveWithSpeed(int angle, int speed);
     // Rate-limited spring; speed is in tenths of a degree per second.
-    uint32_t trackWithSpeed(int angle, int speed);
+    uint32_t trackWithSpeed(int angle, int speed, const int* measured_start = nullptr);
     bool isTrackingCommandActive() const;
     // Hardware feedback must be distinguished from the interpolated fallback.
     virtual bool tryGetCurrentAngle(int& angle) { angle = getCurrentAngle(); return true; }
-    void stopTrackingIfOwned(uint32_t revision);
+    void stopTrackingIfOwned(uint32_t revision, const int* measured_stop = nullptr);
 
     // One physical position sync at entry, then direct timed setpoints.
     void moveWithDuration(int angle, uint32_t duration_ms, uint32_t now);

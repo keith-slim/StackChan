@@ -59,7 +59,6 @@ protected:
 	void Host2SCS(u8 *DataL, u8* DataH, u16 Data);//1个16位数拆分为2个8位数
 	u16	SCS2Host(u8 DataL, u8 DataH);//2个8位数组合为1个16位数
 	int	Ack(u8 ID);//返回应答
-	int receiveStatus(u8 ID, u8 *data, u8 nLen, u8 *replyID);
 	int checkHead();//帧头检测
 };
 #endif

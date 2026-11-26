@@ -142,12 +142,12 @@ void Servo::moveWithSpeed(int angle, int speed)
     moveWithSpringParams(angle, spring_options.stiffness, spring_options.damping);
 }
 
-uint32_t Servo::trackWithSpeed(int angle, int speed)
+uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
 {
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     const bool continuing = _tracking_target && _torque_commanded_enabled;
     const float position = continuing ? _tracking_position : static_cast<float>(
-        uitk::clamp(getCurrentAngle(), _angle_limit.x, _angle_limit.y));
+        uitk::clamp(measured_start ? *measured_start : getCurrentAngle(), _angle_limit.x, _angle_limit.y));
     const float velocity = continuing ? _tracking_velocity : 0.0f;
     cancelTimedMove();
     _tracking_rate = uitk::clamp(speed, 1, 1000);
@@ -171,11 +171,11 @@ bool Servo::isTrackingCommandActive() const
     return _tracking_target;
 }
 
-void Servo::stopTrackingIfOwned(uint32_t revision)
+void Servo::stopTrackingIfOwned(uint32_t revision, const int* measured_stop)
 {
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     if (getCommandRevision() != revision) return;
-    const int current = uitk::clamp(getCurrentAngle(), _angle_limit.x, _angle_limit.y);
+    const int current = uitk::clamp(measured_stop ? *measured_stop : getCurrentAngle(), _angle_limit.x, _angle_limit.y);
     stop_motion_at_angle(current);
     if (_torque_commanded_enabled) set_angle_impl(current);
 }

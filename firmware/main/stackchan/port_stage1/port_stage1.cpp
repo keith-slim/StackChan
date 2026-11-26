@@ -80,8 +80,9 @@ struct OwnedTracking {
     uint32_t stationary_since = 0;
     int stationary_angle = 0;
     bool stationary = false;
-    void Issue(motion::Servo& servo, int target, uint32_t now, int rate = kPerceptionRate) {
-        revision = servo.trackWithSpeed(target, rate);
+    void Issue(motion::Servo& servo, int target, uint32_t now, int rate = kPerceptionRate,
+               const int* measured_start = nullptr) {
+        revision = servo.trackWithSpeed(target, rate, measured_start);
         commanded = true;
         last_poll = now;
         sampled = false;
@@ -90,8 +91,8 @@ struct OwnedTracking {
     bool Superseded(motion::Servo& servo) const {
         return commanded && servo.getCommandRevision() != revision;
     }
-    void Stop(motion::Servo& servo) {
-        if (commanded) servo.stopTrackingIfOwned(revision);
+    void Stop(motion::Servo& servo, const int* measured_stop = nullptr) {
+        if (commanded) servo.stopTrackingIfOwned(revision, measured_stop);
         commanded = false;
         sampled = false;
     }
@@ -1632,26 +1633,28 @@ void Update(StackChan& sc) {
             const auto limits = search_pitch.getAngleLimit();
             const int upper = std::min(static_cast<int>(limits.y), 600); // face search only: 60 degrees
             const int goal = fps.upward ? upper : limits.x;
+            bool segment_sample_valid = false;
             if (fps.commanded && fps.Sample(search_pitch, now, measured, "pitch") &&
                 fps.Settled(search_pitch, measured, goal, now)) {
-                fps.Stop(search_pitch);
+                segment_sample_valid = true;
+                fps.Stop(search_pitch, &measured);
                 ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] segment complete actual=%d target=%d", measured, goal);
                 if (fps.upward) {
                     fps.upward = false;
                 } else {
                     face_pitch_requested.store(false);
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] complete: no face; returning to body tracking pitch=%d",
-                             search_pitch.getCurrentAngle());
+                             measured);
                 }
             }
             if (!fps.commanded && face_pitch_requested.load() &&
                 Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
-                int current = 0;
-                const bool measured_ok = search_pitch.tryGetCurrentAngle(current);
+                int current = measured;
+                const bool measured_ok = segment_sample_valid || search_pitch.tryGetCurrentAngle(current);
                 if (measured_ok && fps.upward && current >= upper) fps.upward = false;
                 const int target = fps.upward ? upper : limits.x;
                 if (limits.x < upper) {
-                    fps.Issue(search_pitch, target, now);
+                    fps.Issue(search_pitch, target, now, kPerceptionRate, measured_ok ? &current : nullptr);
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d rate=%d", current, measured_ok, target, kPerceptionRate);
                 } else {
                     face_pitch_requested.store(false);
@@ -1693,7 +1696,7 @@ void Update(StackChan& sc) {
                 const int target = std::clamp(actual + delta, limits.x, limits.y);
                 if (&servo == &yaw && target != actual)
                     last_yaw_direction.store(target < actual ? -1 : 1);
-                owned.Issue(servo, target, now);
+                owned.Issue(servo, target, now, kPerceptionRate, &actual);
                 ESP_LOGI(LOG_TAG, "[TRACK_CORRECTION] kind=%s axis=%s actual=%d target=%d rate=%d",
                          face ? "face" : "body", axis, actual, target, kPerceptionRate);
             };

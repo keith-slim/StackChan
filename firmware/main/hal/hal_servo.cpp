@@ -126,7 +126,15 @@ public:
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         uint8_t communication_error = 0;
-        int current_pos = read_position_with_retry(communication_error);
+        int current_pos = -1;
+        if (is_raw_pos_valid(_feedback_position) && GetHAL().millis() - _feedback_tick <= 10) {
+            current_pos = _feedback_position;
+            ++_read_shared;
+        } else {
+            current_pos = read_position_with_retry(communication_error);
+        }
+        _feedback_position = -1; // a physical sample is shared at most once
+        report_bus_stats();
         if (!is_raw_pos_valid(current_pos)) {
             int fallback_angle = uitk::clamp(Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
             mclog::tagWarn(_tag,
@@ -160,6 +168,7 @@ public:
         // and avoid adding a 10 ms timeout to every animation frame.
         if (_torque_command_known && _torque_commanded_enabled == enabled) return;
         _torque_command_known = true;
+        _feedback_position = -1;
         _last_tracking_raw = -1;
         _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
         Servo::setTorqueEnabled(enabled);
@@ -234,6 +243,10 @@ private:
     Mode _current_mode = Mode::Position;
     bool _torque_command_known = false;
     int _last_tracking_raw = -1;
+    int _feedback_position = -1;
+    uint32_t _feedback_tick = 0;
+    uint32_t _read_ok = 0, _read_retry_ok = 0, _read_fail = 0, _read_shared = 0;
+    uint32_t _stall_ok = 0, _stall_fail = 0, _diag_tick = 0;
 
     static constexpr uint32_t kStallFeedbackIntervalMs = 50;
     static constexpr int kStallMinTargetDeltaRaw       = 8;
@@ -270,11 +283,24 @@ private:
     {
         int current_pos = _scs_bus.ReadPos(_config.id);
         communication_error = _scs_bus.getLastError();
-        if (current_pos >= 0 || communication_error == 0) return current_pos;
-        vTaskDelay(pdMS_TO_TICKS(1));
-        current_pos = _scs_bus.ReadPos(_config.id);
-        communication_error = _scs_bus.getLastError();
+        if (is_raw_pos_valid(current_pos)) { ++_read_ok; return current_pos; }
+        if (current_pos < 0 && communication_error != 0) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            current_pos = _scs_bus.ReadPos(_config.id);
+            communication_error = _scs_bus.getLastError();
+            if (is_raw_pos_valid(current_pos)) { ++_read_retry_ok; return current_pos; }
+        }
+        ++_read_fail;
         return current_pos;
+    }
+
+    void report_bus_stats()
+    {
+        const uint32_t now = GetHAL().millis();
+        if (now - _diag_tick < 10000) return;
+        _diag_tick = now;
+        mclog::tagInfo(_tag, "[SERVO_BUS] id={} pos_ok={} retry_ok={} pos_fail={} shared={} stall_ok={} stall_fail={}",
+                       _config.id, _read_ok, _read_retry_ok, _read_fail, _read_shared, _stall_ok, _stall_fail);
     }
 
     static int abs_int(int value)
@@ -295,6 +321,7 @@ private:
     void reset_runtime_limits()
     {
         _runtime_raw_pos_limit = _config.rawPosLimit;
+        _feedback_position = -1;
         _last_tracking_raw = -1;
         set_angle_limit(_config.angleLimit);
         reset_stall_detection();
@@ -319,7 +346,9 @@ private:
         }
         _last_stall_check_tick = now;
 
+        _feedback_position = -1;
         if (_scs_bus.FeedBack(_config.id) < 0) {
+            ++_stall_fail;
             reset_stall_detection();
             return false;
         }
@@ -329,9 +358,13 @@ private:
         const int load_abs        = abs_int(_scs_bus.ReadLoad(-1));
 
         if (!is_raw_pos_valid(current_raw_pos)) {
+            ++_stall_fail;
             reset_stall_detection();
             return false;
         }
+        ++_stall_ok;
+        _feedback_position = current_raw_pos;
+        _feedback_tick = GetHAL().millis();
 
         const int target_delta = target_raw_pos - current_raw_pos;
         if (abs_int(target_delta) < kStallMinTargetDeltaRaw) {
@@ -398,6 +431,7 @@ private:
 
         check_mode(Mode::Position);
         _scs_bus.WritePos(_config.id, raw_pos, 20, 0);
+        _feedback_position = -1;
         _last_tracking_raw = -1;
 
         mclog::tagWarn(_tag,
@@ -411,6 +445,7 @@ private:
             return;
         }
 
+        _feedback_position = -1;
         _last_tracking_raw = -1;
         _scs_bus.SwitchMode(_config.id, static_cast<uint8_t>(targetMode));
         _current_mode = targetMode;
