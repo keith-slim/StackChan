@@ -71,7 +71,8 @@ std::atomic<bool> search_active{false};
 std::atomic<bool> wake_pitch_pending{false};
 // The same owned command and feedback path is used by yaw and pitch search.
 constexpr int kPerceptionRate = 150; // tenths of a degree per second
-constexpr int kFaceTrackingRate = 195; // face following only
+constexpr int kFaceTrackingRate = 200; // face following only
+constexpr int kFacePitchSearchRate = 200; // vertical face search only
 constexpr int kPersonSearchRate = 400; // horizontal search only
 struct OwnedTracking {
     bool commanded = false;
@@ -1701,8 +1702,8 @@ void Update(StackChan& sc) {
                 if (measured_ok && fps.upward && current >= upper) fps.upward = false;
                 const int target = fps.upward ? upper : limits.x;
                 if (limits.x < upper) {
-                    fps.Issue(search_pitch, target, now, kPerceptionRate, measured_ok ? &current : nullptr);
-                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d rate=%d", current, measured_ok, target, kPerceptionRate);
+                    fps.Issue(search_pitch, target, now, kFacePitchSearchRate, measured_ok ? &current : nullptr);
+                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d rate=%d", current, measured_ok, target, kFacePitchSearchRate);
                 } else {
                     face_pitch_requested.store(false);
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] no available pitch range; returning to body tracking");
