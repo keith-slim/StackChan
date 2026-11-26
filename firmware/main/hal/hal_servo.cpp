@@ -277,6 +277,8 @@ private:
     uint32_t _feedback_tick = 0;
     uint32_t _read_ok = 0, _read_retry_ok = 0, _read_fail = 0, _read_shared = 0;
     uint32_t _stall_ok = 0, _stall_fail = 0, _diag_tick = 0;
+    uint32_t _stall_retry_ok = 0, _stall_retry_fail = 0;
+    uint32_t _stall_last_valid_tick = 0;
     uint32_t _stall_errors[5] = {}; // 0: invalid range/other, 1..4: SCS_ERR_LIST
 
     static constexpr uint32_t kStallFeedbackIntervalMs = 50;
@@ -350,9 +352,10 @@ private:
                            static_cast<unsigned>(d.previous_id), static_cast<unsigned>(d.previous_command), static_cast<unsigned>(d.previous_address));
         }
         if (_config.enableStallProtection) {
-            mclog::tagInfo(_tag, "[SERVO_STALL_BUS] id={} no_reply={} checksum={} wrong_id={} wrong_length={} invalid_other={}",
+            mclog::tagInfo(_tag, "[SERVO_STALL_BUS] id={} no_reply={} checksum={} wrong_id={} wrong_length={} invalid_other={} retry_ok={} retry_fail={}",
                            _config.id, _stall_errors[ERR_NO_REPLY], _stall_errors[ERR_CRC_CMP],
-                           _stall_errors[ERR_SLAVE_ID], _stall_errors[ERR_BUFF_LEN], _stall_errors[0]);
+                           _stall_errors[ERR_SLAVE_ID], _stall_errors[ERR_BUFF_LEN], _stall_errors[0],
+                           _stall_retry_ok, _stall_retry_fail);
         }
     }
 
@@ -401,7 +404,15 @@ private:
         _last_stall_check_tick = now;
 
         _feedback_position = -1;
-        if (_scs_bus.FeedBack(_config.id) < 0) {
+        int feedback = _scs_bus.FeedBack(_config.id);
+        // A single retry is useful only after an isolated lost sample.
+        // Do not double bus load throughout a persistent outage.
+        if (feedback < 0 && _last_stall_feedback_valid) {
+            feedback = _scs_bus.FeedBack(_config.id);
+            if (feedback < 0) ++_stall_retry_fail;
+            else ++_stall_retry_ok;
+        }
+        if (feedback < 0) {
             ++_stall_fail;
             const unsigned error = _scs_bus.getLastError();
             ++_stall_errors[error <= ERR_BUFF_LEN ? error : 0];
@@ -424,6 +435,9 @@ private:
         ++_stall_ok;
         _feedback_position = current_raw_pos;
         _feedback_tick = GetHAL().millis();
+        // Do not compare stale samples after a long interruption.
+        if (_feedback_tick - _stall_last_valid_tick > 150) reset_stall_detection();
+        _stall_last_valid_tick = _feedback_tick;
         report_bus_stats();
 
         const int target_delta = target_raw_pos - current_raw_pos;

@@ -67,6 +67,14 @@ bool SCSerial::begin(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin
 		return false;
 	}
 
+	// Short servo replies (6-21 bytes) must reach the driver promptly.
+	// Keep the existing baud rate and protocol; avoid per-byte interrupts.
+	const esp_err_t fifo_result = uart_set_rx_full_threshold(uart_num, 16);
+	const esp_err_t timeout_result = uart_set_rx_timeout(uart_num, 3);
+	if (fifo_result != ESP_OK || timeout_result != ESP_OK) {
+		ESP_LOGW(TAG, "servo RX tuning failed: fifo=%s timeout=%s",
+		         esp_err_to_name(fifo_result), esp_err_to_name(timeout_result));
+	}
 	return true;
 }
 
