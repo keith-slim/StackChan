@@ -138,6 +138,7 @@ struct PersonSearch : OwnedTracking {
     int finish_angle = 0;
     int direction = 1, origin = 0, target = 0;
     bool running = false;
+    bool pausing = false;
     uint32_t epoch = 0;
     bool StopOwned(StackChan& sc) {
         if (!commanded) return true;
@@ -153,8 +154,9 @@ struct PersonSearch : OwnedTracking {
         return true;
     }
     void Pause(StackChan& sc) {
-        if (!running) return;
-        StopOwned(sc);
+        if (!running || !commanded) return;
+        if (!Superseded(sc.motion().yawServo())) sc.motion().yawServo().requestHardwareStop("pause");
+        pausing = !StopOwned(sc);
     }
 };
 PersonSearch person_search;
@@ -1404,13 +1406,11 @@ void RequestWakeSearchPitch() {
     wake_pitch_pending.store(true);
 }
 void StartPersonSearch(int yaw_delta) {
-    search_cancel.store(false);
     search_active.store(true);
     search_start_epoch.store(speech_motion_epoch.load());
     search_start.store(yaw_delta == 0 ? kSearchZero : std::clamp(yaw_delta, -700, 700));
 }
 void ResumePersonSearch() {
-    search_cancel.store(false);
     search_active.store(true);
     search_start_epoch.store(speech_motion_epoch.load());
     search_start.store(kSearchResume);
@@ -1426,8 +1426,8 @@ void StopPersonSearch() {
     wake_pitch_pending.store(false);
     search_start.store(0);
     search_cancel_tick.store(GetHAL().millis());
-    ESP_LOGI(LOG_TAG, "[SWEEP_STOP_REQUEST] tick=%lu", static_cast<unsigned long>(search_cancel_tick.load()));
     search_cancel.store(true);
+    ESP_LOGI(LOG_TAG, "[SWEEP_STOP_REQUEST] tick=%lu", static_cast<unsigned long>(search_cancel_tick.load()));
     search_active.store(false);
 }
 bool IsPersonSearchActive() { return search_active.load(); }
@@ -1532,16 +1532,20 @@ void Update(StackChan& sc) {
     auto& ps = person_search;
     auto& search_motion = sc.motion();
     auto& search_yaw = search_motion.yawServo();
+    search_yaw.setSweepCancelFlag(&search_cancel);
     const auto search_limits = search_yaw.getAngleLimit();
+    const int search_margin = std::min(200, (search_limits.y - search_limits.x) / 2);
+    const int sweep_left = search_limits.x + search_margin;
+    const int sweep_right = search_limits.y - search_margin;
     const auto device_state = Application::GetInstance().GetDeviceState();
     const bool search_blocked = device_state == kDeviceStateSpeaking || speech_tracking_paused.load() ||
         r.cue_active || r.own_neck || IsWakeSequenceActive() || Runtime::Sleeping(r.phase) ||
         Runtime::SleepPreparing(r.phase) || search_motion.isModifyLocked() || sc.avatar().isModifyLocked();
     if (search_cancel.load()) {
         perception_look_pending.store(false);
-        perception_yaw.Stop(search_yaw);
-        perception_pitch.Stop(search_motion.pitchServo());
         if (ps.End(sc, true)) {
+            perception_yaw.Stop(search_yaw);
+            perception_pitch.Stop(search_motion.pitchServo());
             ESP_LOGI(LOG_TAG, "[SWEEP_DETECT_STOP] elapsed_ms=%lu", static_cast<unsigned long>(GetHAL().millis() - search_cancel_tick.load()));
             search_cancel.store(false);
         }
@@ -1562,11 +1566,16 @@ void Update(StackChan& sc) {
         perception_look_pending.store(false);
         ps.running = true;
         ps.direction = (resume ? last_yaw_direction.load() : delta) < 0 ? -1 : 1;
-        ps.origin = std::clamp(search_motion.getCurrentYawAngle() + delta, search_limits.x, search_limits.y);
-        ps.target = ps.direction > 0 ? search_limits.y : search_limits.x;
+        int measured_origin = 0;
+        if (!search_yaw.tryGetCurrentAngle(measured_origin)) {
+            ps.running = false;
+            search_start.store(start);
+        }
+        ps.origin = std::clamp(measured_origin + delta, search_limits.x, search_limits.y);
+        ps.target = ps.direction > 0 ? sweep_right : sweep_left;
         ps.epoch = search_start_epoch.load();
         search_active.store(true);
-        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d target=%d return=%d limits=%d,%d resume=%d rate=%d",
+        if (ps.running) ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d target=%d return=%d limits=%d,%d resume=%d rate=%d",
                  ps.direction, ps.target, ps.origin, search_limits.x, search_limits.y, resume, kPersonSearchRate);
     }
     if (ps.running && !search_cancel.load()) {
@@ -1574,8 +1583,9 @@ void Update(StackChan& sc) {
             // An epoch can change before an explicit actuator command arrives.
             // Stop the native sweep if we still own it; otherwise respect the new owner.
             ps.End(sc, !ps.Superseded(search_yaw));
-        } else if (search_blocked) {
+        } else if (search_blocked || ps.pausing) {
             ps.Pause(sc);
+            if (!ps.commanded) ps.pausing = false;
         } else {
             int current = 0;
             if (ps.Superseded(search_yaw)) {
@@ -1583,16 +1593,9 @@ void Update(StackChan& sc) {
                 ps.End(sc, false); // stall protection or another owner
             } else if (ps.finish == PersonSearch::Finish::None && ps.commanded &&
                        ps.Sample(search_yaw, now, current, "yaw")) {
-                // Keep the full-limit motion target, but reverse 20 degrees
-                // before it so the spring does not settle at the endpoint.
-                constexpr int kSearchTurnMargin = 200; // 0.1-degree units
-                const bool sweep = ps.phase != PersonSearch::Return;
-                const int direction = ps.phase == PersonSearch::First ? ps.direction : -ps.direction;
-                const int margin = std::min(kSearchTurnMargin, (search_limits.y - search_limits.x) / 2);
-                const bool reached = sweep
-                    ? (direction > 0 ? current >= search_limits.y - margin
-                                     : current <= search_limits.x + margin)
-                    : std::abs(current - ps.target) <= 5;
+                // The actual native destination is the search boundary.
+                // Allow one raw position quantum plus rounding.
+                const bool reached = std::abs(current - ps.target) <= 7;
                 if (!reached && ps.stationary && now - ps.stationary_since >= 750) {
                     ESP_LOGW(LOG_TAG, "[SWEEP_STATIONARY] yaw=%d target=%d phase=%d", current, ps.target, ps.phase);
                     ps.finish = PersonSearch::Finish::End;
@@ -1603,28 +1606,30 @@ void Update(StackChan& sc) {
                     ps.finish_angle = current;
                 }
             }
-            // Latch the requested stop until verified. Do not decide the
-            // direction again from a later, possibly shifted sample.
-            if (ps.running && ps.finish != PersonSearch::Finish::None && ps.StopOwned(sc)) {
-                if (ps.finish == PersonSearch::Finish::End) {
-                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: verified stop");
-                    ps.End(sc, false);
-                } else {
-                    if (ps.phase == PersonSearch::First) {
-                        ps.phase = PersonSearch::Reverse;
-                        ps.target = ps.direction > 0 ? search_limits.x : search_limits.y;
-                    } else {
-                        ps.phase = PersonSearch::Return;
-                        ps.target = ps.origin;
-                    }
-                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d yaw=%d target=%d",
-                             ps.phase, ps.finish_angle, ps.target);
+            if (ps.running && ps.finish == PersonSearch::Finish::End) {
+                if (ps.commanded) search_yaw.requestHardwareStop("search_complete");
+                if (ps.StopOwned(sc)) ps.End(sc, false);
+            } else if (ps.running && ps.finish == PersonSearch::Finish::Turn && !search_cancel.load()) {
+                const auto next_phase = ps.phase == PersonSearch::First ? PersonSearch::Reverse : PersonSearch::Return;
+                const int next_target = next_phase == PersonSearch::Reverse
+                    ? (ps.direction > 0 ? sweep_left : sweep_right) : ps.origin;
+                // A direct retarget replaces the previous position instruction.
+                // Never insert a hold command in between the two segments.
+                if (search_yaw.startHardwareSweep(next_target, kPersonSearchRate, ps.revision, ps.commanded)) {
+                    ps.commanded = true;
+                    ps.phase = next_phase;
+                    ps.target = next_target;
                     ps.finish = PersonSearch::Finish::None;
+                    ps.last_poll = now;
+                    ps.sampled = false;
+                    ps.stationary = false;
+                    last_yaw_direction.store(next_target < ps.finish_angle ? -1 : 1);
+                    ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d yaw=%d target=%d", ps.phase, ps.finish_angle, ps.target);
                 }
             }
             // Initial move and each reversal use the same command path.
             // Issue the next target in this update, without a wait state.
-            if (ps.running && !ps.commanded && !search_cancel.load()) {
+            if (ps.running && !ps.commanded && ps.finish == PersonSearch::Finish::None && !search_cancel.load()) {
                 ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
                 // Preserve the direction of the segment actually issued, including reversals.
                 const int direction = ps.phase == PersonSearch::Reverse ? -ps.direction : ps.direction;

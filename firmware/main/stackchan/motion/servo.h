@@ -59,7 +59,10 @@ public:
     // Rate-limited spring; speed is in tenths of a degree per second.
     uint32_t trackWithSpeed(int angle, int speed, const int* measured_start = nullptr);
     bool isTrackingCommandActive() const;
-    bool startHardwareSweep(int angle, int rate, uint32_t& revision);
+    bool startHardwareSweep(int angle, int rate, uint32_t& revision, bool retarget = false);
+    void requestHardwareStop(const char* reason);
+    void setSweepCancelFlag(const std::atomic<bool>* flag) { _sweep_cancel_flag.store(flag); }
+    void servicePriorityStop();
     bool stopHardwareSweep(uint32_t revision);
     // Hardware feedback must be distinguished from the interpolated fallback.
     virtual bool tryGetCurrentAngle(int& angle) { angle = getCurrentAngle(); return true; }
@@ -187,6 +190,8 @@ protected:
     virtual void set_tracking_angle_impl(int angle, int rate) { set_angle_impl(angle); }
     virtual bool write_hardware_sweep(int angle, int rate, int measured) { return false; }
     virtual bool hold_hardware_sweep(int& measured) { return false; }
+    virtual bool supports_hardware_sweep() const { return false; }
+    virtual void service_hardware_sweep() {}
     virtual bool is_moving_impl()
     {
         return false;
@@ -205,6 +210,11 @@ protected:
     enum class Profile { Idle, Spring, Timed, Tracking, HardwareSweep };
     Profile _profile = Profile::Idle;
     int _goal = 0;
+    std::atomic<const std::atomic<bool>*> _sweep_cancel_flag{nullptr};
+    bool sweep_cancelled() const { auto* flag = _sweep_cancel_flag.load(); return flag && flag->load(); }
+    std::atomic<bool> _hardware_stop_requested{false};
+    std::atomic<uint32_t> _hardware_stop_revision{0};
+    std::atomic<const char*> _hardware_stop_reason{"unspecified"};
     float _tracking_position = 0.0f;
     float _tracking_velocity = 0.0f;
     int _tracking_rate = 0;

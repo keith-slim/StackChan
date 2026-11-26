@@ -63,32 +63,28 @@ void SCS::writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun)
 	last_tx_id = ID;
 	last_tx_command = Fun;
 	last_tx_address = MemAddr;
-	u8 msgLen = 2;
-	u8 bBuf[6];
-	u8 CheckSum = 0;
-	bBuf[0] = 0xff;
-	bBuf[1] = 0xff;
-	bBuf[2] = ID;
-	bBuf[4] = Fun;
-	if(nDat){
-		msgLen += nLen + 1;
-		bBuf[3] = msgLen;
-		bBuf[5] = MemAddr;
-		writeSCS(bBuf, 6);
-		
-	}else{
-		bBuf[3] = msgLen;
-		writeSCS(bBuf, 5);
-	}
-	CheckSum = ID + msgLen + Fun + MemAddr;
-	u8 i = 0;
-	if(nDat){
-		for(i=0; i<nLen; i++){
-			CheckSum += nDat[i];
+	// One contiguous command frame avoids scheduler gaps between header,
+	// payload and checksum. The wire bytes and reply parser are unchanged.
+	u8 frame[262];
+	const unsigned payload = nDat ? nLen : 0;
+	const u8 msgLen = nDat ? static_cast<u8>(payload + 3) : 2;
+	frame[0] = 0xff;
+	frame[1] = 0xff;
+	frame[2] = ID;
+	frame[3] = msgLen;
+	frame[4] = Fun;
+	unsigned length = 5;
+	u8 checksum = ID + msgLen + Fun;
+	if (nDat) {
+		frame[length++] = MemAddr;
+		checksum += MemAddr;
+		for (unsigned i = 0; i < payload; ++i) {
+			frame[length++] = nDat[i];
+			checksum += nDat[i];
 		}
-		writeSCS(nDat, nLen);
 	}
-	writeSCS(~CheckSum);
+	frame[length++] = static_cast<u8>(~checksum);
+	writeSCS(frame, length);
 }
 
 //普通写指令

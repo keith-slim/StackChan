@@ -86,76 +86,145 @@ public:
         // Continue monitoring the last physical setpoint even when the
         // interpolation has finished or its quantized position is unchanged.
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
-        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
-        if (_config.enableStallProtection && _torque_commanded_enabled &&
-            _current_mode == Mode::Position && _monitor_target >= 0) {
-            update_stall_protection(_monitor_target);
+        {
+            std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+            if (_config.enableStallProtection && _torque_commanded_enabled &&
+                _current_mode == Mode::Position && _monitor_target >= 0) {
+                update_stall_protection(_monitor_target);
+            }
         }
+        report_bus_stats();
     }
 
     int _sweep_hold_raw = -1;
-    bool write_hardware_sweep(int angle, int rate, int measured) override
+    int _sweep_target_raw = -1;
+    int _sweep_rate = 0;
+    uint32_t _sweep_sent_tick = 0, _sweep_check_tick = 0;
+    bool _sweep_accepted = false;
+    bool _sweep_hold_accepted = false;
+    unsigned _sweep_retries = 0;
+    bool supports_hardware_sweep() const override { return true; }
+    int angle_to_raw(int angle) const {
+        return uitk::clamp(_zero_pos + angle * 16 / 5 / 10,
+                           _runtime_raw_pos_limit.x, _runtime_raw_pos_limit.y);
+    }
+    bool send_position(int raw, uint16_t duration)
     {
-        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
-        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
-        const int target = uitk::clamp(_zero_pos + angle * 16 / 5 / 10,
-                                       _runtime_raw_pos_limit.x, _runtime_raw_pos_limit.y);
-        const int start = uitk::clamp(_zero_pos + measured * 16 / 5 / 10,
-                                      _runtime_raw_pos_limit.x, _runtime_raw_pos_limit.y);
-        const int speed = uitk::clamp(rate, 1, 1000);
-        const int duration = uitk::clamp((std::abs(target - start) * 3125 + speed - 1) / speed, 20, 9999);
-        _sweep_hold_raw = -1;
-        check_mode(Mode::Position);
         const auto before = _scs_bus.getWriteAckDiagnostic(_config.id).received;
-        _scs_bus.WritePos(_config.id, target, duration, 0);
-        const bool ack = _scs_bus.getWriteAckDiagnostic(_config.id).received != before && _scs_bus.getState() == 0;
-        _monitor_target = target;
+        _scs_bus.WritePos(_config.id, raw, duration, 0);
         _feedback_position = -1;
         _last_tracking_raw = -1;
         _last_ack_raw = -1;
-        const int goal_readback = _scs_bus.readWord(_config.id, SCSCL_GOAL_POSITION_L);
-        mclog::tagInfo(_tag, "[SWEEP_START] id={} rev={} measured={} target={} duration_ms={} rate={} ack={} goal_verified={} goal_raw={}",
-                       _config.id, getCommandRevision(), measured, angle, duration, rate, ack, goal_readback == target, goal_readback);
-        return goal_readback == target;
+        _monitor_target = raw;
+        return _scs_bus.getWriteAckDiagnostic(_config.id).received != before && _scs_bus.getState() == 0;
+    }
+    bool issue_sweep(int raw, int rate, int start)
+    {
+        const int duration = uitk::clamp((std::abs(raw - start) * 3125 + rate - 1) / rate, 20, 9999);
+        _sweep_sent_tick = GetHAL().millis();
+        return send_position(raw, duration);
+    }
+    bool write_hardware_sweep(int angle, int rate, int measured) override
+    {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
+        std::unique_lock<std::mutex> bus_lock(_scs_bus_mutex);
+        _sweep_hold_raw = -1;
+        _sweep_hold_accepted = false;
+        _sweep_target_raw = angle_to_raw(angle);
+        _sweep_rate = uitk::clamp(rate, 1, 1000);
+        _sweep_retries = 0;
+        check_mode(Mode::Position);
+        const int start = angle_to_raw(measured);
+        if (sweep_cancelled()) { requestHardwareStop("detection_or_end"); return false; }
+        _sweep_accepted = issue_sweep(_sweep_target_raw, _sweep_rate, start);
+        _sweep_check_tick = _sweep_sent_tick;
+        const bool ack = _sweep_accepted;
+        bus_lock.unlock();
+        ESP_LOGI("ScsServo", "[SWEEP_START] id=%d rev=%u measured=%d target=%d raw=%d rate=%d ack=%d",
+                 _config.id, getCommandRevision(), measured, angle, _sweep_target_raw, rate, ack);
+        return ack;
+    }
+
+    void service_hardware_sweep() override
+    {
+        if (_sweep_accepted || GetHAL().millis() - _sweep_check_tick < 100) return;
+        _sweep_check_tick = GetHAL().millis();
+        std::unique_lock<std::mutex> bus_lock(_scs_bus_mutex);
+        const int goal = _scs_bus.readWord(_config.id, SCSCL_GOAL_POSITION_L);
+        if (goal == _sweep_target_raw) _sweep_accepted = true;
+        // A missing read is not a rejected command. Retry only a confirmed
+        // mismatch, using a new measured starting point and a bounded count.
+        else if (goal >= 0 && _sweep_retries < 2) {
+            uint8_t error = 0;
+            const int raw = read_position_with_retry(error);
+            if (is_raw_pos_valid(raw) && !_hardware_stop_requested.load() && !sweep_cancelled()) {
+                ++_sweep_retries;
+                _sweep_accepted = issue_sweep(_sweep_target_raw, _sweep_rate, raw);
+            }
+        }
+        const bool accepted = _sweep_accepted;
+        const unsigned retries = _sweep_retries;
+        bus_lock.unlock();
+        ESP_LOGI("ScsServo", "[SWEEP_ACCEPT] id=%d goal=%d accepted=%d retries=%u", _config.id, goal, accepted, retries);
+        if (!_sweep_accepted && ((retries >= 2 && goal >= 0) || GetHAL().millis() - _sweep_sent_tick > 8000)) requestHardwareStop("command_unconfirmed");
     }
 
     bool hold_hardware_sweep(int& measured) override
     {
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
-        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+        std::unique_lock<std::mutex> bus_lock(_scs_bus_mutex);
         const uint32_t started = GetHAL().millis();
+        bool ack = false;
         uint8_t error = 0;
-        const int raw = read_position_with_retry(error);
-        if (!is_raw_pos_valid(raw)) {
-            // Never send an interpolated/stale angle as a stop for a long move.
-            mclog::tagWarn(_tag, "[SWEEP_STOP] id={} read_failed error={}", _config.id, communication_error_name(error));
+        if (_sweep_hold_raw < 0) {
+            // A sample from this instant is preferred. Do not stop at a stale
+            // interpolated position or repeatedly move the hold target.
+            int raw = read_position_with_retry(error);
+            if (!is_raw_pos_valid(raw)) return false;
+            _sweep_hold_raw = raw;
+            ack = send_position(raw, 20);
+            _sweep_hold_accepted = ack;
+            _sweep_check_tick = GetHAL().millis();
+            bus_lock.unlock();
+            ESP_LOGI("ScsServo", "[SWEEP_HOLD_SENT] id=%d rev=%u raw=%d ack=%d reason=%s elapsed_ms=%u",
+                     _config.id, getCommandRevision(), raw, ack, _hardware_stop_reason.load(),
+                     static_cast<unsigned>(GetHAL().millis()-started));
             return false;
         }
-        bool ack = false;
-        if (_sweep_hold_raw < 0) {
-            const auto before = _scs_bus.getWriteAckDiagnostic(_config.id).received;
-            _scs_bus.WritePos(_config.id, raw, 20, 0);
-            ack = _scs_bus.getWriteAckDiagnostic(_config.id).received != before && _scs_bus.getState() == 0;
-            _sweep_hold_raw = raw;
-        }
-        const int goal = _scs_bus.readWord(_config.id, SCSCL_GOAL_POSITION_L);
+        if (GetHAL().millis() - _sweep_check_tick < 40) return false;
+        _sweep_check_tick = GetHAL().millis();
+        const int actual = read_position_with_retry(error);
+        if (!is_raw_pos_valid(actual)) return false;
         const int moving = _scs_bus.ReadMove(_config.id);
-        uint8_t verify_error = 0;
-        const int actual = read_position_with_retry(verify_error);
-        const bool verified = goal == _sweep_hold_raw && moving == 0 &&
-                              is_raw_pos_valid(actual) && std::abs(actual - _sweep_hold_raw) <= 2;
-        _feedback_position = -1;
-        _last_tracking_raw = -1;
-        _last_ack_raw = -1;
-        measured = raw_pos_to_angle(is_raw_pos_valid(actual) ? actual : raw);
-        mclog::tagInfo(_tag, "[SWEEP_STOP] id={} rev={} measured={} hold_raw={} goal_raw={} actual_raw={} ack={} moving={} verified={} elapsed_ms={}",
-                       _config.id, getCommandRevision(), measured, _sweep_hold_raw, goal, actual,
-                       ack, moving, verified, GetHAL().millis() - started);
-        // Only resend when the target was not verified, or when a stopped
-        // actuator is not at the requested hold. Let an accepted hold settle.
-        if (verified || goal != _sweep_hold_raw ||
-            (moving == 0 && is_raw_pos_valid(actual) && std::abs(actual - _sweep_hold_raw) > 2))
-            _sweep_hold_raw = -1;
+        // Actual stopped feedback is sufficient if it matches the hold.
+        // Never interpret a missing register read as a mismatched target.
+        int goal = -1;
+        if (!_sweep_hold_accepted || (moving == 0 && std::abs(actual - _sweep_hold_raw) > 2)) {
+            goal = _scs_bus.readWord(_config.id, SCSCL_GOAL_POSITION_L);
+            if (goal == _sweep_hold_raw) _sweep_hold_accepted = true;
+        }
+        const bool verified = _sweep_hold_accepted && moving == 0 && std::abs(actual - _sweep_hold_raw) <= 2;
+        if (!verified && moving >= 0) {
+            if (goal >= 0 && goal != _sweep_hold_raw) {
+                // Rejected hold: sample a new current position, not an old
+                // position that would pull the moving actuator backwards.
+                _sweep_hold_raw = -1;
+                _sweep_hold_accepted = false;
+            } else if (_sweep_hold_accepted && moving == 0) {
+                // Actuator reports stopped at a small offset. Preserve the
+                // measured pose rather than repeatedly hunting the hold.
+                measured = raw_pos_to_angle(actual);
+                _sweep_hold_raw = -1;
+                bus_lock.unlock();
+                ESP_LOGI("ScsServo", "[SWEEP_STOP] id=%d measured=%d verified=1 settled_offset=1", _config.id, measured);
+                return true;
+            }
+        }
+        measured = raw_pos_to_angle(actual);
+        if (verified) _sweep_hold_raw = -1;
+        bus_lock.unlock();
+        ESP_LOGI("ScsServo", "[SWEEP_STOP] id=%d actual_raw=%d goal_raw=%d moving=%d verified=%d elapsed_ms=%u",
+                 _config.id, actual, goal, moving, verified, static_cast<unsigned>(GetHAL().millis()-started));
         return verified;
     }
 
@@ -177,8 +246,7 @@ public:
         }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
-        int mapped_angle = _zero_pos + angle * 16 / 5 / 10;  // 一步对应 0.3125度, 0.3125 = 5/16
-        mapped_angle     = uitk::clamp(mapped_angle, _runtime_raw_pos_limit.x, _runtime_raw_pos_limit.y);
+        const int mapped_angle = angle_to_raw(angle);
 
         // mclog::tagInfo(_tag, "id: {} mapped angle: {}", _id, mapped_angle);
 
@@ -199,7 +267,6 @@ public:
         if (duplicate) {
             if (rate > 0) ++_tracking_write_skipped;
             else ++_normal_write_skipped;
-            report_bus_stats();
             return;
         }
         uint16_t duration = 20;
@@ -233,7 +300,10 @@ public:
         }
         int angle = 0;
         if (tryGetCurrentAngle(angle)) return angle;
-        return uitk::clamp(Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+        const int fallback = _profile == Profile::HardwareSweep && is_raw_pos_valid(_last_valid_position)
+            ? raw_pos_to_angle(_last_valid_position) : Servo::getCurrentAngle();
+        return uitk::clamp(fallback, getAngleLimit().x, getAngleLimit().y);
     }
 
     bool tryGetCurrentAngle(int& angle) override
@@ -244,7 +314,7 @@ public:
             return result;
         }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
-        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+        std::unique_lock<std::mutex> bus_lock(_scs_bus_mutex);
         uint8_t communication_error = 0;
         int current_pos = -1;
         // Both short reads and bulk feedback populate the same measured cache.
@@ -259,13 +329,13 @@ public:
             current_pos = read_position_with_retry(communication_error);
         }
         if (!is_raw_pos_valid(current_pos)) _feedback_position = -1;
-        report_bus_stats();
+        bus_lock.unlock();
         if (!is_raw_pos_valid(current_pos)) {
-            int fallback_angle = uitk::clamp(Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
+            int fallback_angle = uitk::clamp(_profile == Profile::HardwareSweep && is_raw_pos_valid(_last_valid_position) ? raw_pos_to_angle(_last_valid_position) : Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
             mclog::tagWarn(_tag,
-                           "id: {} ignore invalid current pos after retry: {}, error: {} ({}), fallback angle: {}",
+                           "id: {} ignore invalid current pos after retry: {}, error: {} ({}), fallback angle: {}, last_valid_age_ms: {}",
                            _config.id, current_pos, communication_error_name(communication_error),
-                           static_cast<unsigned>(communication_error), fallback_angle);
+                           static_cast<unsigned>(communication_error), fallback_angle, GetHAL().millis() - _last_valid_tick);
             return false;
         }
 
@@ -286,7 +356,7 @@ public:
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int moving = _scs_bus.ReadMove(_config.id);
         // Preserve existing movement status semantics in this integration.
-        return moving > 0;
+        return moving != 0;
     }
 
     void setTorqueEnabled(bool enabled) override
@@ -418,6 +488,8 @@ private:
     static constexpr uint32_t kNormalRefreshMs = 250;
     int _monitor_target = -1;
     int _feedback_position = -1;
+    int _last_valid_position = -1;
+    uint32_t _last_valid_tick = 0;
     uint32_t _feedback_tick = 0;
     bool _feedback_bulk = false;
     uint32_t _read_ok = 0, _read_retry_ok = 0, _read_fail = 0, _read_shared = 0;
@@ -476,6 +548,8 @@ private:
     {
         _feedback_position = raw;
         _feedback_tick = GetHAL().millis();
+        _last_valid_position = raw;
+        _last_valid_tick = _feedback_tick;
         _feedback_bulk = bulk;
     }
 
@@ -530,6 +604,7 @@ private:
     void reset_runtime_limits()
     {
         _runtime_raw_pos_limit = _config.rawPosLimit;
+        _last_valid_position = -1;
         _monitor_target = -1;
         _feedback_position = -1;
         _last_tracking_raw = -1;
@@ -570,7 +645,6 @@ private:
             ++_stall_fail;
             const unsigned error = _scs_bus.getLastError();
             ++_stall_errors[error <= ERR_BUFF_LEN ? error : 0];
-            report_bus_stats();
             reset_stall_detection();
             return false;
         }
@@ -582,7 +656,6 @@ private:
         if (!is_raw_pos_valid(current_raw_pos)) {
             ++_stall_fail;
             ++_stall_errors[0];
-            report_bus_stats();
             reset_stall_detection();
             return false;
         }
@@ -591,7 +664,6 @@ private:
         // Do not compare stale samples after a long interruption.
         if (_feedback_tick - _stall_last_valid_tick > 150) reset_stall_detection();
         _stall_last_valid_tick = _feedback_tick;
-        report_bus_stats();
 
         const int target_delta = target_raw_pos - current_raw_pos;
         if (abs_int(target_delta) < kStallMinTargetDeltaRaw) {

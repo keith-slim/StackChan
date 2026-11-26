@@ -23,7 +23,7 @@ void Motion::init()
     _worker_stop.store(false);
     executor::done = xSemaphoreCreateBinaryStatic(&executor::done_storage);
     _worker_running.store(true);
-    if (!executor::done || xTaskCreateWithCaps(UpdateWorker, "servo_update", 4096, this, 2, nullptr,
+    if (!executor::done || xTaskCreateWithCaps(UpdateWorker, "servo_update", 4096, this, 4, nullptr,
                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         _worker_running.store(false);
         ESP_LOGW("Motion", "Servo PSRAM task allocation failed; using existing update path");
@@ -51,6 +51,7 @@ void Motion::UpdateWorker(void* arg)
     uint32_t cycles = 0, overruns = 0, max_us = 0, max_gap_ms = 0;
     TickType_t previous_update = last;
     while (!self->_worker_stop.load()) {
+        self->_yaw_servo->servicePriorityStop();
         executor::service();
         const TickType_t now = xTaskGetTickCount();
         const TickType_t elapsed = now - last;
@@ -94,6 +95,7 @@ void Motion::update()
 void Motion::updateServos()
 {
     _yaw_servo->update();
+    executor::service(); // dispatch before lower-priority pitch monitoring
     _pitch_servo->update();
 }
 

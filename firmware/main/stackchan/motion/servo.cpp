@@ -51,8 +51,12 @@ void Servo::update()
     }
     _last_tick = GetHAL().millis();
 
-    // A hardware sweep runs on the actuator; no periodic position writes.
-    if (_profile == Profile::HardwareSweep) return;
+    // Priority stop is serviced independently of the UI/perception cadence.
+    if (_profile == Profile::HardwareSweep) {
+        if (sweep_cancelled() || _hardware_stop_requested.load(std::memory_order_acquire)) servicePriorityStop();
+        else service_hardware_sweep();
+        return;
+    }
 
     // Keep the existing low-level clamp/stall protection, but do not
     // start a new spring or read physical position for every timed setpoint.
@@ -172,7 +176,7 @@ uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     const bool continuing = _profile == Profile::Tracking && _torque_commanded_enabled;
-    if (_profile == Profile::HardwareSweep) stopHardwareSweep(getCommandRevision());
+    const bool replacing_sweep = _profile == Profile::HardwareSweep;
     const float position = continuing ? _tracking_position : static_cast<float>(
         uitk::clamp(measured_start ? *measured_start : getCurrentAngle(), _angle_limit.x, _angle_limit.y));
     const float velocity = continuing ? _tracking_velocity : 0.0f;
@@ -188,20 +192,25 @@ uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
     if (!_torque_commanded_enabled) setTorqueEnabled(true);
     if (!continuing) _tracking_tick = GetHAL().millis();
     _profile = Profile::Tracking;
+    if (replacing_sweep) set_angle_impl(static_cast<int>(std::lround(position)));
     return getCommandRevision();
 }
 
-bool Servo::startHardwareSweep(int angle, int rate, uint32_t& revision)
+bool Servo::startHardwareSweep(int angle, int rate, uint32_t& revision, bool retarget)
 {
     if (executor::external()) {
         bool ok = false;
-        executor::invoke([&] { ok = startHardwareSweep(angle, rate, revision); });
+        executor::invoke([&] { ok = startHardwareSweep(angle, rate, revision, retarget); });
         return ok;
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+    if (!supports_hardware_sweep() || sweep_cancelled()) return false;
+    if (_profile == Profile::HardwareSweep && _hardware_stop_requested.load(std::memory_order_acquire)) return false;
+    if (retarget && (_profile != Profile::HardwareSweep || revision != getCommandRevision())) return false;
+    if (!retarget && _profile == Profile::HardwareSweep) return false;
     int measured = 0;
-    if (!tryGetCurrentAngle(measured)) return false;
-    if (_profile == Profile::HardwareSweep) return false;
+    if (!tryGetCurrentAngle(measured) || sweep_cancelled() ||
+        (retarget && _hardware_stop_requested.load())) return false;
     cancel_profile();
     _goal = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(measured);
@@ -214,6 +223,29 @@ bool Servo::startHardwareSweep(int angle, int rate, uint32_t& revision)
     return true;
 }
 
+void Servo::servicePriorityStop()
+{
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+    if (_profile != Profile::HardwareSweep) return;
+    if (sweep_cancelled() && !_hardware_stop_requested.load()) requestHardwareStop("detection_or_end");
+    if (!_hardware_stop_requested.load() || _hardware_stop_revision.load() != getCommandRevision()) return;
+    int measured = 0;
+    if (hold_hardware_sweep(measured)) stop_motion_at_angle(measured);
+}
+
+void Servo::requestHardwareStop(const char* reason)
+{
+    if (executor::external()) {
+        executor::invoke([&] { requestHardwareStop(reason); });
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+    if (_profile != Profile::HardwareSweep) return;
+    _hardware_stop_reason.store(reason);
+    _hardware_stop_revision.store(getCommandRevision());
+    _hardware_stop_requested.store(true, std::memory_order_release);
+}
+
 bool Servo::stopHardwareSweep(uint32_t revision)
 {
     if (executor::external()) {
@@ -223,10 +255,9 @@ bool Servo::stopHardwareSweep(uint32_t revision)
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     if (getCommandRevision() != revision || _profile != Profile::HardwareSweep) return true;
-    int measured = 0;
-    if (!hold_hardware_sweep(measured)) return false;
-    stop_motion_at_angle(measured);
-    return true;
+    if (!_hardware_stop_requested.load()) requestHardwareStop("owner_stop");
+    servicePriorityStop();
+    return _profile != Profile::HardwareSweep;
 }
 
 bool Servo::isTrackingCommandActive() const
@@ -257,9 +288,8 @@ void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     const bool was_moving = isMoving();
-    if (_profile == Profile::HardwareSweep) stopHardwareSweep(getCommandRevision());
-    cancel_profile();
     const int current = uitk::clamp(getCurrentAngle(), _angle_limit.x, _angle_limit.y);
+    cancel_profile();
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(current);
     _goal = angle;
@@ -285,6 +315,7 @@ void Servo::cancelTimedMove()
 void Servo::cancel_profile(bool preserve_spring)
 {
     _command_revision.fetch_add(1, std::memory_order_relaxed);
+    _hardware_stop_requested.store(false, std::memory_order_release);
     _timed_move.Cancel();
     if (preserve_spring && _profile == Profile::Spring) return;
     _profile = Profile::Idle;
@@ -323,12 +354,12 @@ void Servo::apply_default_spring_options()
 void Servo::update_angle_anim_target(int angle)
 {
     const bool replacing_sweep = _profile == Profile::HardwareSweep;
-    if (replacing_sweep) stopHardwareSweep(getCommandRevision());
+    const int sweep_position = replacing_sweep ? getCurrentAngle() : 0;
     cancel_profile(true);
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
 
     if (_auto_angle_sync_enabled || replacing_sweep) {
-        _angle_anim.teleport(getCurrentAngle());  // Use current angle as start
+        _angle_anim.teleport(replacing_sweep ? sweep_position : getCurrentAngle());  // Use current angle as start
     }
     // Initialization and auto-release leave the actuator torque OFF.
     // A position register write alone does not re-enable it.
@@ -336,6 +367,7 @@ void Servo::update_angle_anim_target(int angle)
     _goal = angle;
     _angle_anim = _goal;
     _profile = Profile::Spring;
+    if (replacing_sweep) set_angle_impl(sweep_position);
 }
 
 void Servo::stop_motion_at_angle(int angle)
