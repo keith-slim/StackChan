@@ -175,7 +175,6 @@ std::atomic<bool> face_pitch_requested{false};
 std::atomic<uint32_t> face_pitch_epoch{0};
 struct FacePitchSearch : OwnedTracking {
     bool upward = true;
-    bool returning = false;
     void Pause(StackChan& sc) { Stop(sc.motion().pitchServo()); }
 };
 FacePitchSearch face_pitch_search;
@@ -1703,8 +1702,8 @@ void Update(StackChan& sc) {
             int measured = 0;
             const auto limits = search_pitch.getAngleLimit();
             const int upper = std::min(static_cast<int>(limits.y), 600); // face search only: 60 degrees
-            const int return_pitch = std::clamp(100, limits.x, limits.y);
-            const int goal = fps.returning ? return_pitch : (fps.upward ? upper : limits.x);
+            const int lower = std::clamp(100, limits.x, upper); // face search ends at 10 degrees
+            const int goal = fps.upward ? upper : lower;
             bool segment_sample_valid = false;
             // Pitch has a 0.3125-degree hardware position quantum and can
             // settle slightly short of the requested endpoint. Reverse on
@@ -1719,30 +1718,26 @@ void Update(StackChan& sc) {
                 segment_sample_valid = true;
                 fps.Stop(search_pitch, &measured);
                 ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] segment complete actual=%d target=%d", measured, goal);
-                if (fps.returning) {
-                    face_pitch_requested.store(false);
-                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] complete: no face; returning to body tracking pitch=%d target=%d",
-                             measured, return_pitch);
-                } else if (fps.upward) {
+                if (fps.upward) {
                     fps.upward = false;
                 } else {
-                    fps.returning = true;
-                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] no face after sweep; return pitch=%d target=%d", measured, return_pitch);
+                    face_pitch_requested.store(false);
+                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] complete: no face; returning to body tracking pitch=%d target=%d", measured, lower);
                 }
             }
             if (!fps.commanded && face_pitch_requested.load() &&
                 Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
                 int current = measured;
                 const bool measured_ok = segment_sample_valid || search_pitch.tryGetCurrentAngle(current);
-                if (measured_ok && !fps.returning && fps.upward && current >= upper - kPitchArrivalTolerance) fps.upward = false;
-                const int target = fps.returning ? return_pitch : (fps.upward ? upper : limits.x);
-                if (limits.x < upper && measured_ok) {
+                if (measured_ok && fps.upward && current >= upper - kPitchArrivalTolerance) fps.upward = false;
+                const int target = fps.upward ? upper : lower;
+                if (lower < upper && measured_ok) {
                     // At both existing search bounds there is no safe outward
                     // allowance. Start from measured feedback and use the bound
                     // itself rather than moving outside the permitted range.
                     fps.Issue(search_pitch, target, now, kFacePitchSearchRate, &current);
-                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d tolerance=%d rate=%d returning=%d", current, measured_ok, target, kPitchArrivalTolerance, kFacePitchSearchRate, fps.returning);
-                } else if (limits.x >= upper) {
+                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d tolerance=%d rate=%d", current, measured_ok, target, kPitchArrivalTolerance, kFacePitchSearchRate);
+                } else if (lower >= upper) {
                     face_pitch_requested.store(false);
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] no available pitch range; returning to body tracking");
                 }
