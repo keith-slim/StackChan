@@ -172,7 +172,7 @@ public:
 private:
     std::unique_ptr<Servo> _yaw_servo;
     std::unique_ptr<Servo> _pitch_servo;
-    bool _is_modify_locked = false;
+    std::atomic<bool> _is_modify_locked{false};
     std::atomic<bool> _worker_stop{false};
     std::atomic<bool> _worker_running{false};
     static void UpdateWorker(void* arg);

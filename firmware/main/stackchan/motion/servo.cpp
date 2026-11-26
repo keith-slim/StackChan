@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "servo.h"
+#include "servo_executor.h"
 #include <hal/hal.h>
 #include <cmath>
 
@@ -39,6 +40,10 @@ void Servo::init()
 
 void Servo::update()
 {
+    if (executor::external()) {
+        executor::invoke([&] { update(); });
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     // Keep update in at most 50Hz
     if (GetHAL().millis() - _last_tick < 20) {
@@ -48,8 +53,9 @@ void Servo::update()
 
     // Keep the existing low-level clamp/stall protection, but do not
     // start a new spring or read physical position for every timed setpoint.
-    if (_timed_move.Active()) {
+    if (_profile == Profile::Timed) {
         const int angle = uitk::clamp(_timed_move.Sample(_last_tick), _angle_limit.x, _angle_limit.y);
+        if (!_timed_move.Active()) _profile = Profile::Idle;
         if (angle != static_cast<int>(_angle_anim.directValue())) {
             _angle_anim.teleport(angle);
             set_angle_impl(angle);
@@ -59,15 +65,15 @@ void Servo::update()
 
     // Rate-limited critically damped spring. Keep fractional position and
     // velocity between updates and between retargets; never snap to a distant goal.
-    if (_tracking_target) {
-        const int goal = uitk::clamp(_tracking_goal, _angle_limit.x, _angle_limit.y);
+    if (_profile == Profile::Tracking) {
+        const int goal = uitk::clamp(_goal, _angle_limit.x, _angle_limit.y);
         // Integrate actual elapsed time in bounded steps. The acceleration
         // bound uses the existing spring damping time scale, not a second speed setting.
         uint32_t elapsed = _last_tick - _tracking_tick;
         _tracking_tick = _last_tick;
         const float rate = static_cast<float>(_tracking_rate);
         const float acceleration_limit = rate * _tracking_damping;
-        while (elapsed && _tracking_target) {
+        while (elapsed && _profile == Profile::Tracking) {
             const uint32_t step = elapsed > 20 ? 20 : elapsed;
             elapsed -= step;
             const float dt = step * 0.001f;
@@ -81,14 +87,14 @@ void Servo::update()
                 (std::abs(error) <= 0.1f && std::abs(_tracking_velocity) <= 0.1f)) {
                 _tracking_position = static_cast<float>(goal);
                 _tracking_velocity = 0.0f;
-                _tracking_target = false;
+                _profile = Profile::Idle;
             } else {
                 _tracking_position = uitk::clamp(next, static_cast<float>(_angle_limit.x),
                                                   static_cast<float>(_angle_limit.y));
             }
         }
         const int angle = uitk::clamp(static_cast<int>(std::lround(_tracking_position)), _angle_limit.x, _angle_limit.y);
-        if (angle != static_cast<int>(_angle_anim.directValue()) || !_tracking_target) {
+        if (angle != static_cast<int>(_angle_anim.directValue()) || _profile != Profile::Tracking) {
             _angle_anim.teleport(angle);
             set_tracking_angle_impl(angle, _tracking_rate);
         }
@@ -96,15 +102,15 @@ void Servo::update()
     }
 
     // Apply animation
-    if (!_angle_anim.done()) {
+    if (_profile == Profile::Spring && !_angle_anim.done()) {
         _angle_anim.updateWithDelta(0.02f);  // Fixed delta time for consistency
         set_angle_impl(static_cast<int>(_angle_anim.directValue()));
     }
 
     // Snap to target angle when animation ends
-    else if (_snap_to_target_on_rest) {
-        _snap_to_target_on_rest = false;
-        set_angle_impl(_angle_anim.end);
+    else if (_profile == Profile::Spring) {
+        _profile = Profile::Idle;
+        set_angle_impl(_goal);
     }
 
     // Query movement only while torque is commanded ON. Once the motion
@@ -120,6 +126,10 @@ void Servo::update()
 
 void Servo::move(int angle)
 {
+    if (executor::external()) {
+        executor::invoke([&] { move(angle); });
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     apply_default_spring_options();
     update_angle_anim_target(angle);
@@ -127,6 +137,10 @@ void Servo::move(int angle)
 
 void Servo::moveWithSpringParams(int angle, float stiffness, float damping)
 {
+    if (executor::external()) {
+        executor::invoke([&] { moveWithSpringParams(angle, stiffness, damping); });
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     _angle_anim.springOptions().visualDuration = 0.0f;  // Disable timing override
     _angle_anim.springOptions().stiffness      = stiffness;
@@ -137,6 +151,10 @@ void Servo::moveWithSpringParams(int angle, float stiffness, float damping)
 
 void Servo::moveWithSpeed(int angle, int speed)
 {
+    if (executor::external()) {
+        executor::invoke([&] { moveWithSpeed(angle, speed); });
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     auto spring_options = map_speed_to_spring_options(speed);
     moveWithSpringParams(angle, spring_options.stiffness, spring_options.damping);
@@ -144,35 +162,43 @@ void Servo::moveWithSpeed(int angle, int speed)
 
 uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
 {
+    if (executor::external()) {
+        uint32_t result{};
+        executor::invoke([&] { result = trackWithSpeed(angle, speed, measured_start); });
+        return result;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
-    const bool continuing = _tracking_target && _torque_commanded_enabled;
+    const bool continuing = _profile == Profile::Tracking && _torque_commanded_enabled;
     const float position = continuing ? _tracking_position : static_cast<float>(
         uitk::clamp(measured_start ? *measured_start : getCurrentAngle(), _angle_limit.x, _angle_limit.y));
     const float velocity = continuing ? _tracking_velocity : 0.0f;
-    cancelTimedMove();
+    cancel_profile();
     _tracking_rate = uitk::clamp(speed, 1, 1000);
     const auto options = map_speed_to_spring_options(_tracking_rate);
     _tracking_stiffness = options.stiffness;
     _tracking_damping = options.damping;
     _tracking_position = position;
     _tracking_velocity = velocity;
-    _tracking_goal = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
+    _goal = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(static_cast<int>(std::lround(position)));
-    _snap_to_target_on_rest = false;
     if (!_torque_commanded_enabled) setTorqueEnabled(true);
     if (!continuing) _tracking_tick = GetHAL().millis();
-    _tracking_target = true;
+    _profile = Profile::Tracking;
     return getCommandRevision();
 }
 
 bool Servo::isTrackingCommandActive() const
 {
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
-    return _tracking_target;
+    return _profile == Profile::Tracking;
 }
 
 void Servo::stopTrackingIfOwned(uint32_t revision, const int* measured_stop)
 {
+    if (executor::external()) {
+        executor::invoke([&] { stopTrackingIfOwned(revision, measured_stop); });
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     if (getCommandRevision() != revision) return;
     const int current = uitk::clamp(measured_stop ? *measured_stop : getCurrentAngle(), _angle_limit.x, _angle_limit.y);
@@ -182,15 +208,19 @@ void Servo::stopTrackingIfOwned(uint32_t revision, const int* measured_stop)
 
 void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
 {
+    if (executor::external()) {
+        executor::invoke([&] { moveWithDuration(angle, duration_ms, now); });
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
-    _command_revision.fetch_add(1, std::memory_order_relaxed);
     const bool was_moving = isMoving();
-    _tracking_target = false;
+    cancel_profile();
     const int current = uitk::clamp(getCurrentAngle(), _angle_limit.x, _angle_limit.y);
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(current);
-    _snap_to_target_on_rest = false;
-    _timed_move.Start(current, angle, duration_ms, now);
+    _goal = angle;
+    _timed_move.Start(current, _goal, duration_ms, now);
+    _profile = _timed_move.Active() ? Profile::Timed : Profile::Idle;
     if (_timed_move.Active() && !_torque_commanded_enabled) setTorqueEnabled(true);
     // Replace any in-flight spring target with the sampled starting pose.
     if (was_moving && _torque_commanded_enabled) set_angle_impl(current);
@@ -198,10 +228,23 @@ void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
 
 void Servo::cancelTimedMove()
 {
+    if (executor::external()) {
+        executor::invoke([&] { cancelTimedMove(); });
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+    // Public cancellation historically leaves ordinary spring motion intact.
+    cancel_profile(true);
+}
+
+void Servo::cancel_profile(bool preserve_spring)
+{
     _command_revision.fetch_add(1, std::memory_order_relaxed);
-    _timed_move.Cancel(); // Last commanded position remains; no stale spring target.
-    _tracking_target = false;
+    _timed_move.Cancel();
+    if (preserve_spring && _profile == Profile::Spring) return;
+    _profile = Profile::Idle;
+    _goal = static_cast<int>(_angle_anim.directValue());
+    _angle_anim.teleport(_goal);
 }
 
 int Servo::getCurrentAngle()
@@ -212,10 +255,15 @@ int Servo::getCurrentAngle()
 
 bool Servo::isMoving()
 {
+    if (executor::external()) {
+        bool result{};
+        executor::invoke([&] { result = isMoving(); });
+        return result;
+    }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     // Avoid a servo status read while idle or after torque has been released.
     // Interpolation and its pending final write are tracked locally.
-    if (_tracking_target || _timed_move.Active() || !_angle_anim.done() || _snap_to_target_on_rest) return true;
+    if (_profile != Profile::Idle) return true;
     return _torque_commanded_enabled && is_moving_impl();
 }
 
@@ -229,7 +277,7 @@ void Servo::apply_default_spring_options()
 
 void Servo::update_angle_anim_target(int angle)
 {
-    cancelTimedMove();
+    cancel_profile(true);
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
 
     if (_auto_angle_sync_enabled) {
@@ -238,17 +286,18 @@ void Servo::update_angle_anim_target(int angle)
     // Initialization and auto-release leave the actuator torque OFF.
     // A position register write alone does not re-enable it.
     if (!_torque_commanded_enabled) setTorqueEnabled(true);
-    _angle_anim             = angle;  // Apply new target
-    _snap_to_target_on_rest = true;
+    _goal = angle;
+    _angle_anim = _goal;
+    _profile = Profile::Spring;
 }
 
 void Servo::stop_motion_at_angle(int angle)
 {
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
-    cancelTimedMove(); // A stall must also stop timed motion.
+    cancel_profile(); // A stall must stop every motion profile.
     angle = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(angle);
-    _snap_to_target_on_rest = false;
+    _goal = angle;
 }
 
 uitk::SpringOptions_t Servo::map_speed_to_spring_options(int speed)

@@ -12,6 +12,7 @@
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 #include "SCS.h"
 
@@ -23,8 +24,16 @@ public:
 	SCSerial(u8 End, u8 Level);
 	bool begin(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin, int buf_size = 1024);
 	void end();
+	void reportDiagnostics();
 
 private:
+	static constexpr int kEventDepth = 16;
+	QueueHandle_t _events = nullptr;
+	uint32_t _fifo_overflow = 0, _buffer_full = 0, _frame_error = 0, _parity_error = 0, _breaks = 0;
+	uint32_t _event_full = 0, _rx_calls = 0, _rx_short = 0, _rx_max_us = 0, _ack_max_us = 0;
+	uint32_t _tx_max_us = 0, _tx_fail = 0;
+	int64_t _report_us = 0;
+	void drainEvents();
 	int readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bool interByteTimeout);
 protected:
 	int writeSCS(unsigned char *nDat, int nLen);//输出nLen字节

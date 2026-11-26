@@ -5,6 +5,8 @@
  */
 #include "motion.h"
 #include "motion_math.h"
+#include "servo_executor.h"
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
 #include <esp_heap_caps.h>
@@ -19,28 +21,66 @@ void Motion::init()
     _yaw_servo->init();
     _pitch_servo->init();
     _worker_stop.store(false);
+    executor::done = xSemaphoreCreateBinaryStatic(&executor::done_storage);
     _worker_running.store(true);
-    if (xTaskCreateWithCaps(UpdateWorker, "servo_update", 4096, this, 2, nullptr,
+    if (!executor::done || xTaskCreateWithCaps(UpdateWorker, "servo_update", 4096, this, 2, nullptr,
                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         _worker_running.store(false);
         ESP_LOGW("Motion", "Servo PSRAM task allocation failed; using existing update path");
+    } else {
+        // Initialization has finished before publishing the worker to callers.
+        while (!executor::owner.load(std::memory_order_acquire)) vTaskDelay(1);
     }
 }
 
 Motion::~Motion()
 {
+    std::lock_guard<std::mutex> lock(executor::submit_mutex);
     _worker_stop.store(true);
+    if (auto task = executor::owner.load(std::memory_order_acquire)) xTaskNotifyGive(task);
     while (_worker_running.load()) vTaskDelay(1);
 }
 
 void Motion::UpdateWorker(void* arg)
 {
     auto* self = static_cast<Motion*>(arg);
-    TickType_t next = xTaskGetTickCount();
+    executor::owner.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+    const TickType_t period = pdMS_TO_TICKS(20) ? pdMS_TO_TICKS(20) : 1;
+    TickType_t last = xTaskGetTickCount() - period;
+    int64_t report_at = esp_timer_get_time();
+    uint32_t cycles = 0, overruns = 0, max_us = 0, max_gap_ms = 0;
+    TickType_t previous_update = last;
     while (!self->_worker_stop.load()) {
-        self->updateServos();
-        vTaskDelayUntil(&next, pdMS_TO_TICKS(20));
+        executor::service();
+        const TickType_t now = xTaskGetTickCount();
+        const TickType_t elapsed = now - last;
+        if (elapsed >= period) {
+            const uint32_t gap_ms = (now - previous_update) * portTICK_PERIOD_MS;
+            previous_update = now;
+            if (gap_ms > max_gap_ms) max_gap_ms = gap_ms;
+            last += (elapsed / period) * period;
+            const int64_t started = esp_timer_get_time();
+            self->updateServos();
+            const uint32_t us = esp_timer_get_time() - started;
+            ++cycles;
+            if (us > 20000) ++overruns;
+            if (us > max_us) max_us = us;
+            if (started - report_at >= 10000000) {
+                ESP_LOGI("Motion", "[SERVO_CYCLE] cycles=%lu overruns=%lu max_us=%lu max_gap_ms=%lu",
+                         (unsigned long)cycles, (unsigned long)overruns,
+                         (unsigned long)max_us, (unsigned long)max_gap_ms);
+                ESP_LOGI("Motion", "[SERVO_DISPATCH] requests=%lu wait_max_us=%lu run_max_us=%lu",
+                         (unsigned long)executor::request_count, (unsigned long)executor::wait_max_us,
+                         (unsigned long)executor::run_max_us);
+                executor::request_count = executor::wait_max_us = executor::run_max_us = 0;
+                cycles = overruns = max_us = max_gap_ms = 0;
+                report_at = started;
+            }
+        }
+        const TickType_t spent = xTaskGetTickCount() - last;
+        if (spent < period) ulTaskNotifyTake(pdTRUE, period - spent);
     }
+    executor::owner.store(nullptr, std::memory_order_release);
     self->_worker_running.store(false);
     vTaskDeleteWithCaps(nullptr);
 }

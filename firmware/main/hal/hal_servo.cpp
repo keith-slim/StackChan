@@ -6,6 +6,7 @@
 #include "hal.h"
 #include "drivers/FTServo_Arduino/src/SCSCL.h"
 #include <stackchan/stackchan.h>
+#include <stackchan/motion/servo_executor.h>
 #include <smooth_ui_toolkit.hpp>
 #include <mooncake_log.h>
 #include <settings.h>
@@ -75,6 +76,23 @@ public:
         }
     }
 
+    void update() override
+    {
+        if (executor::external()) {
+            executor::invoke([&] { update(); });
+            return;
+        }
+        Servo::update();
+        // Continue monitoring the last physical setpoint even when the
+        // interpolation has finished or its quantized position is unchanged.
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
+        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+        if (_config.enableStallProtection && _torque_commanded_enabled &&
+            _current_mode == Mode::Position && _monitor_target >= 0) {
+            update_stall_protection(_monitor_target);
+        }
+    }
+
     void set_angle_impl(int angle) override
     {
         writeAngle(angle, 0);
@@ -87,6 +105,10 @@ public:
 
     void writeAngle(int angle, int rate)
     {
+        if (executor::external()) {
+            executor::invoke([&] { writeAngle(angle, rate); });
+            return;
+        }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int mapped_angle = _zero_pos + angle * 16 / 5 / 10;  // 一步对应 0.3125度, 0.3125 = 5/16
@@ -94,6 +116,7 @@ public:
 
         // mclog::tagInfo(_tag, "id: {} mapped angle: {}", _id, mapped_angle);
 
+        _monitor_target = mapped_angle;
         if (update_stall_protection(mapped_angle)) {
             return;
         }
@@ -104,14 +127,12 @@ public:
         // an acknowledged identical command within the same motion revision.
         const uint32_t revision = getCommandRevision();
         const uint32_t now = GetHAL().millis();
-        if (rate > 0 && _last_tracking_raw == mapped_angle) {
-            ++_tracking_write_skipped;
-            return;
-        }
-        if (rate == 0 && _last_normal_raw == mapped_angle &&
-            _last_normal_revision == revision &&
-            now - _last_normal_write_tick < kNormalRefreshMs) {
-            ++_normal_write_skipped;
+        const bool duplicate = _last_ack_raw == mapped_angle && _last_ack_rate == rate &&
+                               (rate > 0 || _last_ack_revision == revision) &&
+                               now - _last_ack_tick < kNormalRefreshMs;
+        if (duplicate) {
+            if (rate > 0) ++_tracking_write_skipped;
+            else ++_normal_write_skipped;
             report_bus_stats();
             return;
         }
@@ -125,22 +146,25 @@ public:
         }
         const auto ack_before = _scs_bus.getWriteAckDiagnostic(_config.id).received;
         _scs_bus.WritePos(_config.id, mapped_angle, duration, 0);
+        if (!_feedback_bulk) _feedback_position = -1;
+        const bool acknowledged = _scs_bus.getWriteAckDiagnostic(_config.id).received != ack_before &&
+                                  _scs_bus.getState() == 0;
         _last_tracking_raw = rate > 0 ? mapped_angle : -1;
-        _last_normal_raw = -1;
-        if (rate == 0) {
-            ++_normal_write_sent;
-            if (_scs_bus.getWriteAckDiagnostic(_config.id).received != ack_before) {
-                _last_normal_raw = mapped_angle;
-                _last_normal_revision = revision;
-                _last_normal_write_tick = GetHAL().millis();
-            }
-        } else {
-            ++_tracking_write_sent;
-        }
+        _last_ack_raw = acknowledged ? mapped_angle : -1;
+        _last_ack_rate = rate;
+        _last_ack_revision = revision;
+        _last_ack_tick = GetHAL().millis();
+        if (rate == 0) ++_normal_write_sent;
+        else ++_tracking_write_sent;
     }
 
     int getCurrentAngle() override
     {
+        if (executor::external()) {
+            int result{};
+            executor::invoke([&] { result = getCurrentAngle(); });
+            return result;
+        }
         int angle = 0;
         if (tryGetCurrentAngle(angle)) return angle;
         return uitk::clamp(Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
@@ -148,15 +172,19 @@ public:
 
     bool tryGetCurrentAngle(int& angle) override
     {
+        if (executor::external()) {
+            bool result{};
+            executor::invoke([&] { result = tryGetCurrentAngle(angle); });
+            return result;
+        }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         uint8_t communication_error = 0;
         int current_pos = -1;
-        // Pitch's validated bulk feedback already includes position.
-        // Share one sample within a single 50 ms stall-monitor interval.
-        // Yaw keeps its existing position-read behavior.
-        const uint32_t max_feedback_age = _config.enableStallProtection
-            ? kStallFeedbackIntervalMs : 10;
+        // Both short reads and bulk feedback populate the same measured cache.
+        // Limit reuse to 10 ms for short reads, and 50 ms for bulk feedback.
+        // Do not reuse the same bulk sample indefinitely across control ticks.
+        const uint32_t max_feedback_age = _feedback_bulk ? kStallFeedbackIntervalMs : 10;
         if (is_raw_pos_valid(_feedback_position) &&
             GetHAL().millis() - _feedback_tick <= max_feedback_age) {
             current_pos = _feedback_position;
@@ -164,7 +192,7 @@ public:
         } else {
             current_pos = read_position_with_retry(communication_error);
         }
-        _feedback_position = -1; // a physical sample is shared at most once
+        if (!is_raw_pos_valid(current_pos)) _feedback_position = -1;
         report_bus_stats();
         if (!is_raw_pos_valid(current_pos)) {
             int fallback_angle = uitk::clamp(Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
@@ -183,16 +211,24 @@ public:
 
     bool is_moving_impl() override
     {
+        if (executor::external()) {
+            bool result{};
+            executor::invoke([&] { result = is_moving_impl(); });
+            return result;
+        }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int moving = _scs_bus.ReadMove(_config.id);
-        // A failed UART read returns -1; it is not evidence of movement.
-        // The animation state is already checked by Servo::isMoving().
+        // Preserve existing movement status semantics in this integration.
         return moving > 0;
     }
 
     void setTorqueEnabled(bool enabled) override
     {
+        if (executor::external()) {
+            executor::invoke([&] { setTorqueEnabled(enabled); });
+            return;
+        }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         // Write ACK is optional and collected by the bus with a short timeout.
@@ -200,13 +236,19 @@ public:
         _torque_command_known = true;
         _feedback_position = -1;
         _last_tracking_raw = -1;
-        _last_normal_raw = -1;
+        _last_ack_raw = -1;
         _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
+        if (!enabled) { _monitor_target = -1; reset_stall_detection(); }
         Servo::setTorqueEnabled(enabled);
     }
 
     bool getTorqueEnabled() override
     {
+        if (executor::external()) {
+            bool result{};
+            executor::invoke([&] { result = getTorqueEnabled(); });
+            return result;
+        }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int torque_enable = _scs_bus.ReadToqueEnable(_config.id);
@@ -216,41 +258,48 @@ public:
 
     void setCurrentAngleAsZero() override
     {
-        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
-        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
-        uint8_t communication_error = 0;
-        int current_pos = read_position_with_retry(communication_error);
-        if (!is_raw_pos_valid(current_pos)) {
-            mclog::tagWarn(_tag,
-                           "id: {} ignore invalid zero calibration pos after retry: {}, error: {} ({}), keep zero pos: {}",
-                           _config.id, current_pos, communication_error_name(communication_error),
-                           static_cast<unsigned>(communication_error), _zero_pos);
-            return;
-        }
-
-        _zero_pos = current_pos;
-        reset_runtime_limits();
-
+        // NVS writes remain on the caller's internal-stack context.
+        std::lock_guard<std::mutex> calibration_lock(_calibration_mutex);
+        int saved = -1;
+        executor::invoke([&] {
+            std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
+            std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+            uint8_t communication_error = 0;
+            const int current_pos = read_position_with_retry(communication_error);
+            if (!is_raw_pos_valid(current_pos)) {
+                mclog::tagWarn(_tag, "id: {} ignore invalid zero calibration pos: {}, error: {}",
+                               _config.id, current_pos, communication_error_name(communication_error));
+                return;
+            }
+            _zero_pos = current_pos;
+            reset_runtime_limits();
+            saved = _zero_pos;
+        });
+        if (saved < 0) return;
         Settings settings(_config.settingNs, true);
-        settings.SetInt(_config.settingZeroPositionKey, _zero_pos);
-
-        mclog::tagInfo(_tag, "id: {} set zero pos: {} to settings", _config.id, _zero_pos);
+        settings.SetInt(_config.settingZeroPositionKey, saved);
+        mclog::tagInfo(_tag, "id: {} set zero pos: {} to settings", _config.id, saved);
     }
 
     void resetZeroCalibration() override
     {
-        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
-        _zero_pos = _config.defaultZeroPos;
-        reset_runtime_limits();
-
+        std::lock_guard<std::mutex> calibration_lock(_calibration_mutex);
+        executor::invoke([&] {
+            std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
+            _zero_pos = _config.defaultZeroPos;
+            reset_runtime_limits();
+        });
         Settings settings(_config.settingNs, true);
-        settings.SetInt(_config.settingZeroPositionKey, _zero_pos);
-
-        mclog::tagInfo(_tag, "id: {} set zero pos: {} to settings", _config.id, _zero_pos);
+        settings.SetInt(_config.settingZeroPositionKey, _config.defaultZeroPos);
+        mclog::tagInfo(_tag, "id: {} set zero pos: {} to settings", _config.id, _config.defaultZeroPos);
     }
 
     void rotate(int velocity) override
     {
+        if (executor::external()) {
+            executor::invoke([&] { rotate(velocity); });
+            return;
+        }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         velocity = uitk::clamp(velocity, -1000, 1000);
@@ -269,18 +318,22 @@ private:
     enum class Mode { Position = 0, PWM = 1 };
 
     ServoConfig_t _config;
+    std::mutex _calibration_mutex;
     Vector2i _runtime_raw_pos_limit;
     int _zero_pos      = 0;
     Mode _current_mode = Mode::Position;
     bool _torque_command_known = false;
     int _last_tracking_raw = -1;
-    int _last_normal_raw = -1;
-    uint32_t _last_normal_revision = 0, _last_normal_write_tick = 0;
+    int _last_ack_raw = -1;
+    int _last_ack_rate = -1;
+    uint32_t _last_ack_revision = 0, _last_ack_tick = 0;
     uint32_t _normal_write_sent = 0, _normal_write_skipped = 0;
     uint32_t _tracking_write_sent = 0, _tracking_write_skipped = 0;
     static constexpr uint32_t kNormalRefreshMs = 250;
+    int _monitor_target = -1;
     int _feedback_position = -1;
     uint32_t _feedback_tick = 0;
+    bool _feedback_bulk = false;
     uint32_t _read_ok = 0, _read_retry_ok = 0, _read_fail = 0, _read_shared = 0;
     uint32_t _stall_ok = 0, _stall_fail = 0, _diag_tick = 0;
     uint32_t _stall_retry_ok = 0, _stall_retry_fail = 0;
@@ -322,15 +375,22 @@ private:
     {
         int current_pos = _scs_bus.ReadPos(_config.id);
         communication_error = _scs_bus.getLastError();
-        if (is_raw_pos_valid(current_pos)) { ++_read_ok; return current_pos; }
+        if (is_raw_pos_valid(current_pos)) { ++_read_ok; cache_position(current_pos, false); return current_pos; }
         if (current_pos < 0 && communication_error != 0) {
             vTaskDelay(pdMS_TO_TICKS(1));
             current_pos = _scs_bus.ReadPos(_config.id);
             communication_error = _scs_bus.getLastError();
-            if (is_raw_pos_valid(current_pos)) { ++_read_retry_ok; return current_pos; }
+            if (is_raw_pos_valid(current_pos)) { ++_read_retry_ok; cache_position(current_pos, false); return current_pos; }
         }
         ++_read_fail;
         return current_pos;
+    }
+
+    void cache_position(int raw, bool bulk)
+    {
+        _feedback_position = raw;
+        _feedback_tick = GetHAL().millis();
+        _feedback_bulk = bulk;
     }
 
     void report_bus_stats()
@@ -338,6 +398,7 @@ private:
         const uint32_t now = GetHAL().millis();
         if (now - _diag_tick < 10000) return;
         _diag_tick = now;
+        _scs_bus.reportDiagnostics();
         mclog::tagInfo(_tag, "[SERVO_BUS] id={} pos_ok={} retry_ok={} pos_fail={} shared={} stall_ok={} stall_fail={}",
                        _config.id, _read_ok, _read_retry_ok, _read_fail, _read_shared, _stall_ok, _stall_fail);
         mclog::tagInfo(_tag, "[SERVO_WRITE_RATE] id={} normal_sent={} normal_skipped={} tracking_sent={} tracking_skipped={}",
@@ -383,9 +444,10 @@ private:
     void reset_runtime_limits()
     {
         _runtime_raw_pos_limit = _config.rawPosLimit;
+        _monitor_target = -1;
         _feedback_position = -1;
         _last_tracking_raw = -1;
-        _last_normal_raw = -1;
+        _last_ack_raw = -1;
         set_angle_limit(_config.angleLimit);
         reset_stall_detection();
     }
@@ -439,8 +501,7 @@ private:
             return false;
         }
         ++_stall_ok;
-        _feedback_position = current_raw_pos;
-        _feedback_tick = GetHAL().millis();
+        cache_position(current_raw_pos, true);
         // Do not compare stale samples after a long interruption.
         if (_feedback_tick - _stall_last_valid_tick > 150) reset_stall_detection();
         _stall_last_valid_tick = _feedback_tick;
@@ -463,8 +524,8 @@ private:
 
             if (position_stuck && (current_spike || load_spike)) {
                 _stall_confirm_count++;
-            } else if (pos_delta > kStallMaxPositionDeltaRaw) {
-                _stall_confirm_count = 0; 
+            } else {
+                _stall_confirm_count = 0;
             }
         } else {
             _stall_confirm_count = 0;
@@ -511,9 +572,10 @@ private:
 
         check_mode(Mode::Position);
         _scs_bus.WritePos(_config.id, raw_pos, 20, 0);
+        _monitor_target = raw_pos;
         _feedback_position = -1;
         _last_tracking_raw = -1;
-        _last_normal_raw = -1;
+        _last_ack_raw = -1;
 
         mclog::tagWarn(_tag,
                        "id: {} stall detected, raw: {}, angle: {}, dir: {}, current: {}, load: {}, limit: [{}, {}]",
@@ -528,7 +590,7 @@ private:
 
         _feedback_position = -1;
         _last_tracking_raw = -1;
-        _last_normal_raw = -1;
+        _last_ack_raw = -1;
         _scs_bus.SwitchMode(_config.id, static_cast<uint8_t>(targetMode));
         _current_mode = targetMode;
     }

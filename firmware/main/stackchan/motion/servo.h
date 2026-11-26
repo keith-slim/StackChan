@@ -198,11 +198,11 @@ protected:
 
     uint32_t _last_tick               = 0;
     uint32_t _last_torque_check_tick  = 0;
-    bool _snap_to_target_on_rest      = false;
-    bool _tracking_target = false;
+    enum class Profile { Idle, Spring, Timed, Tracking };
+    Profile _profile = Profile::Idle;
+    int _goal = 0;
     float _tracking_position = 0.0f;
     float _tracking_velocity = 0.0f;
-    int _tracking_goal = 0;
     int _tracking_rate = 0;
     float _tracking_stiffness = 0.0f;
     float _tracking_damping = 0.0f;
@@ -212,6 +212,7 @@ protected:
     // Track commands instead of polling the servo while idle with torque off.
     bool _torque_commanded_enabled    = false;
 
+    void cancel_profile(bool preserve_spring = false);
     void apply_default_spring_options();
     void update_angle_anim_target(int angle);
     void stop_motion_at_angle(int angle);
