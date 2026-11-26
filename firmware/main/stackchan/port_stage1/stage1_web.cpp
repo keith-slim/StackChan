@@ -44,7 +44,8 @@ constexpr char PAGE[] = R"STAGE1PAGE(<!doctype html><html lang="ja"><head>
 .sidebar{position:sticky;top:0;height:100vh;background:#182a46;padding:24px 12px;color:#fff}
 .brand{display:block;font-size:18px;font-weight:700;color:white;padding:0 12px 20px}
 nav{display:grid;gap:6px}nav a{display:block;color:#dbe6f6;text-decoration:none;padding:11px 14px;border-radius:8px}
-nav a:hover,nav a:focus{background:#285bd4}
+nav a:hover,nav a:focus,nav a[aria-current=page]{background:#285bd4;color:#fff}
+[hidden]{display:none!important}.range-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.range-row input[type=range]{width:100%;max-width:19rem}.range-row button{background:#62738d}.range-item{margin:14px 0}
 main{padding:18px;min-width:0}h1{font-size:19px;margin:0 0 12px}h2{font-size:16px;margin:0 0 12px}
 p{margin:8px 0}small,.hint{display:block;color:#68758a;font-size:10.5px;line-height:1.7}
 .card{background:#fff;border:1px solid #d6dce7;border-radius:8px;padding:14px;margin-bottom:12px}
@@ -82,9 +83,10 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily">起床・就寝</a><a href="#theatre">小芝居</a><a href="#nap">昼寝</a><a href="#voice">音声・文言</a><a href="#quiet">お黙り</a><a href="#environment">天気・位置</a><a href="#actions">サーボテスト</a><a href="#wifi">Wi-Fi</a><a href="#device">デバイス</a><a href="#aiSetup">AI・省電力</a><a href="#appsSetup">アプリ表示</a><a href="#deviceInfo">端末情報</a>
+<a href="#daily" data-page="daily">日常・睡眠</a><a href="#voice" data-page="voice">音声・文言</a><a href="#conversation" data-page="conversation">会話・音声入力</a><a href="#quiet" data-page="quiet">お黙り</a><a href="#environment" data-page="environment">天気・位置</a><a href="#actions" data-page="actions">実機テスト</a><a href="#wifi" data-page="wifi">ネットワーク</a><a href="#device" data-page="device">デバイス・AI</a><a href="#deviceInfo" data-page="deviceInfo">端末情報</a>
 </nav></aside><main>
-<h1>セッティング</h1>
+<h1 id="pageTitle">日常・睡眠</h1>
+<div class="settings-page" data-settings-page="daily">
 <form id="settings">
 <section id="daily" class="card"><h2>起床・就寝</h2>
 <div class="fields">
@@ -109,7 +111,8 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </div><small>昼寝当選後、眠気・あくびを経て就寝。夢の絵を表示します。</small></section>
 <div class="save"><button type="submit">保存して反映</button>
 <p id="status" class="status" role="status">読み込み中…</p></div>
-</form>
+</form></div>
+<div class="settings-page" data-settings-page="voice" hidden>
 <form id="voiceSettings">
 <section id="voice" class="card"><h2>Gemini Live発話・文言（既存WebSocket 12800）</h2>
 <small>音声は既存の会話サーバーと接続設定を共有します。別の発話用サーバー・ポート設定は不要です。</small></section>
@@ -156,6 +159,34 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <div class="buttons"><button type="button" id="testSpeech">読み上げテスト</button></div>
 <small>12800の既存Gemini Live音声・字幕経路を使用。通常会話中は開始しません。</small>
 <p id="testSpeechStatus" class="status" role="status">待機中</p></section>
+</div>
+<div class="settings-page" data-settings-page="conversation" hidden>
+<section class="card"><h2>ウェイクワード感度</h2>
+<label class="check"><input id="wakeThresholdDefault" type="checkbox" checked disabled>モデル標準値を使用</label>
+<label for="wakeThreshold">検出閾値 <output id="wakeThresholdValue">0.55</output></label>
+<input id="wakeThreshold" type="range" min="40" max="90" step="1" value="55" disabled style="width:100%;max-width:19rem">
+<small>左（0.40）：高感度／右（0.90）：低感度。低いほど反応しやすくなりますが、誤検出も増える場合があります。WakeNetのみ対象です。</small>
+<div class="buttons"><button id="wakeThresholdSave" type="button" disabled>感度を保存</button></div>
+<p id="wakeThresholdStatus" class="status" role="status">読み込み中…</p>
+<small>保存後、次のウェイクワード待受処理で適用します。再起動は不要です。標準値に戻すこともできます。</small>
+</section>
+<section id="conversation" class="card"><h2>会話時の音声入力設定</h2>
+<small>会話でAIサーバーへ送る音声を調整します。ウェイクワードの閾値・DOA・マイクのハードウェアゲインは変更しません。</small>
+<div class="range-item"><label for="convGain">マイク入力ゲイン（デジタル） <output id="convGainValue">0 dB</output></label>
+<div class="range-row"><input id="convGain" type="range" min="-12" max="12" step="1" value="0" disabled><button type="button" data-conv-reset="gain" disabled>初期値に戻す</button></div>
+<small>−12～＋12 dB。会話送信用のPCMを増幅・減衰します。上げすぎるとノイズや音割れが発生します。初期値：0 dB（従来どおり）。</small></div>
+<div class="range-item"><label for="convVad">VAD感度（Gemini Liveの発話開始検知） <output id="convVadValue">—</output></label>
+<div class="range-row"><input id="convVad" type="range" min="0" max="2" step="1" value="1" disabled><button type="button" data-conv-reset="vad" disabled>初期値に戻す</button></div>
+<small id="convVadHint">左：低／中央：標準／右：高。初期値：標準（Geminiの既定値）。</small>
+<small>小さな声で発話開始を検出しにくい場合は高を試してください。環境音にも反応しやすくなる場合があります。次回のGemini Live接続から適用。本体再起動は不要です。端末VAD・発話終了判定は変更しません。</small></div>
+<div class="range-item"><label for="convAgc">AGC強度（自動ゲイン制御） <output id="convAgcValue">OFF</output></label>
+<div class="range-row"><input id="convAgc" type="range" min="0" max="4" step="1" value="0" disabled><button type="button" data-conv-reset="agc" disabled>初期値に戻す</button></div>
+<small>0（OFF）～4（最大＋12 dB）。小さな声を自動増幅します。強くすると環境音も増幅される場合があります。初期値：OFF。</small></div>
+<div class="buttons"><button id="convSave" type="button" disabled>音声入力設定を保存</button><button id="convReset" type="button" disabled>すべて初期値に戻す</button></div>
+<p id="convStatus" class="status" role="status">読み込み中…</p>
+<small>ゲイン・AGCは次の送信音声から適用。初期値復元も保存ボタンで確定します。NVS・既存SDバックアップに保存します。</small></section>
+</div>
+<div class="settings-page" data-settings-page="quiet" hidden>
 <section id="quiet" class="card"><h2>お黙りモード</h2>
 <p id="quietStatus" class="status" role="status">状態を読み込み中…</p>
 <div class="buttons"><button type="button" class="danger" id="quietCancel" disabled>今回のお黙りモードを解除</button></div>
@@ -177,6 +208,8 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <small>日をまたぐ予約に対応。毎日をオフにすると次の該当時間帯の一回だけ。今回だけ解除しても翌日の予約は維持します。一時指定と予約が重なる場合は遅い終了時刻まで有効です。再起動後も保存設定を使用します。</small>
 <p id="quietActionStatus" class="status" role="status"></p>
 </section>
+</div>
+<div class="settings-page" data-settings-page="environment" hidden>
 <section id="environment" class="card"><h2>天気・位置情報</h2>
 <p id="environmentInfo" class="status">位置情報を読み込み中…</p>
 <div class="fields">
@@ -188,6 +221,8 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <p id="environmentStatus" class="status" role="status">読み込み中…</p>
 <small>接続元IPから地域を推定し、OpenWeatherMapの現在天気を取得します。APIキーは画面へ返さずNVSに保存し、SDのconfig.jsonへ非同期バックアップします。バックアップにはAPIキーも含まれるため、SDカードの取り扱いに注意してください。天気は約10分、位置は約1時間ごとに、会話していないときだけ更新します。取得から30分を超えた天気は装飾に使いません。</small>
 </section>
+</div>
+<div class="settings-page" data-settings-page="actions" hidden>
 <section id="actions" class="card"><h2>サーボアクションの実機テスト</h2>
 <small>現在位置から相対的に動作します。うなずき・首振りは開始位置へ戻り、ほかの動作は終了位置を維持します。可動域は自動で制限します。</small>
 <div id="servoActions" class="buttons">
@@ -198,49 +233,8 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <button type="button" data-action="surprise_move">驚く</button>
 <button type="button" data-action="shy_move">照れる</button>
 </div><p id="actionStatus" class="status" role="status">待機中</p></section>
-<section id="wifi" class="card"><h2>Wi-Fi接続設定</h2>
-<p id="wifiCurrent" class="status">接続情報を読み込み中…</p>
-<small>SSIDごとにDHCP／固定IPを選択。既存パスワードは表示しません。空欄では変更されません。
-新しいSSIDを登録しても旧SSIDは復旧用に残ります。現在接続中のSSIDと最後の1件は削除できません。</small>
-<div id="wifiNetworks"></div>
-<div class="buttons"><button type="button" id="wifiAdd">SSIDを追加</button>
-<button type="button" id="wifiReload">再読み込み</button></div>
-<p id="wifiStatus" class="status" role="status">読み込み中…</p>
-<small>保存先はNVS、SDバックアップは既存の非同期処理で反映します。
-接続中のSSIDを保存した場合はWi-Fiを再接続します。
-Webとの接続が切れた場合は新しいIPアドレスから開き直してください。</small>
-</section>
-<section id="device" class="card"><h2>デバイス設定</h2>
-<div id="setupDeviceFields"></div>
-<small>明るさ・音量は本体と同じ値を保存して反映します。タイムゾーンも本体SETUPと同じ選択肢です。</small></section>
-<section id="aiSetup" class="card"><h2>AI設定</h2>
-<div id="setupAiFields"></div>
-<h3>ウェイクワード感度</h3>
-<label class="check"><input id="wakeThresholdDefault" type="checkbox" checked disabled>モデル標準値を使用</label>
-<label for="wakeThreshold">検出閾値 <output id="wakeThresholdValue">0.55</output></label>
-<input id="wakeThreshold" type="range" min="40" max="90" step="1" value="55" disabled style="width:100%;max-width:19rem">
-<small>左（0.40）：高感度／右（0.90）：低感度。低いほど反応しやすくなりますが、誤検出も増える場合があります。WakeNetのみ対象です。</small>
-<div class="buttons"><button id="wakeThresholdSave" type="button" disabled>感度を保存</button></div>
-<p id="wakeThresholdStatus" class="status" role="status">読み込み中…</p>
-<small>保存後、次のウェイクワード待受処理で適用します。再起動は不要です。標準値に戻すこともできます。</small>
-<h3>接続先AIサーバー</h3>
-<div class="setup-row"><label>サーバーURL
-<input id="setupServerUrl" type="url" maxlength="192" autocomplete="off"
- placeholder="http://192.168.1.254:12800" required></label>
-<button id="setupServerSave" type="button" disabled>保存</button></div>
-<small>サーバーの基底URLを指定します。保存時にOTA設定URLと会話WebSocket URLを同じ接続先へ更新します。
-パスは入力せず、例のようにスキーム・ホスト・ポートだけを指定してください。認証トークンは変更しません。
-反映には本体の再起動が必要です。</small>
-<p id="setupServerStatus" class="status"></p>
-<small>本体SETUPの「General」と共通の設定値です。保存後は次回の本体起動時に確実に適用されます。</small></section>
-<section id="appsSetup" class="card"><h2>アプリの表示・非表示</h2>
-<div id="setupAppFields"></div>
-<small>ランチャーのアイコン表示だけを変更します。AI自動起動とは別設定です。SETUPは非表示になりません。</small></section>
-<section id="deviceInfo" class="card"><h2>アカウント・端末情報（閲覧のみ）</h2>
-<div id="setupInfoRows"></div>
-<small>アカウント名と端末名は本体保存済み情報を表示します。ここからサーバーへの再取得、解除、初期化、OTA更新は行いません。</small>
-<h2>ハードウェア・診断</h2>
-<p>サーボの動作確認は上の「サーボテスト」から実行できます。
+<section class="card"><h2>ハードウェア・診断</h2>
+<p>サーボの動作確認は上の実機テストから実行できます。
 マイク・Wi-Fi接続テストは本体のSETUPアプリで行えます。</p>
 <h3>RGB LEDの実機テスト</h3>
 <small>本体SETUPと同じ左右のLEDを点灯します。会話・発話・睡眠・自動演出中は実行できません。終了時は消灯を選んでください。設定は保存しません。</small>
@@ -254,13 +248,70 @@ Webとの接続が切れた場合は新しいIPアドレスから開き直して
 <button type="button" data-rgb="White" style="background:#fff;color:#242424;border:1px solid #bac5d6">白</button>
 <button type="button" data-rgb="Off" style="background:#303030">消灯</button>
 </div><p id="rgbStatus" class="status" role="status">待機中</p></section>
-<section class="card"><h2>本体SETUPの読込・保存状態</h2>
+</div>
+<div class="settings-page" data-settings-page="wifi" hidden>
+<section id="wifi" class="card"><h2>Wi-Fi接続設定</h2>
+<p id="wifiCurrent" class="status">接続情報を読み込み中…</p>
+<small>SSIDごとにDHCP／固定IPを選択。既存パスワードは表示しません。空欄では変更されません。
+新しいSSIDを登録しても旧SSIDは復旧用に残ります。現在接続中のSSIDと最後の1件は削除できません。</small>
+<div id="wifiNetworks"></div>
+<div class="buttons"><button type="button" id="wifiAdd">SSIDを追加</button>
+<button type="button" id="wifiReload">再読み込み</button></div>
+<p id="wifiStatus" class="status" role="status">読み込み中…</p>
+<small>保存先はNVS、SDバックアップは既存の非同期処理で反映します。
+接続中のSSIDを保存した場合はWi-Fiを再接続します。
+Webとの接続が切れた場合は新しいIPアドレスから開き直してください。</small>
+</section>
+<section class="card"><h2>接続先AIサーバー</h2>
+<div class="setup-row"><label>サーバーURL
+<input id="setupServerUrl" type="url" maxlength="192" autocomplete="off"
+ placeholder="http://192.168.1.254:12800" required></label>
+<button id="setupServerSave" type="button" disabled>保存</button></div>
+<small>サーバーの基底URLを指定します。保存時にOTA設定URLと会話WebSocket URLを同じ接続先へ更新します。
+パスは入力せず、例のようにスキーム・ホスト・ポートだけを指定してください。認証トークンは変更しません。
+反映には本体の再起動が必要です。</small>
+<p id="setupServerStatus" class="status"></p>
+</section>
+</div>
+<div class="settings-page" data-settings-page="device" hidden>
+<section id="device" class="card"><h2>デバイス設定</h2>
+<div id="setupDeviceFields"></div>
+<small>明るさ・音量は本体と同じ値を保存して反映します。タイムゾーンも本体SETUPと同じ選択肢です。</small></section>
+<section id="aiSetup" class="card"><h2>AI設定</h2>
+<div id="setupAiFields"></div>
+<small>本体SETUPの「General」と共通の設定値です。保存後は次回の本体起動時に確実に適用されます。</small></section>
+<section id="appsSetup" class="card"><h2>アプリの表示・非表示</h2>
+<div id="setupAppFields"></div>
+<small>ランチャーのアイコン表示だけを変更します。AI自動起動とは別設定です。SETUPは非表示になりません。</small></section>
+</div>
+<div class="settings-page" data-settings-page="deviceInfo" hidden>
+<section id="deviceInfo" class="card"><h2>アカウント・端末情報（閲覧のみ）</h2>
+<div id="setupInfoRows"></div>
+<small>アカウント名と端末名は本体保存済み情報を表示します。ここからサーバーへの再取得、解除、初期化、OTA更新は行いません。</small>
+</section>
+</div>
+<section id="setupSharedStatus" class="card" hidden><h2>本体SETUPの読込・保存状態</h2>
 <div class="buttons"><button id="setupReload" type="button">設定を再読み込み</button></div>
 <p id="setupStatus" class="status" role="status">読み込み中…</p>
 <small>NVSへの保存とSDバックアップの完了は別々です。SD同期が保留の場合はその状態を表示します。</small>
 </section>
 </main></div>
 <script>
+const pageLinks=[...document.querySelectorAll('nav a[data-page]')];
+const pages=[...document.querySelectorAll('[data-settings-page]')];
+const pageAliases={theatre:'daily',nap:'daily',aiSetup:'device',appsSetup:'device'};
+function showSettingsPage(){
+ const hash=location.hash.slice(1),requested=pageAliases[hash]||hash;
+ const selected=pageLinks.find(a=>a.dataset.page===requested)||pageLinks[0];
+ const key=selected.dataset.page;
+ pages.forEach(p=>{p.hidden=p.dataset.settingsPage!==key;});
+ pageLinks.forEach(a=>{if(a===selected)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
+ document.getElementById('pageTitle').textContent=selected.textContent;
+ document.getElementById('setupSharedStatus').hidden=!['conversation','wifi','device','deviceInfo'].includes(key);
+ window.scrollTo(0,0);
+}
+window.addEventListener('hashchange',showSettingsPage);
+showSettingsPage();
 const form=document.getElementById('settings'),status=document.getElementById('status');
 const f=form.elements;
 const time=n=>String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');
@@ -652,6 +703,69 @@ wakeThresholdSave.addEventListener('click',async()=>{
  }catch(e){wakeThresholdStatus.textContent='保存失敗または未確認: '+e.message;}
  finally{wakeThresholdDefault.disabled=false;wakeThresholdSave.disabled=false;updateWakeThreshold();}
 });
+const convGain=document.getElementById('convGain'),convVad=document.getElementById('convVad'),convAgc=document.getElementById('convAgc');
+const convSave=document.getElementById('convSave'),convReset=document.getElementById('convReset'),convStatus=document.getElementById('convStatus');
+const convResetButtons=[...document.querySelectorAll('[data-conv-reset]')];
+let convLoaded=false;
+function convMode(){return Number(convVad.value);}
+function convDefaultVad(){return 1;}
+function updateConvValues(){
+ const g=Number(convGain.value),a=Number(convAgc.value);
+ document.getElementById('convGainValue').textContent=(g>0?'+':'')+g+' dB';
+ document.getElementById('convVadValue').textContent=['低','標準','高'][convMode()];
+ document.getElementById('convAgcValue').textContent=a===0?'OFF':a+' / 4（最大＋'+a*3+' dB）';
+}
+function convEnable(enabled){
+ [convGain,convVad,convAgc,convSave,convReset,...convResetButtons].forEach(el=>{el.disabled=!enabled;});
+}
+function resetConv(which){
+ if(which==='all'||which==='gain')convGain.value='0';
+ if(which==='all'||which==='vad')convVad.value=String(convDefaultVad());
+ if(which==='all'||which==='agc')convAgc.value='0';
+ updateConvValues();
+ convStatus.textContent='初期値を選択しました。保存すると確定します。';
+}
+[convGain,convVad,convAgc].forEach(el=>el.addEventListener('input',updateConvValues));
+convResetButtons.forEach(el=>el.addEventListener('click',()=>resetConv(el.dataset.convReset)));
+convReset.addEventListener('click',()=>resetConv('all'));
+async function readConv(){
+ const res=await fetch('/api/stage1/setup?conversation_audio=1',{cache:'no-store'});
+ if(!res.ok)throw Error('HTTP '+res.status);
+ const d=await res.json();
+ if(!Number.isInteger(d.gain_db)||d.gain_db < -12||d.gain_db > 12||!Number.isInteger(d.agc)||d.agc<0||d.agc>4||
+    !Number.isInteger(d.vad_mode)||d.vad_mode<0||d.vad_mode>2)throw Error('設定値が不正です');
+ return d;
+}
+function convApplied(){return 'ゲイン・AGCは送信音声から、VADは次回のGemini Live接続から適用します。';}
+function renderConv(d){
+ convGain.value=String(d.gain_db);convAgc.value=String(d.agc);convVad.value=String(d.vad_mode);
+ updateConvValues();
+}
+async function loadConversation(){
+ convEnable(false);convLoaded=false;
+ try{const d=await readConv();renderConv(d);convLoaded=true;convStatus.textContent='読み込み完了。'+convApplied(d);}
+ catch(e){convStatus.textContent='読み込み失敗: '+e.message;}
+ finally{convEnable(convLoaded);}
+}
+convSave.addEventListener('click',async()=>{
+ if(!convLoaded)return;
+ const value={gain_db:Number(convGain.value),vad_mode:convMode(),agc:Number(convAgc.value)};
+ convEnable(false);convStatus.textContent='NVSへ保存要求中…';
+ try{
+  const r=await fetch('/api/stage1/setup',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({field:'conversation_audio',value})});
+  if(r.status!==202)throw Error('HTTP '+r.status+': '+await r.text());
+  for(let i=0;i<30;i++){
+   await new Promise(resolve=>setTimeout(resolve,300));
+   const d=await readConv();if(d.state===1)continue;
+   if(d.state!==2||d.gain_db!==value.gain_db||d.vad_mode!==value.vad_mode||d.agc!==value.agc)
+    throw Error('保存結果を確認できません');
+   renderConv(d);convStatus.textContent='NVSに保存しました。'+convApplied(d)+' SDバックアップは別途同期します。';return;
+  }
+  convStatus.textContent='保存結果が未確認です。再読み込みしてください。';
+ }catch(e){convStatus.textContent='保存失敗または未確認: '+e.message;}
+ finally{convEnable(convLoaded);}
+});
 const setupServerUrl=document.getElementById('setupServerUrl');
 const setupServerSave=document.getElementById('setupServerSave');
 const setupServerStatus=document.getElementById('setupServerStatus');
@@ -752,7 +866,7 @@ async function setupLoad(){
 }
 document.getElementById('setupReload').addEventListener('click',setupLoad);
 // Avoid concurrent large JSON responses on the memory-constrained server.
-Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(loadEnvironment).then(wifiLoad).then(setupLoad);
+Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(loadEnvironment).then(wifiLoad).then(setupLoad).then(loadConversation);
 </script></body></html>)STAGE1PAGE";
 
 void Reply(httpd_req_t* req, const char* status, const char* body) {

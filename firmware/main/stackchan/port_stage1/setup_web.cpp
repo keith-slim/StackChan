@@ -2,6 +2,7 @@
 // Never initialize or erase NVS, and never perform reset/OTA actions here.
 #include "setup_web.h"
 #include "wake_net_threshold.h"
+#include "conversation_audio_settings.h"
 #include "application.h"
 #include <atomic>
 #include <hal/hal.h>
@@ -38,6 +39,20 @@ bool QueueWakeThreshold(int value) {
             wake_save_state.store(saved ? kWakeSaved : kWakeFailed);
         })) {
         wake_save_state.store(kWakeFailed);
+        return false;
+    }
+    return true;
+}
+std::atomic<int> conversation_save_state{kWakeIdle};
+bool QueueConversationAudio(ConversationAudio::Settings value) {
+    if (conversation_save_state.exchange(kWakePending) == kWakePending) return false;
+    if (!Application::GetInstance().Schedule([value]() {
+            const bool saved = ConversationAudio::Save(value);
+            ESP_LOGI(kTag, "Conversation audio NVS save: gain=%d vad=%d agc=%d result=%d",
+                     value.gain_db, value.vad_mode, value.agc, saved);
+            conversation_save_state.store(saved ? kWakeSaved : kWakeFailed);
+        })) {
+        conversation_save_state.store(kWakeFailed);
         return false;
     }
     return true;
@@ -190,6 +205,15 @@ esp_err_t Read(httpd_req_t* request) {
                       "{\"state\":%d,\"wake_threshold\":%d}", state, WakeNetThreshold::Get());
         return Reply(request, "200 OK", response);
     }
+    if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK &&
+        std::strcmp(query, "conversation_audio=1") == 0) {
+        const auto value = ConversationAudio::Get();
+        char response[256];
+        std::snprintf(response, sizeof(response),
+            "{\"state\":%d,\"gain_db\":%d,\"vad_mode\":%d,\"agc\":%d}",
+            conversation_save_state.load(), value.gain_db, value.vad_mode, value.agc);
+        return Reply(request, "200 OK", response);
+    }
     auto* root = cJSON_CreateObject();
     if (!root) return Reply(request, "503 Service Unavailable", "{\"error\":\"low memory\"}");
 
@@ -339,6 +363,20 @@ esp_err_t Write(httpd_req_t* request) {
         cJSON_Delete(root);
         if (!valid) return Reply(request, "400 Bad Request", "{\"error\":\"invalid threshold\"}");
         if (!QueueWakeThreshold(threshold))
+            return Reply(request, "503 Service Unavailable", "{\"error\":\"save busy or queue unavailable\"}");
+        return Reply(request, "202 Accepted", "{\"queued\":true}");
+    } else if (valid && std::strcmp(field, "conversation_audio") == 0) {
+        ConversationAudio::Settings settings;
+        valid = cJSON_IsObject(value) &&
+            Number(cJSON_GetObjectItemCaseSensitive(value, "gain_db"),
+                   ConversationAudio::kGainMin, ConversationAudio::kGainMax, 1, settings.gain_db) &&
+            Number(cJSON_GetObjectItemCaseSensitive(value, "vad_mode"),
+                   0, 2, 1, settings.vad_mode) &&
+            Number(cJSON_GetObjectItemCaseSensitive(value, "agc"),
+                   0, ConversationAudio::kAgcMax, 1, settings.agc);
+        cJSON_Delete(root);
+        if (!valid) return Reply(request, "400 Bad Request", "{\"error\":\"invalid conversation audio settings\"}");
+        if (!QueueConversationAudio(settings))
             return Reply(request, "503 Service Unavailable", "{\"error\":\"save busy or queue unavailable\"}");
         return Reply(request, "202 Accepted", "{\"queued\":true}");
     } else if (valid && std::strcmp(field, "server_base_url") == 0) {
