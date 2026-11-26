@@ -59,6 +59,8 @@ public:
     // Rate-limited spring; speed is in tenths of a degree per second.
     uint32_t trackWithSpeed(int angle, int speed, const int* measured_start = nullptr);
     bool isTrackingCommandActive() const;
+    bool startHardwareSweep(int angle, int rate, uint32_t& revision);
+    bool stopHardwareSweep(uint32_t revision);
     // Hardware feedback must be distinguished from the interpolated fallback.
     virtual bool tryGetCurrentAngle(int& angle) { angle = getCurrentAngle(); return true; }
     void stopTrackingIfOwned(uint32_t revision, const int* measured_stop = nullptr);
@@ -183,6 +185,8 @@ protected:
      */
     virtual void set_angle_impl(int angle) = 0;
     virtual void set_tracking_angle_impl(int angle, int rate) { set_angle_impl(angle); }
+    virtual bool write_hardware_sweep(int angle, int rate, int measured) { return false; }
+    virtual bool hold_hardware_sweep(int& measured) { return false; }
     virtual bool is_moving_impl()
     {
         return false;
@@ -198,7 +202,7 @@ protected:
 
     uint32_t _last_tick               = 0;
     uint32_t _last_torque_check_tick  = 0;
-    enum class Profile { Idle, Spring, Timed, Tracking };
+    enum class Profile { Idle, Spring, Timed, Tracking, HardwareSweep };
     Profile _profile = Profile::Idle;
     int _goal = 0;
     float _tracking_position = 0.0f;
