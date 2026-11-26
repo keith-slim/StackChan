@@ -46,6 +46,7 @@ bool RequestSleep(); // Queue manual sleep until active speech/conversation drai
 // servo write is serialized by Update() under the existing LVGL/motion lock.
 void RequestWakeSearchPitch(); // Queue absolute 10-degree pitch once per wake.
 void StartPersonSearch(int yaw_delta);
+void ResumePersonSearch();
 void StopPersonSearch();
 void StartFacePitchSearch();
 void StopFacePitchSearch();

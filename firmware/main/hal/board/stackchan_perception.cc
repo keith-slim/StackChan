@@ -187,7 +187,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     int face_missing_frames           = 0;
     int person_missing_frames         = 0;
     bool person_acquired              = false;
-    int last_search_direction         = 0;
     bool face_sweep_attempted          = false;
     float filtered_center_x           = 0.5f;
     float filtered_center_y           = 0.5f;
@@ -318,7 +317,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 const float error_y = 0.5f - body_target_y;
                 const int yaw_delta = std::abs(error_x) < 0.05f ? 0
                     : static_cast<int>(std::clamp(error_x * 500.0f, -160.0f, 160.0f));
-                if (yaw_delta != 0) last_search_direction = yaw_delta > 0 ? 1 : -1;
                 const int pitch_delta = std::abs(error_y) < 0.08f
                                             ? 0
                                             : static_cast<int>(std::clamp(error_y * 300.0f, -100.0f, 100.0f));
@@ -344,7 +342,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                     person_acquired = false; // one bounded sweep per loss, not endless retries
                     person_missing_frames = 0;
                     ESP_LOGI(kTag, "[PERSON_SEARCH] restart: person lost");
-                    stackchan::stage1::StartPersonSearch(last_search_direction);
+                    stackchan::stage1::ResumePersonSearch();
                 }
             } else if (!valid_frame) {
                 person_missing_frames = 0;

@@ -62,12 +62,15 @@ std::atomic<bool> perception_face_tracking{false};
 std::atomic<bool> speech_tracking_paused{false};
 // Worker publishes requests/results; only the existing Stage1 update owns servos.
 std::atomic<uint32_t> search_start_epoch{0};
-std::atomic<int> search_start{0}; // signed DOA in tenths of degrees, 1001 = zero
+constexpr int kSearchZero = 1001, kSearchResume = 1002;
+std::atomic<int> search_start{0}; // signed DOA or a reserved search request
+std::atomic<int> last_yaw_direction{0}; // last issued perception yaw direction
 std::atomic<bool> search_cancel{false};
 std::atomic<bool> search_active{false};
 std::atomic<bool> wake_pitch_pending{false};
 // The same owned command and feedback path is used by yaw and pitch search.
 constexpr int kPerceptionRate = 150; // tenths of a degree per second
+constexpr int kPersonSearchRate = 200; // horizontal search only
 struct OwnedTracking {
     bool commanded = false;
     uint32_t revision = 0;
@@ -77,8 +80,8 @@ struct OwnedTracking {
     uint32_t stationary_since = 0;
     int stationary_angle = 0;
     bool stationary = false;
-    void Issue(motion::Servo& servo, int target, uint32_t now) {
-        revision = servo.trackWithSpeed(target, kPerceptionRate);
+    void Issue(motion::Servo& servo, int target, uint32_t now, int rate = kPerceptionRate) {
+        revision = servo.trackWithSpeed(target, rate);
         commanded = true;
         last_poll = now;
         sampled = false;
@@ -1383,12 +1386,21 @@ bool RequestCue(const char* id) {
 }
 
 bool IsSpeechTrackingPaused() { return speech_tracking_paused.load(); }
-void RequestWakeSearchPitch() { wake_pitch_pending.store(true); }
+void RequestWakeSearchPitch() {
+    last_yaw_direction.store(0);
+    wake_pitch_pending.store(true);
+}
 void StartPersonSearch(int yaw_delta) {
     search_cancel.store(false);
     search_active.store(true);
     search_start_epoch.store(speech_motion_epoch.load());
-    search_start.store(yaw_delta == 0 ? 1001 : std::clamp(yaw_delta, -700, 700));
+    search_start.store(yaw_delta == 0 ? kSearchZero : std::clamp(yaw_delta, -700, 700));
+}
+void ResumePersonSearch() {
+    search_cancel.store(false);
+    search_active.store(true);
+    search_start_epoch.store(speech_motion_epoch.load());
+    search_start.store(kSearchResume);
 }
 void StartFacePitchSearch() {
     face_pitch_epoch.store(speech_motion_epoch.load());
@@ -1528,16 +1540,17 @@ void Update(StackChan& sc) {
         ps.End(sc, true);
         perception_yaw.Stop(search_yaw);
         perception_pitch.Stop(search_motion.pitchServo());
-        const int delta = start == 1001 ? 0 : start;
+        const bool resume = start == kSearchResume;
+        const int delta = (resume || start == kSearchZero) ? 0 : start;
         perception_look_pending.store(false);
         ps.running = true;
-        ps.direction = delta < 0 ? -1 : 1;
+        ps.direction = (resume ? last_yaw_direction.load() : delta) < 0 ? -1 : 1;
         ps.origin = std::clamp(search_motion.getCurrentYawAngle() + delta, search_limits.x, search_limits.y);
         ps.target = ps.direction > 0 ? search_limits.y : search_limits.x;
         ps.epoch = search_start_epoch.load();
         search_active.store(true);
-        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d target=%d return=%d limits=%d,%d",
-                 ps.direction, ps.target, ps.origin, search_limits.x, search_limits.y);
+        ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] start direction=%d target=%d return=%d limits=%d,%d resume=%d rate=%d",
+                 ps.direction, ps.target, ps.origin, search_limits.x, search_limits.y, resume, kPersonSearchRate);
     }
     if (ps.running) {
         if (ps.epoch != speech_motion_epoch.load()) {
@@ -1581,7 +1594,16 @@ void Update(StackChan& sc) {
             // Issue the next target in this update, without a wait state.
             if (ps.running && !ps.commanded && !search_cancel.load()) {
                 ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
-                ps.Issue(search_yaw, ps.target, now);
+                // Preserve the direction of the segment actually issued, including reversals.
+                const int direction = ps.phase == PersonSearch::Reverse ? -ps.direction : ps.direction;
+                if (ps.phase != PersonSearch::Return) {
+                    last_yaw_direction.store(direction);
+                } else {
+                    int actual = 0;
+                    if (search_yaw.tryGetCurrentAngle(actual) && actual != ps.target)
+                        last_yaw_direction.store(ps.target < actual ? -1 : 1);
+                }
+                ps.Issue(search_yaw, ps.target, now, kPersonSearchRate);
             }
         }
     }
@@ -1669,6 +1691,8 @@ void Update(StackChan& sc) {
                 }
                 const auto limits = servo.getAngleLimit();
                 const int target = std::clamp(actual + delta, limits.x, limits.y);
+                if (&servo == &yaw && target != actual)
+                    last_yaw_direction.store(target < actual ? -1 : 1);
                 owned.Issue(servo, target, now);
                 ESP_LOGI(LOG_TAG, "[TRACK_CORRECTION] kind=%s axis=%s actual=%d target=%d rate=%d",
                          face ? "face" : "body", axis, actual, target, kPerceptionRate);
