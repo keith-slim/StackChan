@@ -56,8 +56,9 @@ public:
      * @param speed (0-1000)
      */
     void moveWithSpeed(int angle, int speed);
-    // Face tracking retargets an existing spring without discarding its momentum.
+    // Rate-limited spring; speed is in tenths of a degree per second.
     void trackWithSpeed(int angle, int speed);
+    void stopTrackingIfOwned(uint32_t revision);
 
     // One physical position sync at entry, then direct timed setpoints.
     void moveWithDuration(int angle, uint32_t duration_ms, uint32_t now);
@@ -195,13 +196,19 @@ protected:
     uint32_t _last_torque_check_tick  = 0;
     bool _snap_to_target_on_rest      = false;
     bool _tracking_target = false;
+    float _tracking_position = 0.0f;
+    float _tracking_velocity = 0.0f;
+    int _tracking_goal = 0;
+    int _tracking_rate = 0;
+    float _tracking_stiffness = 0.0f;
+    float _tracking_damping = 0.0f;
     bool _auto_torque_release_enabled = true;
     bool _auto_angle_sync_enabled     = true;
     // Track commands instead of polling the servo while idle with torque off.
     bool _torque_commanded_enabled    = false;
 
     void apply_default_spring_options();
-    void update_angle_anim_target(int angle, bool tracking = false);
+    void update_angle_anim_target(int angle);
     void stop_motion_at_angle(int angle);
     uitk::SpringOptions_t map_speed_to_spring_options(int speed);
 };

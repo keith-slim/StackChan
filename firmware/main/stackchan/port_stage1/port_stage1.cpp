@@ -73,8 +73,8 @@ struct PersonSearch {
     bool running = false, commanded = false;
     uint32_t revision = 0, epoch = 0;
     void StopOwned(StackChan& sc) {
-        if (commanded && sc.motion().yawServo().getCommandRevision() == revision)
-            sc.motion().moveYawWithSpeed(sc.motion().getCurrentYawAngle(), 1000);
+        if (commanded)
+            sc.motion().yawServo().stopTrackingIfOwned(revision);
         commanded = false;
     }
     void End(StackChan& sc, bool stop) {
@@ -1497,7 +1497,7 @@ void Update(StackChan& sc) {
             // Issue the next target in this update, without a wait state.
             if (ps.running && !ps.commanded && !search_cancel.load()) {
                 ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
-                search_motion.moveYawWithSpeed(ps.target, 100);
+                search_yaw.trackWithSpeed(ps.target, 100);
                 ps.revision = search_yaw.getCommandRevision();
                 ps.commanded = true;
             }
