@@ -1527,7 +1527,7 @@ void Update(StackChan& sc) {
                      pitch_target);
             // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
             if (perception_face_tracking.load(std::memory_order_relaxed)) {
-                motion.trackWithSpeed(yaw_target, pitch_target, 1000);
+                motion.trackWithSpeed(yaw_target, pitch_target, 500);
             } else {
                 motion.moveWithSpeed(yaw_target, pitch_target, 1000);
             }
