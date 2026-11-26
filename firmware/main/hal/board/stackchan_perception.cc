@@ -225,8 +225,10 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         if (stop_requested_.load(std::memory_order_acquire)) break;
         if (stackchan::stage1::IsPersonSearchActive()) {
             if (valid_frame && ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore)) {
+                const bool found_face = face_detected && score >= kMinimumFaceScore;
                 stackchan::stage1::StopPersonSearch();
-                ESP_LOGI(kTag, "[PERSON_SEARCH] found %s", face_detected && score >= kMinimumFaceScore ? "face" : "body");
+                if (!found_face) stackchan::stage1::StartFacePitchSearch();
+                ESP_LOGI(kTag, "[PERSON_SEARCH] found %s", found_face ? "face" : "body");
                 face_filter_initialized = false;
                 face_center_locked = false;
                 centered_frames = 0;
@@ -242,6 +244,10 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             continue;
         }
         if (face_detected && score >= kMinimumFaceScore) {
+            if (stackchan::stage1::IsFacePitchSearchRequested()) {
+                stackchan::stage1::StopFacePitchSearch();
+                ESP_LOGI(kTag, "[FACE_PITCH_SEARCH] face found score=%.3f", score);
+            }
             person_missing_logged = false;
             face_missing_frames   = 0;
             if (!wake_face_smile_shown && display_ && !stop_requested_.load(std::memory_order_acquire))
@@ -282,6 +288,9 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                      yaw_delta, pitch_delta);
             if (yaw_delta != 0 || pitch_delta != 0)
                 stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true);
+        } else if (stackchan::stage1::IsFacePitchSearchRequested()) {
+            // Keep acquiring faces while pitch sweeps; don't replace the sweep
+            // with a zero/deadband body correction or a transient missing frame.
         } else if (body_score >= kMinimumBodyScore) {
             person_missing_logged = false;
             ++face_missing_frames;

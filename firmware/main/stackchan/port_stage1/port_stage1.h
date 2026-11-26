@@ -47,6 +47,9 @@ bool RequestSleep(); // Queue manual sleep until active speech/conversation drai
 void RequestWakeSearchPitch(); // Queue absolute 10-degree pitch once per wake.
 void StartPersonSearch(int yaw_delta);
 void StopPersonSearch();
+void StartFacePitchSearch();
+void StopFacePitchSearch();
+bool IsFacePitchSearchRequested();
 bool IsPersonSearchActive();
 bool IsPersonSearchStopping();
 bool IsSpeechTrackingPaused(); // Lock-free for perception worker.

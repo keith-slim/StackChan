@@ -88,6 +88,18 @@ struct PersonSearch {
     }
 };
 PersonSearch person_search;
+std::atomic<bool> face_pitch_requested{false};
+std::atomic<uint32_t> face_pitch_epoch{0};
+struct FacePitchSearch {
+    bool commanded = false;
+    bool upward = true;
+    uint32_t revision = 0;
+    void Pause(StackChan& sc) {
+        if (commanded) sc.motion().pitchServo().stopTrackingIfOwned(revision);
+        commanded = false;
+    }
+};
+FacePitchSearch face_pitch_search;
 // LVGL is owned by Update(). Head pad/voice tasks only set these flags.
 std::atomic<uint8_t> wake_intents{0}; // touch=1, wake word=2
 std::atomic<bool> sleep_wake_eligible{false};
@@ -1097,6 +1109,8 @@ void Start() {
     speech_effects = SpeechEffectsRuntime{};
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
+    face_pitch_search = FacePitchSearch{};
+    face_pitch_requested.store(false);
     search_start.store(0); search_cancel.store(false); search_active.store(false);
     wake_pitch_pending.store(false);
     const Config config = LoadConfig();
@@ -1151,6 +1165,8 @@ void Stop() {
     speech_effects = SpeechEffectsRuntime{};
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
+    face_pitch_search = FacePitchSearch{};
+    face_pitch_requested.store(false);
     search_start.store(0); search_cancel.store(false); search_active.store(false);
     wake_pitch_pending.store(false);
     queued_cue.store(-1);
@@ -1257,6 +1273,7 @@ void BeginSpeechTurn(StackChan& sc) { speech_effects.Arm(sc); }
 void StartSpeechEffects(StackChan& sc, avatar::Emotion emotion) {
     if (speech_effects.active) return;
     person_search.Pause(sc);
+    face_pitch_search.Pause(sc);
     if (!speech_effects.armed) speech_effects.Arm(sc);
     speech_effects.active = true;
     speech_effects.Set(sc, emotion, GetHAL().millis());
@@ -1317,7 +1334,14 @@ void StartPersonSearch(int yaw_delta) {
     search_start_epoch.store(speech_motion_epoch.load());
     search_start.store(yaw_delta == 0 ? 1001 : std::clamp(yaw_delta, -700, 700));
 }
+void StartFacePitchSearch() {
+    face_pitch_epoch.store(speech_motion_epoch.load());
+    face_pitch_requested.store(true);
+}
+void StopFacePitchSearch() { face_pitch_requested.store(false); }
+bool IsFacePitchSearchRequested() { return face_pitch_requested.load(); }
 void StopPersonSearch() {
+    StopFacePitchSearch();
     wake_pitch_pending.store(false);
     search_start.store(0);
     search_cancel.store(true);
@@ -1500,6 +1524,44 @@ void Update(StackChan& sc) {
                 search_yaw.trackWithSpeed(ps.target, 100);
                 ps.revision = search_yaw.getCommandRevision();
                 ps.commanded = true;
+            }
+        }
+    }
+    // Body found: keep yaw fixed and sweep pitch using the shared smooth rate limiter.
+    auto& fps = face_pitch_search;
+    auto& search_pitch = search_motion.pitchServo();
+    if (!face_pitch_requested.load() || face_pitch_epoch.load() != speech_motion_epoch.load()) {
+        if (fps.commanded) {
+            fps.Pause(sc);
+            ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] stop pitch=%d", search_pitch.getCurrentAngle());
+        }
+        fps = FacePitchSearch{};
+        if (face_pitch_epoch.load() != speech_motion_epoch.load()) face_pitch_requested.store(false);
+    } else if (search_blocked || ps.running || search_cancel.load()) {
+        fps.Pause(sc);
+    } else {
+        if (fps.commanded && search_pitch.getCommandRevision() != fps.revision) {
+            // A different owner (including stall protection) superseded this target.
+            fps.commanded = false;
+            face_pitch_requested.store(false);
+            ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] cancelled by motion owner");
+        } else {
+            if (fps.commanded && !search_pitch.isMoving()) {
+                fps.upward = !fps.upward;
+                fps.commanded = false;
+            }
+            if (!fps.commanded && face_pitch_requested.load()) {
+                const auto limits = search_pitch.getAngleLimit();
+                const int current = search_pitch.getCurrentAngle();
+                if (fps.upward && current >= limits.y) fps.upward = false;
+                else if (!fps.upward && current <= limits.x) fps.upward = true;
+                const int target = fps.upward ? limits.y : limits.x;
+                if (limits.x < limits.y) {
+                    search_pitch.trackWithSpeed(target, 100);
+                    fps.revision = search_pitch.getCommandRevision();
+                    fps.commanded = true;
+                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d target=%d rate=100", current, target);
+                }
             }
         }
     }
