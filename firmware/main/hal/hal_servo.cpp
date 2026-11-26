@@ -99,9 +99,22 @@ public:
         }
 
         check_mode(Mode::Position);
-        // Only the tracking path suppresses duplicate raw positions. The
-        // regular animation keeps its original 20 ms position command.
-        if (rate > 0 && _last_tracking_raw == mapped_angle) return;
+        // Keep the existing tracking rate calculation and duplicate suppression.
+        // Ordinary animation can repeat the same quantized position. Only skip
+        // an acknowledged identical command within the same motion revision.
+        const uint32_t revision = getCommandRevision();
+        const uint32_t now = GetHAL().millis();
+        if (rate > 0 && _last_tracking_raw == mapped_angle) {
+            ++_tracking_write_skipped;
+            return;
+        }
+        if (rate == 0 && _last_normal_raw == mapped_angle &&
+            _last_normal_revision == revision &&
+            now - _last_normal_write_tick < kNormalRefreshMs) {
+            ++_normal_write_skipped;
+            report_bus_stats();
+            return;
+        }
         uint16_t duration = 20;
         if (rate > 0 && _last_tracking_raw >= 0) {
             // SCS0009 position quantum is 0.3125 degrees. Time is ms.
@@ -110,8 +123,20 @@ public:
             const int ms = (delta * 3125 + rate - 1) / rate;
             duration = static_cast<uint16_t>(uitk::clamp(ms, 20, 65535));
         }
+        const auto ack_before = _scs_bus.getWriteAckDiagnostic(_config.id).received;
         _scs_bus.WritePos(_config.id, mapped_angle, duration, 0);
         _last_tracking_raw = rate > 0 ? mapped_angle : -1;
+        _last_normal_raw = -1;
+        if (rate == 0) {
+            ++_normal_write_sent;
+            if (_scs_bus.getWriteAckDiagnostic(_config.id).received != ack_before) {
+                _last_normal_raw = mapped_angle;
+                _last_normal_revision = revision;
+                _last_normal_write_tick = GetHAL().millis();
+            }
+        } else {
+            ++_tracking_write_sent;
+        }
     }
 
     int getCurrentAngle() override
@@ -164,12 +189,12 @@ public:
     {
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
-        // The bus is configured for no write ACK. Record the command locally
-        // and avoid adding a 10 ms timeout to every animation frame.
+        // Write ACK is optional and collected by the bus with a short timeout.
         if (_torque_command_known && _torque_commanded_enabled == enabled) return;
         _torque_command_known = true;
         _feedback_position = -1;
         _last_tracking_raw = -1;
+        _last_normal_raw = -1;
         _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
         Servo::setTorqueEnabled(enabled);
     }
@@ -243,6 +268,11 @@ private:
     Mode _current_mode = Mode::Position;
     bool _torque_command_known = false;
     int _last_tracking_raw = -1;
+    int _last_normal_raw = -1;
+    uint32_t _last_normal_revision = 0, _last_normal_write_tick = 0;
+    uint32_t _normal_write_sent = 0, _normal_write_skipped = 0;
+    uint32_t _tracking_write_sent = 0, _tracking_write_skipped = 0;
+    static constexpr uint32_t kNormalRefreshMs = 250;
     int _feedback_position = -1;
     uint32_t _feedback_tick = 0;
     uint32_t _read_ok = 0, _read_retry_ok = 0, _read_fail = 0, _read_shared = 0;
@@ -302,6 +332,9 @@ private:
         _diag_tick = now;
         mclog::tagInfo(_tag, "[SERVO_BUS] id={} pos_ok={} retry_ok={} pos_fail={} shared={} stall_ok={} stall_fail={}",
                        _config.id, _read_ok, _read_retry_ok, _read_fail, _read_shared, _stall_ok, _stall_fail);
+        mclog::tagInfo(_tag, "[SERVO_WRITE_RATE] id={} normal_sent={} normal_skipped={} tracking_sent={} tracking_skipped={}",
+                       _config.id, _normal_write_sent, _normal_write_skipped,
+                       _tracking_write_sent, _tracking_write_skipped);
         const auto& ack = _scs_bus.getWriteAckDiagnostic(_config.id);
         mclog::tagInfo(_tag, "[SERVO_WRITE_ACK] id={} received={} absent={} invalid={}",
                        _config.id, ack.received, ack.absent, ack.invalid);
@@ -343,6 +376,7 @@ private:
         _runtime_raw_pos_limit = _config.rawPosLimit;
         _feedback_position = -1;
         _last_tracking_raw = -1;
+        _last_normal_raw = -1;
         set_angle_limit(_config.angleLimit);
         reset_stall_detection();
     }
@@ -459,6 +493,7 @@ private:
         _scs_bus.WritePos(_config.id, raw_pos, 20, 0);
         _feedback_position = -1;
         _last_tracking_raw = -1;
+        _last_normal_raw = -1;
 
         mclog::tagWarn(_tag,
                        "id: {} stall detected, raw: {}, angle: {}, dir: {}, current: {}, load: {}, limit: [{}, {}]",
@@ -473,6 +508,7 @@ private:
 
         _feedback_position = -1;
         _last_tracking_raw = -1;
+        _last_normal_raw = -1;
         _scs_bus.SwitchMode(_config.id, static_cast<uint8_t>(targetMode));
         _current_mode = targetMode;
     }
@@ -485,8 +521,8 @@ void Hal::servo_init()
     if (!_scs_bus.begin(UART_NUM_1, 1000000, 6, 7)) {
         mclog::tagError("HAL-Servo", "failed to initialize UART1");
     }
-    // These servos execute writes but do not reliably return write-status
-    // packets. Reads still wait for and validate their normal response packet.
+    // Keep optional write ACK semantics; the driver collects and validates
+    // replies without making a missing ACK a mandatory write failure.
     _scs_bus.Level = 0;
 
     ServoConfig_t yaw_servo_config;
