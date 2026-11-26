@@ -1635,8 +1635,14 @@ void Update(StackChan& sc) {
             const int upper = std::min(static_cast<int>(limits.y), 600); // face search only: 60 degrees
             const int goal = fps.upward ? upper : limits.x;
             bool segment_sample_valid = false;
+            // Pitch has a 0.3125-degree hardware position quantum and can
+            // settle slightly short of the requested endpoint. Reverse on
+            // measured directional arrival, without waiting for the spring.
+            constexpr int kPitchArrivalTolerance = 10; // 1 degree
             if (fps.commanded && fps.Sample(search_pitch, now, measured, "pitch") &&
-                fps.Settled(search_pitch, measured, goal, now)) {
+                ((fps.upward ? measured >= goal - kPitchArrivalTolerance
+                             : measured <= goal + kPitchArrivalTolerance) ||
+                 fps.Settled(search_pitch, measured, goal, now))) {
                 segment_sample_valid = true;
                 fps.Stop(search_pitch, &measured);
                 ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] segment complete actual=%d target=%d", measured, goal);

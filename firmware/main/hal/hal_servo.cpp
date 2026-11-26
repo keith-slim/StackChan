@@ -152,7 +152,13 @@ public:
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         uint8_t communication_error = 0;
         int current_pos = -1;
-        if (is_raw_pos_valid(_feedback_position) && GetHAL().millis() - _feedback_tick <= 10) {
+        // Pitch's validated bulk feedback already includes position.
+        // Share one sample within a single 50 ms stall-monitor interval.
+        // Yaw keeps its existing position-read behavior.
+        const uint32_t max_feedback_age = _config.enableStallProtection
+            ? kStallFeedbackIntervalMs : 10;
+        if (is_raw_pos_valid(_feedback_position) &&
+            GetHAL().millis() - _feedback_tick <= max_feedback_age) {
             current_pos = _feedback_position;
             ++_read_shared;
         } else {
