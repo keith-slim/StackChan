@@ -31,3 +31,8 @@ add_executable(speech_effects_test speech_effects_test.cpp)
 target_include_directories(speech_effects_test PRIVATE ../main)
 target_compile_features(speech_effects_test PRIVATE cxx_std_17)
 add_test(NAME speech_effects_test COMMAND $<TARGET_FILE:speech_effects_test>)
+
+add_executable(perception_tracking_test perception_tracking_test.cpp)
+target_include_directories(perception_tracking_test PRIVATE ../main)
+target_compile_features(perception_tracking_test PRIVATE cxx_std_17)
+add_test(NAME perception_tracking_test COMMAND $<TARGET_FILE:perception_tracking_test>)

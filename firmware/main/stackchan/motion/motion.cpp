@@ -52,6 +52,7 @@ void Motion::UpdateWorker(void* arg)
     TickType_t previous_update = last;
     while (!self->_worker_stop.load()) {
         self->_yaw_servo->servicePriorityStop();
+        self->_pitch_servo->servicePriorityStop();
         executor::service();
         const TickType_t now = xTaskGetTickCount();
         const TickType_t elapsed = now - last;

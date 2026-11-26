@@ -308,9 +308,15 @@ public:
 
     bool tryGetCurrentAngle(int& angle) override
     {
+        uint32_t sampled_at = 0;
+        return tryGetMeasuredAngle(angle, sampled_at);
+    }
+
+    bool tryGetMeasuredAngle(int& angle, uint32_t& sampled_at) override
+    {
         if (executor::external()) {
             bool result{};
-            executor::invoke([&] { result = tryGetCurrentAngle(angle); });
+            executor::invoke([&] { result = tryGetMeasuredAngle(angle, sampled_at); });
             return result;
         }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
@@ -339,6 +345,7 @@ public:
             return false;
         }
 
+        sampled_at = _feedback_tick;
         angle = raw_pos_to_angle(current_pos);
         angle     = uitk::clamp(angle, getAngleLimit().x, getAngleLimit().y);
         // mclog::tagInfo(_tag, "id: {} current pos: {} angle: {}", _id, current_pos, angle);

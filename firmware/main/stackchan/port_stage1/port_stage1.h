@@ -3,6 +3,7 @@
 // under the existing LVGL lock through StackChan::update(). No new task.
 #include <cstdint>
 #include "stage1_clock.h"
+#include "perception_tracking.h"
 #include "../avatar/avatar/elements/emotion.h"
 
 namespace stackchan {
@@ -50,11 +51,16 @@ void ResumePersonSearch();
 void StopPersonSearch();
 void StartFacePitchSearch();
 void StopFacePitchSearch();
+void StopFacePitchSearchOnDetection();
+bool IsFacePitchSearchStopping();
 bool IsFacePitchSearchRequested();
 bool IsPersonSearchActive();
 bool IsPersonSearchStopping();
 bool IsSpeechTrackingPaused(); // Lock-free for perception worker.
-bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking = false);  // 0.1-degree units.
+uint32_t PerceptionMotionEpoch();
+tracking::PerceptionPose ReadPerceptionPose(uint32_t captured_at, uint32_t epoch);
+bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking = false,
+                           const tracking::PerceptionPose* pose = nullptr);  // 0.1-degree units.
 void Update(StackChan& stackchan);
 } // namespace stage1
 } // namespace stackchan
