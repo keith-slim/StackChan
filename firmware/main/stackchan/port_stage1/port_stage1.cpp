@@ -1561,6 +1561,7 @@ void Update(StackChan& sc) {
             ps.Pause(sc);
         } else {
             int current = 0;
+            bool segment_sample_valid = false;
             if (ps.Superseded(search_yaw)) {
                 ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] cancelled: revision=%u current=%u", ps.revision, search_yaw.getCommandRevision());
                 ps.End(sc, false); // stall protection or another owner
@@ -1587,7 +1588,10 @@ void Update(StackChan& sc) {
                             ps.phase = PersonSearch::Return;
                             ps.target = ps.origin;
                         }
-                        ps.commanded = false;
+                        // Like pitch search, retire the previous profile before
+                        // issuing a new segment from its measured endpoint.
+                        ps.Stop(search_yaw, &current);
+                        segment_sample_valid = true;
                         ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] phase=%d yaw=%d target=%d", ps.phase, current, ps.target);
                     }
                 }
@@ -1601,11 +1605,12 @@ void Update(StackChan& sc) {
                 if (ps.phase != PersonSearch::Return) {
                     last_yaw_direction.store(direction);
                 } else {
-                    int actual = 0;
-                    if (search_yaw.tryGetCurrentAngle(actual) && actual != ps.target)
+                    int actual = current;
+                    if ((segment_sample_valid || search_yaw.tryGetCurrentAngle(actual)) && actual != ps.target)
                         last_yaw_direction.store(ps.target < actual ? -1 : 1);
                 }
-                ps.Issue(search_yaw, ps.target, now, kPersonSearchRate);
+                ps.Issue(search_yaw, ps.target, now, kPersonSearchRate,
+                         segment_sample_valid ? &current : nullptr);
             }
         }
     }
