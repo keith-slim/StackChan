@@ -40,7 +40,7 @@ public:
 	struct ReadHeaderDiagnostic {
 		uint32_t wrong_id = 0, wrong_length = 0;
 		uint32_t rx_ff = 0, rx_other_servo = 0, rx_zero = 0, rx_other = 0;
-		uint32_t ack_length = 0, read_echo_prefix = 0;
+		uint32_t ack_length = 0, read_echo_prefix = 0, ack_skipped = 0;
 		uint8_t address = 0, requested_bytes = 0;
 		uint8_t rx_id = 0, rx_length = 0, rx_status = 0;
 		uint8_t previous_id = 0, previous_command = 0, previous_address = 0;
@@ -50,6 +50,12 @@ public:
 		return read_header_diag[id == 2 ? 1 : 0][long_read ? 1 : 0];
 	}
 
+	struct WriteAckDiagnostic {
+		uint32_t received = 0, absent = 0, invalid = 0;
+	};
+	const WriteAckDiagnostic& getWriteAckDiagnostic(u8 id) const {
+		return write_ack_diag[id == 2 ? 1 : 0];
+	}
 public:
 	u8 Level;//舵机返回等级
 	u8 End;//处理器大小端结构
@@ -69,6 +75,7 @@ protected:
 	virtual int writeSCS(unsigned char bDat) = 0;
 	virtual void rFlushSCS() = 0;
 	virtual void wFlushSCS() = 0;
+	virtual int readOptionalAck(u8* data, int count) { return 0; }
 protected:
 	void writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun);
 	void Host2SCS(u8 *DataL, u8* DataH, u16 Data);//1个16位数拆分为2个8位数
@@ -77,6 +84,8 @@ protected:
 	int checkHead();//帧头检测
 private:
 	ReadHeaderDiagnostic read_header_diag[2][2]{};
+	WriteAckDiagnostic write_ack_diag[2]{};
+	static bool validAck(u8 id, const u8* body);
 	u8 last_tx_id = 0, last_tx_command = 0, last_tx_address = 0;
 	void recordReadHeader(u8 id, u8 address, u8 count, const u8* header,
 	                      u8 previous_id, u8 previous_command, u8 previous_address);

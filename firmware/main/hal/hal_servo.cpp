@@ -302,12 +302,15 @@ private:
         _diag_tick = now;
         mclog::tagInfo(_tag, "[SERVO_BUS] id={} pos_ok={} retry_ok={} pos_fail={} shared={} stall_ok={} stall_fail={}",
                        _config.id, _read_ok, _read_retry_ok, _read_fail, _read_shared, _stall_ok, _stall_fail);
+        const auto& ack = _scs_bus.getWriteAckDiagnostic(_config.id);
+        mclog::tagInfo(_tag, "[SERVO_WRITE_ACK] id={} received={} absent={} invalid={}",
+                       _config.id, ack.received, ack.absent, ack.invalid);
         for (int kind = 0; kind < 2; ++kind) {
             const auto& d = _scs_bus.getReadHeaderDiagnostic(_config.id, kind != 0);
             if (!d.wrong_id && !d.wrong_length) continue;
-            mclog::tagInfo(_tag, "[SERVO_RX_HEADER] id={} long_read={} wrong_id={} wrong_length={} rx_ff={} rx_other_servo={} rx_zero={} rx_other={} ack_length={} read_echo_prefix={}",
+            mclog::tagInfo(_tag, "[SERVO_RX_HEADER] id={} long_read={} wrong_id={} wrong_length={} rx_ff={} rx_other_servo={} rx_zero={} rx_other={} ack_length={} read_echo_prefix={} ack_skipped={}",
                            _config.id, kind, d.wrong_id, d.wrong_length, d.rx_ff, d.rx_other_servo,
-                           d.rx_zero, d.rx_other, d.ack_length, d.read_echo_prefix);
+                           d.rx_zero, d.rx_other, d.ack_length, d.read_echo_prefix, d.ack_skipped);
             mclog::tagInfo(_tag, "[SERVO_RX_LAST] id={} long_read={} addr={} bytes={} rx_id={} rx_len={} rx_status={} prev_id={} prev_cmd={} prev_addr={}",
                            _config.id, kind, static_cast<unsigned>(d.address), static_cast<unsigned>(d.requested_bytes),
                            static_cast<unsigned>(d.rx_id), static_cast<unsigned>(d.rx_length), static_cast<unsigned>(d.rx_status),

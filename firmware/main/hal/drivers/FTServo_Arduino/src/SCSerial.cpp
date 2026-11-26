@@ -9,6 +9,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 
 static const char *TAG = "FT_SCSerial";
 
@@ -151,4 +152,20 @@ void SCSerial::wFlushSCS()
 
 	const esp_err_t result = uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100));
 	if (result != ESP_OK) ESP_LOGW(TAG, "servo TX completion failed: %s", esp_err_to_name(result));
+}
+
+// Optional write replies: bounded microsecond polling, independent of RTOS tick.
+// Do not impose a full read timeout when a servo does not return an ACK.
+int SCSerial::readOptionalAck(u8* data, int count)
+{
+	if (uart_num >= UART_NUM_MAX || !data || count <= 0) return 0;
+	const int64_t deadline = esp_timer_get_time() + 1000;
+	int size = 0;
+	while (size < count) {
+		const int received = uart_read_bytes(uart_num, data + size, count - size, 0);
+		if (received > 0) size += received;
+		if (size == count || esp_timer_get_time() >= deadline) break;
+		esp_rom_delay_us(20);
+	}
+	return size;
 }

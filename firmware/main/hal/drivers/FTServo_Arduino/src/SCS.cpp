@@ -209,15 +209,28 @@ int SCS::Read(u8 ID, u8 MemAddr, u8 *nData, u8 nLen)
 	writeBuf(ID, MemAddr, &nLen, 1, INST_READ);
 	wFlushSCS();
 	u8Error = 0;
-	if(!checkHead()){
-		u8Error = ERR_NO_REPLY;
-		return 0;
-	}
 	u8 bBuf[4];
 	u8Status = 0;
-	if(readSCS(bBuf, 3)!=3){
-		u8Error = ERR_NO_REPLY;
-		return 0;
+	// Only discard checksum-valid, zero-data status frames during a data read.
+	// Bound the number of skipped replies; keep normal bulk payload reads.
+	for (int skipped = 0;;) {
+		if (!checkHead() || readSCS(bBuf, 3) != 3) {
+			u8Error = ERR_NO_REPLY;
+			return 0;
+		}
+		if (nLen == 0 || bBuf[1] != 2 ||
+		    (bBuf[0] != 1 && bBuf[0] != 2) || skipped >= 2) break;
+		recordReadHeader(ID, MemAddr, nLen, bBuf, previous_id, previous_command, previous_address);
+		if (readSCS(bBuf + 3, 1) != 1) {
+			u8Error = ERR_NO_REPLY;
+			return 0;
+		}
+		if (!validAck(bBuf[0], bBuf)) {
+			u8Error = ERR_CRC_CMP;
+			return 0;
+		}
+		if (ID == 1 || ID == 2) ++read_header_diag[ID - 1][nLen > 2 ? 1 : 0].ack_skipped;
+		++skipped;
 	}
 	if(bBuf[0]!=ID && ID!=0xfe){
 		recordReadHeader(ID, MemAddr, nLen, bBuf, previous_id, previous_command, previous_address);
@@ -333,9 +346,28 @@ int SCS::checkHead()
 	return 1;
 }
 
+bool SCS::validAck(u8 id, const u8* body)
+{
+	return body[0] == id && body[1] == 2 &&
+	       static_cast<u8>(~(body[0] + body[1] + body[2])) == body[3];
+}
+
 int	SCS::Ack(u8 ID)
 {
 	u8Error = 0;
+	if (!Level && (ID == 1 || ID == 2)) {
+		u8 frame[6];
+		auto& d = write_ack_diag[ID - 1];
+		const int received = readOptionalAck(frame, sizeof(frame));
+		if (received == 0) ++d.absent;
+		else if (received == sizeof(frame) && frame[0] == 0xff &&
+		         frame[1] == 0xff && validAck(ID, frame + 2)) {
+			++d.received;
+			u8Status = frame[4];
+		} else ++d.invalid;
+		// Preserve Level=0 write return semantics; missing ACK is not fatal.
+		return 1;
+	}
 	if(ID!=0xfe && Level){
 		if(!checkHead()){
 			u8Error = ERR_NO_REPLY;

@@ -33,6 +33,7 @@ protected:
 	int writeSCS(unsigned char bDat);//输出1字节
 	void rFlushSCS();//
 	void wFlushSCS();//
+	int readOptionalAck(u8* data, int count) override;
 public:
 	unsigned long IOTimeOut;//输入输出超时
 	uart_port_t uart_num;//串口编号
