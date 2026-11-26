@@ -74,11 +74,15 @@ struct OwnedTracking {
     uint32_t last_poll = 0, last_sample = 0;
     int last_angle = 0;
     bool sampled = false;
+    uint32_t stationary_since = 0;
+    int stationary_angle = 0;
+    bool stationary = false;
     void Issue(motion::Servo& servo, int target, uint32_t now) {
         revision = servo.trackWithSpeed(target, kPerceptionRate);
         commanded = true;
         last_poll = now;
         sampled = false;
+        stationary = false;
     }
     bool Superseded(motion::Servo& servo) const {
         return commanded && servo.getCommandRevision() != revision;
@@ -92,7 +96,15 @@ struct OwnedTracking {
         // Use the same feedback interval as the existing torque check.
         if (now - last_poll < 200) return false;
         last_poll = now;
-        if (!servo.tryGetCurrentAngle(angle)) return false;
+        if (!servo.tryGetCurrentAngle(angle)) {
+            stationary = false;
+            return false;
+        }
+        if (!stationary || std::abs(angle - stationary_angle) > 5) {
+            stationary = true;
+            stationary_since = now;
+            stationary_angle = angle;
+        }
         if (sampled && now != last_sample) {
             const float rate = (angle - last_angle) * 100.0f / (now - last_sample);
             ESP_LOGI("STAGE1", "[TRACK_FEEDBACK] axis=%s actual=%d deg_per_sec=%.2f", axis, angle, rate);
@@ -103,6 +115,12 @@ struct OwnedTracking {
         last_sample = now;
         last_angle = angle;
         return true;
+    }
+    // Only valid, settled hardware feedback can finish a segment early.
+    bool Settled(motion::Servo& servo, int angle, int goal, uint32_t now) const {
+        if (servo.isTrackingCommandActive()) return false;
+        if (std::abs(angle - goal) <= 5) return true;
+        return stationary && now - stationary_since >= 750;
     }
 };
 OwnedTracking perception_yaw, perception_pitch;
@@ -1541,10 +1559,10 @@ void Update(StackChan& sc) {
                     ? (direction > 0 ? current >= search_limits.y - margin
                                      : current <= search_limits.x + margin)
                     : std::abs(current - ps.target) <= 5;
-                if (reached || (!search_yaw.isTrackingCommandActive() && std::abs(current - ps.target) <= 5)) {
+                if (reached || ps.Settled(search_yaw, current, ps.target, now)) {
                     if (ps.phase == PersonSearch::Return) {
                         ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: no person");
-                        ps.End(sc, false);
+                        ps.End(sc, true);
                     } else {
                         if (ps.phase == PersonSearch::First) {
                             ps.phase = PersonSearch::Reverse;
@@ -1569,6 +1587,8 @@ void Update(StackChan& sc) {
     // Body found: keep yaw fixed and sweep pitch using the shared smooth rate limiter.
     auto& fps = face_pitch_search;
     auto& search_pitch = search_motion.pitchServo();
+    if (device_state == kDeviceStateIdle || Application::GetInstance().GetDeviceState() == kDeviceStateIdle)
+        face_pitch_requested.store(false);
     if (!face_pitch_requested.load() || face_pitch_epoch.load() != speech_motion_epoch.load()) {
         if (fps.commanded) {
             fps.Pause(sc);
@@ -1587,10 +1607,12 @@ void Update(StackChan& sc) {
         } else {
             int measured = 0;
             const auto limits = search_pitch.getAngleLimit();
-            const int goal = fps.upward ? limits.y : limits.x;
+            const int upper = std::min(static_cast<int>(limits.y), 600); // face search only: 60 degrees
+            const int goal = fps.upward ? upper : limits.x;
             if (fps.commanded && fps.Sample(search_pitch, now, measured, "pitch") &&
-                !search_pitch.isTrackingCommandActive() && std::abs(measured - goal) <= 5) {
-                fps.commanded = false;
+                fps.Settled(search_pitch, measured, goal, now)) {
+                fps.Stop(search_pitch);
+                ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] segment complete actual=%d target=%d", measured, goal);
                 if (fps.upward) {
                     fps.upward = false;
                 } else {
@@ -1599,12 +1621,13 @@ void Update(StackChan& sc) {
                              search_pitch.getCurrentAngle());
                 }
             }
-            if (!fps.commanded && face_pitch_requested.load()) {
+            if (!fps.commanded && face_pitch_requested.load() &&
+                Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
                 int current = 0;
                 const bool measured_ok = search_pitch.tryGetCurrentAngle(current);
-                if (measured_ok && fps.upward && current >= limits.y) fps.upward = false;
-                const int target = fps.upward ? limits.y : limits.x;
-                if (limits.x < limits.y) {
+                if (measured_ok && fps.upward && current >= upper) fps.upward = false;
+                const int target = fps.upward ? upper : limits.x;
+                if (limits.x < upper) {
                     fps.Issue(search_pitch, target, now);
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d rate=%d", current, measured_ok, target, kPerceptionRate);
                 } else {
