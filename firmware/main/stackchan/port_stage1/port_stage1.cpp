@@ -1638,7 +1638,7 @@ void Update(StackChan& sc) {
             // Pitch has a 0.3125-degree hardware position quantum and can
             // settle slightly short of the requested endpoint. Reverse on
             // measured directional arrival, without waiting for the spring.
-            constexpr int kPitchArrivalTolerance = 10; // 1 degree
+            constexpr int kPitchArrivalTolerance = 30; // 3 degrees
             if (fps.commanded && fps.Sample(search_pitch, now, measured, "pitch") &&
                 ((fps.upward ? measured >= goal - kPitchArrivalTolerance
                              : measured <= goal + kPitchArrivalTolerance) ||
