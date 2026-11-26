@@ -33,7 +33,6 @@
 #include <ctime>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <cmath>
 
 extern "C" void stackchan_nvs_commit_observer(void);
@@ -55,15 +54,11 @@ std::atomic<bool> owns_auto{false};
 std::atomic<int> queued_cue{-1};
 std::atomic<bool> manual_sleep_requested{false};
 std::atomic<uint32_t> manual_sleep_requested_at{0};
-struct PerceptionLookRequest {
-    int yaw_delta = 0, pitch_delta = 0;
-    uint32_t requested_at = 0;
-    bool face = false, capture_referenced = false;
-    tracking::PerceptionPose pose;
-};
-std::mutex perception_request_mutex;
-PerceptionLookRequest perception_request;
+std::atomic<int> perception_yaw_delta{0};
+std::atomic<int> perception_pitch_delta{0};
+std::atomic<uint32_t> perception_requested_at{0};
 std::atomic<bool> perception_look_pending{false};
+std::atomic<bool> perception_face_tracking{false};
 std::atomic<bool> speech_tracking_paused{false};
 // Worker publishes requests/results; only the existing Stage1 update owns servos.
 std::atomic<uint32_t> search_start_epoch{0};
@@ -93,8 +88,6 @@ static int search_endpoint_command(int target, int direction, int allowance, int
 }
 struct OwnedTracking {
     bool commanded = false;
-    bool centered = false;
-    int issued_target = 0;
     uint32_t revision = 0;
     uint32_t last_poll = 0, last_sample = 0;
     int last_angle = 0;
@@ -103,11 +96,9 @@ struct OwnedTracking {
     int stationary_angle = 0;
     bool stationary = false;
     void Issue(motion::Servo& servo, int target, uint32_t now, int rate = kPerceptionRate,
-               const int* measured_start = nullptr, const std::atomic<bool>* active_flag = nullptr) {
-        revision = servo.trackWithSpeed(target, rate, measured_start, active_flag);
+               const int* measured_start = nullptr) {
+        revision = servo.trackWithSpeed(target, rate, measured_start);
         commanded = true;
-        centered = false;
-        issued_target = target;
         last_poll = now;
         sampled = false;
         stationary = false;
@@ -118,7 +109,6 @@ struct OwnedTracking {
     void Stop(motion::Servo& servo, const int* measured_stop = nullptr) {
         if (commanded) servo.stopTrackingIfOwned(revision, measured_stop);
         commanded = false;
-        centered = false;
         sampled = false;
     }
     bool Sample(motion::Servo& servo, uint32_t now, int& angle, const char* axis) {
@@ -182,7 +172,6 @@ struct PersonSearch : OwnedTracking {
 };
 PersonSearch person_search;
 std::atomic<bool> face_pitch_requested{false};
-std::atomic<bool> face_pitch_stop_pending{false};
 std::atomic<uint32_t> face_pitch_epoch{0};
 struct FacePitchSearch : OwnedTracking {
     bool upward = true;
@@ -1202,8 +1191,6 @@ void Start() {
     perception_yaw = OwnedTracking{};
     perception_pitch = OwnedTracking{};
     face_pitch_requested.store(false);
-    face_pitch_stop_pending.store(false);
-    perception_look_pending.store(false);
     search_start.store(0); search_cancel.store(false); search_active.store(false);
     wake_pitch_pending.store(false);
     const Config config = LoadConfig();
@@ -1262,8 +1249,6 @@ void Stop() {
     perception_yaw = OwnedTracking{};
     perception_pitch = OwnedTracking{};
     face_pitch_requested.store(false);
-    face_pitch_stop_pending.store(false);
-    perception_look_pending.store(false);
     search_start.store(0); search_cancel.store(false); search_active.store(false);
     wake_pitch_pending.store(false);
     queued_cue.store(-1);
@@ -1446,11 +1431,6 @@ void StartFacePitchSearch() {
     face_pitch_requested.store(true);
 }
 void StopFacePitchSearch() { face_pitch_requested.store(false); }
-void StopFacePitchSearchOnDetection() {
-    face_pitch_stop_pending.store(true, std::memory_order_release);
-    StopFacePitchSearch(); // The servo worker observes this directly.
-}
-bool IsFacePitchSearchStopping() { return enabled.load() && face_pitch_stop_pending.load(); }
 bool IsFacePitchSearchRequested() { return face_pitch_requested.load(); }
 void StopPersonSearch() {
     StopFacePitchSearch();
@@ -1465,40 +1445,17 @@ bool IsPersonSearchActive() { return search_active.load(); }
 bool IsPersonSearchStopping() { return search_cancel.load(); }
 
 
-uint32_t PerceptionMotionEpoch() { return speech_motion_epoch.load(); }
-
-tracking::PerceptionPose ReadPerceptionPose(uint32_t captured_at, uint32_t epoch)
+bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking)
 {
-    tracking::PerceptionPose pose{};
-    pose.captured_at = captured_at;
-    pose.epoch = epoch;
-    if (!enabled.load() || speech_tracking_paused.load() || epoch != speech_motion_epoch.load() ||
-        search_active.load() || search_cancel.load() || face_pitch_requested.load() ||
-        face_pitch_stop_pending.load()) return pose;
-    // Physical reads use the existing serialized servo executor, without
-    // accessing avatar/LVGL state from the perception worker.
-    auto& neck = GetStackChan().motion();
-    const auto sample = [&](motion::Servo& servo, tracking::AxisPose& axis) {
-        if (GetHAL().millis() - captured_at > tracking::kCapturePoseSkewMs) return;
-        axis.valid = servo.tryGetMeasuredAngle(axis.angle, axis.sampled_at) &&
-                     tracking::WithinSkew(axis.sampled_at, captured_at, tracking::kCapturePoseSkewMs);
-    };
-    sample(neck.yawServo(), pose.yaw);
-    sample(neck.pitchServo(), pose.pitch);
-    if (epoch != speech_motion_epoch.load()) pose.yaw.valid = pose.pitch.valid = false;
-    return pose;
-}
-
-bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking,
-                           const tracking::PerceptionPose* pose)
-{
-    std::lock_guard<std::mutex> lock(perception_request_mutex);
+    constexpr int kMaxYawDelta   = 900;
+    constexpr int kMaxPitchDelta = 450;
+    yaw_delta                    = std::clamp(yaw_delta, -kMaxYawDelta, kMaxYawDelta);
+    pitch_delta                  = std::clamp(pitch_delta, -kMaxPitchDelta, kMaxPitchDelta);
+    perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
+    perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
+    perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
     if (speech_tracking_paused.load() || search_active.load() || search_cancel.load()) return false;
-    if (pose && (pose->epoch != speech_motion_epoch.load() ||
-                 GetHAL().millis() - pose->captured_at > tracking::kFaceFrameMaxAgeMs)) return false;
-    perception_request = {std::clamp(yaw_delta, -900, 900), std::clamp(pitch_delta, -450, 450),
-                          GetHAL().millis(), face_tracking, face_tracking && pose != nullptr,
-                          pose ? *pose : tracking::PerceptionPose{}};
+    perception_face_tracking.store(face_tracking, std::memory_order_relaxed);
     perception_look_pending.store(true, std::memory_order_release);
     return true;
 }
@@ -1726,14 +1683,13 @@ void Update(StackChan& sc) {
     auto& search_pitch = search_motion.pitchServo();
     if (device_state == kDeviceStateIdle || Application::GetInstance().GetDeviceState() == kDeviceStateIdle)
         face_pitch_requested.store(false);
-    if (!face_pitch_requested.load() || face_pitch_stop_pending.load() || face_pitch_epoch.load() != speech_motion_epoch.load()) {
+    if (!face_pitch_requested.load() || face_pitch_epoch.load() != speech_motion_epoch.load()) {
         if (fps.commanded) {
             fps.Pause(sc);
-            ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] stop ownership_released=1");
+            ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] stop pitch=%d", search_pitch.getCurrentAngle());
         }
         fps = FacePitchSearch{};
         if (face_pitch_epoch.load() != speech_motion_epoch.load()) face_pitch_requested.store(false);
-        if (face_pitch_stop_pending.exchange(false)) face_pitch_requested.store(false);
     } else if (search_blocked || ps.running || search_cancel.load()) {
         fps.Pause(sc);
     } else {
@@ -1779,7 +1735,7 @@ void Update(StackChan& sc) {
                     // At both existing search bounds there is no safe outward
                     // allowance. Start from measured feedback and use the bound
                     // itself rather than moving outside the permitted range.
-                    fps.Issue(search_pitch, target, now, kFacePitchSearchRate, &current, &face_pitch_requested);
+                    fps.Issue(search_pitch, target, now, kFacePitchSearchRate, &current);
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d tolerance=%d rate=%d", current, measured_ok, target, kPitchArrivalTolerance, kFacePitchSearchRate);
                 } else if (lower >= upper) {
                     face_pitch_requested.store(false);
@@ -1793,77 +1749,41 @@ void Update(StackChan& sc) {
         perception_pitch.Stop(search_pitch);
     }
     if (perception_look_pending.load(std::memory_order_acquire)) {
-        const bool motion_available = !search_blocked && !ps.running && !search_cancel.load() &&
-                                      !face_pitch_requested.load() && !face_pitch_stop_pending.load();
-        PerceptionLookRequest request{};
-        bool consume = false;
-        bool expired_request = false;
-        {
-            // Copy one complete image result; never hold this lock across servo I/O.
-            std::lock_guard<std::mutex> lock(perception_request_mutex);
-            const uint32_t tick = GetHAL().millis();
-            const bool expired = perception_request.capture_referenced
-                ? tick - perception_request.pose.captured_at > tracking::kFaceFrameMaxAgeMs ||
-                  perception_request.pose.epoch != speech_motion_epoch.load()
-                : tick - perception_request.requested_at > 3000;
-            if (perception_look_pending.load() && (expired || motion_available)) {
-                perception_look_pending.store(false, std::memory_order_release);
-                if (!expired) {
-                    request = perception_request;
-                    consume = true;
-                } else expired_request = true;
-            }
-        }
-        if (expired_request) ESP_LOGW(LOG_TAG, "perception look expired while motion was busy");
-        if (consume) {
-            auto& neck = sc.motion();
-            auto& yaw = neck.yawServo();
-            auto& pitch = neck.pitchServo();
-            const auto correct = [&](motion::Servo& servo, OwnedTracking& owned, int delta,
-                                     const tracking::AxisPose& capture, const char* axis) {
-                const bool capture_referenced = request.capture_referenced;
-                const bool owned_now = owned.commanded && !owned.Superseded(servo);
-                if (!capture_referenced && delta == 0) {
-                    owned.Stop(servo); // Preserve the existing body / loss behavior.
+        const bool expired = static_cast<uint32_t>(now - perception_requested_at.load()) > 3000;
+        // Wake-triggered tracking is allowed to replace the wake animation's
+        // neck target; sleep and explicit skits retain priority.
+        const bool motion_available = !search_blocked && !ps.running && !search_cancel.load() && !face_pitch_requested.load();
+        if (expired) {
+            perception_look_pending.store(false, std::memory_order_release);
+            ESP_LOGW(LOG_TAG, "perception look expired while motion was busy");
+        } else if (motion_available && perception_look_pending.exchange(false)) {
+            auto& motion           = sc.motion();
+            auto& yaw              = motion.yawServo();
+            auto& pitch            = motion.pitchServo();
+            const int yaw_delta = perception_yaw_delta.load();
+            const int pitch_delta = perception_pitch_delta.load();
+            const bool face = perception_face_tracking.load(std::memory_order_relaxed);
+            const auto correct = [&](motion::Servo& servo, OwnedTracking& owned, int delta, const char* axis) {
+                if (delta == 0) {
+                    owned.Stop(servo);
                     return;
                 }
-                if (capture_referenced && !capture.valid) {
-                    ESP_LOGW(LOG_TAG, "[TRACK_CORRECTION] axis=%s skipped: no timely capture position", axis);
-                    return;
-                }
-                if (capture_referenced && delta == 0 && (!owned_now || owned.centered)) return;
-                int actual = capture.angle;
-                // A continuing rate-limited profile retains its internal
-                // position/velocity; no second UART read is needed for that frame.
-                if ((!capture_referenced || !servo.isTrackingCommandActive()) &&
-                    !servo.tryGetCurrentAngle(actual)) {
+                int actual = 0;
+                if (!servo.tryGetCurrentAngle(actual)) {
                     ESP_LOGW(LOG_TAG, "[TRACK_CORRECTION] axis=%s skipped: no measured position", axis);
                     return;
                 }
-                if (capture_referenced && (request.pose.epoch != speech_motion_epoch.load() ||
-                    GetHAL().millis() - request.pose.captured_at > tracking::kFaceFrameMaxAgeMs)) return;
-                if (speech_tracking_paused.load() || search_active.load() || search_cancel.load() ||
-                    Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking) return;
                 const auto limits = servo.getAngleLimit();
-                const int target = tracking::CaptureTarget(capture_referenced ? capture.angle : actual,
-                                                          delta, limits.x, limits.y);
-                if (capture_referenced && owned_now && owned.issued_target == target) {
-                    owned.centered = delta == 0;
-                    return;
-                }
+                const int target = std::clamp(actual + delta, limits.x, limits.y);
                 if (&servo == &yaw && target != actual)
                     last_yaw_direction.store(target < actual ? -1 : 1);
-                const int rate = request.face ? kFaceTrackingRate : kPerceptionRate;
+                const int rate = face ? kFaceTrackingRate : kPerceptionRate;
                 owned.Issue(servo, target, now, rate, &actual);
-                owned.centered = capture_referenced && delta == 0;
-                // Do not label the older capture sample as a new physical read.
-                ESP_LOGI(LOG_TAG, "[TRACK_CORRECTION] kind=%s axis=%s %s=%d target=%d rate=%d",
-                         request.face ? "face" : "body", axis,
-                         capture_referenced ? "capture" : "actual",
-                         capture_referenced ? capture.angle : actual, target, rate);
+                ESP_LOGI(LOG_TAG, "[TRACK_CORRECTION] kind=%s axis=%s actual=%d target=%d rate=%d",
+                         face ? "face" : "body", axis, actual, target, rate);
             };
-            correct(yaw, perception_yaw, request.yaw_delta, request.pose.yaw, "yaw");
-            correct(pitch, perception_pitch, request.pitch_delta, request.pose.pitch, "pitch");
+            correct(yaw, perception_yaw, yaw_delta, "yaw");
+            correct(pitch, perception_pitch, pitch_delta, "pitch");
         }
     }
     if (speech_effects.active) {

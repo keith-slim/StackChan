@@ -45,10 +45,6 @@ void Servo::update()
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
-    if (_tracking_active_flag && !_tracking_active_flag->load(std::memory_order_acquire)) {
-        servicePriorityStop();
-        return;
-    }
     // Keep update in at most 50Hz
     if (GetHAL().millis() - _last_tick < 20) {
         return;
@@ -171,11 +167,11 @@ void Servo::moveWithSpeed(int angle, int speed)
     moveWithSpringParams(angle, spring_options.stiffness, spring_options.damping);
 }
 
-uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start, const std::atomic<bool>* active_flag)
+uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
 {
     if (executor::external()) {
         uint32_t result{};
-        executor::invoke([&] { result = trackWithSpeed(angle, speed, measured_start, active_flag); });
+        executor::invoke([&] { result = trackWithSpeed(angle, speed, measured_start); });
         return result;
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
@@ -196,7 +192,6 @@ uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start, 
     if (!_torque_commanded_enabled) setTorqueEnabled(true);
     if (!continuing) _tracking_tick = GetHAL().millis();
     _profile = Profile::Tracking;
-    _tracking_active_flag = active_flag;
     if (replacing_sweep) set_angle_impl(static_cast<int>(std::lround(position)));
     return getCommandRevision();
 }
@@ -231,11 +226,6 @@ bool Servo::startHardwareSweep(int angle, int rate, uint32_t& revision, bool ret
 void Servo::servicePriorityStop()
 {
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
-    if (_tracking_active_flag && !_tracking_active_flag->load(std::memory_order_acquire)) {
-        _tracking_active_flag = nullptr;
-        stopTrackingIfOwned(getCommandRevision());
-        return;
-    }
     if (_profile != Profile::HardwareSweep) return;
     if (sweep_cancelled() && !_hardware_stop_requested.load()) requestHardwareStop("detection_or_end");
     if (!_hardware_stop_requested.load() || _hardware_stop_revision.load() != getCommandRevision()) return;
@@ -325,7 +315,6 @@ void Servo::cancelTimedMove()
 void Servo::cancel_profile(bool preserve_spring)
 {
     _command_revision.fetch_add(1, std::memory_order_relaxed);
-    _tracking_active_flag = nullptr;
     _hardware_stop_requested.store(false, std::memory_order_release);
     _timed_move.Cancel();
     if (preserve_spring && _profile == Profile::Spring) return;

@@ -6,7 +6,6 @@
 
 class StackChanCamera;
 class StackChanAvatarDisplay;
-namespace stackchan::stage1::tracking { struct PerceptionPose; }
 
 // Keeps the real-time audio path limited to a bounded PSRAM copy. Xavier I/O,
 // JPEG encoding and servo requests run in the PSRAM-backed conversation worker.
@@ -27,9 +26,7 @@ private:
     static void WorkerEntry(void* context);
     void RunWorker(uint64_t snapshot_end);
     bool PostAudio(const int16_t* pcm, size_t frames, float& angle_deg, float& confidence);
-    bool PostVision(float& center_x, float& center_y, float& score, float& body_target_x, float& body_target_y,
-                    float& body_score, bool& valid_frame, bool capture_pose,
-                    stackchan::stage1::tracking::PerceptionPose& pose);
+    bool PostVision(float& center_x, float& center_y, float& score, float& body_target_x, float& body_target_y, float& body_score, bool& valid_frame);
 
     StackChanCamera* camera_ = nullptr;
     StackChanAvatarDisplay* display_ = nullptr;

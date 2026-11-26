@@ -57,8 +57,7 @@ public:
      */
     void moveWithSpeed(int angle, int speed);
     // Rate-limited spring; speed is in tenths of a degree per second.
-    uint32_t trackWithSpeed(int angle, int speed, const int* measured_start = nullptr,
-                            const std::atomic<bool>* active_flag = nullptr);
+    uint32_t trackWithSpeed(int angle, int speed, const int* measured_start = nullptr);
     bool isTrackingCommandActive() const;
     bool startHardwareSweep(int angle, int rate, uint32_t& revision, bool retarget = false);
     void requestHardwareStop(const char* reason);
@@ -67,8 +66,6 @@ public:
     bool stopHardwareSweep(uint32_t revision);
     // Hardware feedback must be distinguished from the interpolated fallback.
     virtual bool tryGetCurrentAngle(int& angle) { angle = getCurrentAngle(); return true; }
-    // Only hardware feedback may be used to timestamp an image-space correction.
-    virtual bool tryGetMeasuredAngle(int& angle, uint32_t& sampled_at) { return false; }
     void stopTrackingIfOwned(uint32_t revision, const int* measured_stop = nullptr);
 
     // One physical position sync at entry, then direct timed setpoints.
@@ -218,8 +215,6 @@ protected:
     std::atomic<bool> _hardware_stop_requested{false};
     std::atomic<uint32_t> _hardware_stop_revision{0};
     std::atomic<const char*> _hardware_stop_reason{"unspecified"};
-    // Optional owner flag: checked by the existing worker before a new setpoint.
-    const std::atomic<bool>* _tracking_active_flag = nullptr;
     float _tracking_position = 0.0f;
     float _tracking_velocity = 0.0f;
     int _tracking_rate = 0;

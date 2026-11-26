@@ -1,7 +1,6 @@
 #include "stackchan_camera.h"
 #include "assets/assets.h"
 #include "hal_bridge.h"
-#include <hal/hal.h>
 
 bool StackChanCamera::Capture()
 {
@@ -18,7 +17,7 @@ bool StackChanCamera::StreamCaptures()
     return CaptureFrame(false, 0);
 }
 
-bool StackChanCamera::CaptureJpeg(uint8_t** jpeg, size_t* jpeg_size, uint8_t quality, uint32_t* captured_at)
+bool StackChanCamera::CaptureJpeg(uint8_t** jpeg, size_t* jpeg_size, uint8_t quality)
 {
     if (!jpeg || !jpeg_size) return false;
     *jpeg      = nullptr;
@@ -27,7 +26,5 @@ bool StackChanCamera::CaptureJpeg(uint8_t** jpeg, size_t* jpeg_size, uint8_t qua
     if (storage_mutex_) exclusive = std::unique_lock<std::mutex>(*storage_mutex_);
     std::lock_guard<std::recursive_mutex> frame_lock(capture_mutex_);
     if (!CaptureFrame(false, 1)) return false;
-    // Timestamp the completed frame before JPEG encoding or network I/O.
-    if (captured_at) *captured_at = GetHAL().millis();
     return image_to_jpeg(frame_.data, frame_.len, frame_.width, frame_.height, frame_.format, quality, jpeg, jpeg_size);
 }

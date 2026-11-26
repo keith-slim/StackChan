@@ -190,7 +190,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     bool face_sweep_attempted          = false;
     float filtered_center_x           = 0.5f;
     float filtered_center_y           = 0.5f;
-    stackchan::stage1::tracking::PerceptionPose previous_face_pose{};
     ESP_LOGI(kTag, "Realtime face tracking started");
     while (!stop_requested_.load(std::memory_order_acquire) &&
            (esp_timer_get_time() - tracking_started_us) / 1000 < kTrackingMaxMs) {
@@ -215,10 +214,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             continue;
         }
 
-        if (stackchan::stage1::IsPersonSearchStopping() || stackchan::stage1::IsFacePitchSearchStopping()) {
-            vTaskDelay(pdMS_TO_TICKS(10) ? pdMS_TO_TICKS(10) : 1);
-            continue;
-        }
         float center_x = 0.5f;
         float center_y = 0.5f;
         float score    = 0.0f;
@@ -226,15 +221,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         float body_target_y = 0.5f;
         float body_score    = 0.0f;
         const bool was_searching = stackchan::stage1::IsPersonSearchActive();
-        const bool was_pitch_searching = stackchan::stage1::IsFacePitchSearchRequested();
-        // In established body-only tracking avoid adding a second position read.
-        // The first reacquired face initializes the filter; its next frame has a pose.
-        const bool capture_pose = !was_searching && !was_pitch_searching &&
-                                  (face_filter_initialized || face_missing_frames < 4);
-        stackchan::stage1::tracking::PerceptionPose frame_pose{};
         bool valid_frame = false;
-        const bool face_detected = PostVision(center_x, center_y, score, body_target_x, body_target_y, body_score,
-                                               valid_frame, capture_pose, frame_pose);
+        const bool face_detected = PostVision(center_x, center_y, score, body_target_x, body_target_y, body_score, valid_frame);
         // A request already in flight may complete after speech starts.
         if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking ||
             stackchan::stage1::IsSpeechTrackingPaused()) continue;
@@ -266,22 +254,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         }
         if (face_detected && score >= kMinimumFaceScore) {
             if (stackchan::stage1::IsFacePitchSearchRequested()) {
-                stackchan::stage1::StopFacePitchSearchOnDetection();
-                ESP_LOGI(kTag, "[FACE_PITCH_SEARCH] face found score=%.3f; priority stop", score);
-                face_filter_initialized = false;
-                face_center_locked = false;
-                centered_frames = 0;
-                face_missing_frames = 0;
-                // Do not apply the moving search frame to a stopped neck.
-                // Acquire a fresh frame as soon as the stop is acknowledged.
-                continue;
-            }
-            if (was_pitch_searching) {
-                face_filter_initialized = false;
-                face_center_locked = false;
-                centered_frames = 0;
-                face_missing_frames = 0;
-                continue;
+                stackchan::stage1::StopFacePitchSearch();
+                ESP_LOGI(kTag, "[FACE_PITCH_SEARCH] face found score=%.3f", score);
             }
             person_missing_logged = false;
             person_acquired = true;
@@ -289,45 +263,41 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             face_missing_frames   = 0;
             if (!wake_face_smile_shown && display_ && !stop_requested_.load(std::memory_order_acquire))
                 wake_face_smile_shown = display_->ShowWakeFaceSmile();
-            using namespace stackchan::stage1::tracking;
-            const bool continuous = face_filter_initialized &&
-                frame_pose.captured_at - previous_face_pose.captured_at <= kFaceFrameMaxAgeMs &&
-                frame_pose.epoch == previous_face_pose.epoch;
-            const auto filter = [&](float previous, float detected, const AxisPose& current,
-                                    const AxisPose& before, float signed_gain) {
-                if (!continuous || !current.valid || !before.valid) return detected;
-                return FilterCoordinate(previous, detected, current.angle - before.angle, signed_gain);
-            };
-            filtered_center_x = filter(filtered_center_x, center_x, frame_pose.yaw, previous_face_pose.yaw, kYawGain);
-            filtered_center_y = filter(filtered_center_y, center_y, frame_pose.pitch, previous_face_pose.pitch, -kPitchGain);
-            previous_face_pose = frame_pose;
-            face_filter_initialized = true;
+            // 距離や検出枠の揺れをそのままサーボへ渡さず、中心座標を平滑化する。
+            constexpr float kFilterAlpha = 0.35f;
+            if (!face_filter_initialized) {
+                filtered_center_x      = center_x;
+                filtered_center_y      = center_y;
+                face_filter_initialized = true;
+            } else {
+                filtered_center_x += (center_x - filtered_center_x) * kFilterAlpha;
+                filtered_center_y += (center_y - filtered_center_y) * kFilterAlpha;
+            }
             const float error_x = filtered_center_x - 0.5f;
             const float error_y = 0.5f - filtered_center_y;
-            const float raw_error_x = center_x - 0.5f;
-            const float raw_error_y = 0.5f - center_y;
-            // A stale filtered coordinate must not lock the face or conceal
-            // a real movement out of the lock region.
+            // 3フレーム中央なら固定し、大きく外れるまで追従を再開しない。
             if (face_center_locked) {
-                if (std::abs(error_x) > 0.075f || std::abs(error_y) > 0.10f ||
-                    std::abs(raw_error_x) > 0.075f || std::abs(raw_error_y) > 0.10f) {
+                if (std::abs(error_x) > 0.075f || std::abs(error_y) > 0.10f) {
                     face_center_locked = false;
-                    centered_frames = 0;
+                    centered_frames    = 0;
                 }
-            } else if (frame_pose.yaw.valid && frame_pose.pitch.valid &&
-                       std::abs(error_x) < 0.035f && std::abs(error_y) < 0.05f &&
-                       std::abs(raw_error_x) < 0.035f && std::abs(raw_error_y) < 0.05f) {
+            } else if (std::abs(error_x) < 0.035f && std::abs(error_y) < 0.05f) {
                 if (++centered_frames >= 3) face_center_locked = true;
             } else {
                 centered_frames = 0;
             }
-            const int yaw_delta = FaceDelta(center_x, filtered_center_x, kYawGain, kYawDeadband, 160, face_center_locked);
-            const int pitch_delta = FaceDelta(center_y, filtered_center_y, -kPitchGain, kPitchDeadband, 110, face_center_locked);
-            ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d) capture=(%d,%d) valid=(%d,%d)",
+            // CoreS3実機のyaw負方向が画像の左、pitch正方向が画像の上を向く。
+            // 顔中心を画面中央の約8px以内へ収める。
+            const int yaw_delta = face_center_locked || std::abs(error_x) < 0.025f
+                                      ? 0
+                                      : static_cast<int>(std::clamp(error_x * 500.0f, -160.0f, 160.0f));
+            const int pitch_delta = face_center_locked || std::abs(error_y) < 0.035f
+                                        ? 0
+                                        : static_cast<int>(std::clamp(error_y * 360.0f, -110.0f, 110.0f));
+            ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d)",
                      center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
-                     yaw_delta, pitch_delta, frame_pose.yaw.angle, frame_pose.pitch.angle,
-                     frame_pose.yaw.valid, frame_pose.pitch.valid);
-            stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true, &frame_pose);
+                     yaw_delta, pitch_delta);
+            stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true);
         } else if (stackchan::stage1::IsFacePitchSearchRequested()) {
             // Keep acquiring faces while pitch sweeps; don't replace the sweep
             // with a zero/deadband body correction or a transient missing frame.
@@ -343,9 +313,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 centered_frames         = 0;
             }
             if (face_missing_frames >= 4) {
-                face_filter_initialized = false;
-                face_center_locked = false;
-                centered_frames = 0;
                 const float error_x = body_target_x - 0.5f;
                 const float error_y = 0.5f - body_target_y;
                 const int yaw_delta = std::abs(error_x) < 0.05f ? 0
@@ -403,20 +370,12 @@ bool StackChanPerception::PostAudio(const int16_t* pcm, size_t frames, float& an
 }
 
 bool StackChanPerception::PostVision(float& center_x, float& center_y, float& score, float& body_target_x, float& body_target_y,
-                                     float& body_score, bool& valid_frame, bool capture_pose,
-                                     stackchan::stage1::tracking::PerceptionPose& pose)
+                                     float& body_score, bool& valid_frame)
 {
     valid_frame = false;
     uint8_t* jpeg    = nullptr;
     size_t jpeg_size = 0;
-    const uint32_t epoch = stackchan::stage1::PerceptionMotionEpoch();
-    uint32_t captured_at = 0;
-    if (!camera_->CaptureJpeg(&jpeg, &jpeg_size, 55, &captured_at) || !jpeg || jpeg_size == 0) return false;
-    pose.captured_at = captured_at;
-    pose.epoch = epoch;
-    // Sample near capture, not after server inference. Existing cached feedback
-    // is reused by the driver; late or failed samples are explicitly invalid.
-    if (capture_pose) pose = stackchan::stage1::ReadPerceptionPose(captured_at, epoch);
+    if (!camera_->CaptureJpeg(&jpeg, &jpeg_size, 55) || !jpeg || jpeg_size == 0) return false;
     std::string response;
     const bool posted =
         Post(Endpoint("/v1/vision/detect"), "image/jpeg", jpeg, jpeg_size, kVisionTimeoutMs, {}, response);
