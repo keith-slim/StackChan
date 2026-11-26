@@ -67,7 +67,7 @@ std::atomic<bool> search_cancel{false};
 std::atomic<bool> search_active{false};
 std::atomic<bool> wake_pitch_pending{false};
 // The same owned command and feedback path is used by yaw and pitch search.
-constexpr int kPerceptionRate = 100; // tenths of a degree per second
+constexpr int kPerceptionRate = 150; // tenths of a degree per second
 struct OwnedTracking {
     bool commanded = false;
     uint32_t revision = 0;
