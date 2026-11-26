@@ -60,6 +60,9 @@ u16 SCS::SCS2Host(u8 DataL, u8 DataH)
 
 void SCS::writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun)
 {
+	last_tx_id = ID;
+	last_tx_command = Fun;
+	last_tx_address = MemAddr;
 	u8 msgLen = 2;
 	u8 bBuf[6];
 	u8 CheckSum = 0;
@@ -169,8 +172,39 @@ int SCS::writeWord(u8 ID, u8 MemAddr, u16 wDat)
 
 //读指令
 //舵机ID，MemAddr内存表地址，返回数据nData，数据长度nLen
+void SCS::recordReadHeader(u8 id, u8 address, u8 count, const u8* header,
+                           u8 previous_id, u8 previous_command, u8 previous_address)
+{
+	if (id != 1 && id != 2) return;
+	auto& d = read_header_diag[id - 1][count > 2 ? 1 : 0];
+	if (header[0] != id) {
+		++d.wrong_id;
+		if (header[0] == 0xff) ++d.rx_ff;
+		else if (header[0] == 1 || header[0] == 2) ++d.rx_other_servo;
+		else if (header[0] == 0) ++d.rx_zero;
+		else ++d.rx_other;
+	} else {
+		++d.wrong_length;
+	}
+	// These are header patterns only, not validated packets.
+	if (header[1] == 2) ++d.ack_length;
+	if (header[0] == id && header[1] == 4 && header[2] == INST_READ)
+		++d.read_echo_prefix;
+	d.address = address;
+	d.requested_bytes = count;
+	d.rx_id = header[0];
+	d.rx_length = header[1];
+	d.rx_status = header[2];
+	d.previous_id = previous_id;
+	d.previous_command = previous_command;
+	d.previous_address = previous_address;
+}
+
 int SCS::Read(u8 ID, u8 MemAddr, u8 *nData, u8 nLen)
 {
+	const u8 previous_id = last_tx_id;
+	const u8 previous_command = last_tx_command;
+	const u8 previous_address = last_tx_address;
 	rFlushSCS();
 	writeBuf(ID, MemAddr, &nLen, 1, INST_READ);
 	wFlushSCS();
@@ -186,10 +220,12 @@ int SCS::Read(u8 ID, u8 MemAddr, u8 *nData, u8 nLen)
 		return 0;
 	}
 	if(bBuf[0]!=ID && ID!=0xfe){
+		recordReadHeader(ID, MemAddr, nLen, bBuf, previous_id, previous_command, previous_address);
 		u8Error = ERR_SLAVE_ID;
 		return 0;
 	}
 	if(bBuf[1]!=(nLen+2)){
+		recordReadHeader(ID, MemAddr, nLen, bBuf, previous_id, previous_command, previous_address);
 		u8Error = ERR_BUFF_LEN;
 		return 0;
 	}

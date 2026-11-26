@@ -9,6 +9,7 @@
 #define _SCS_H
 
 #include "INST.h"
+#include <stdint.h>
 
 class SCS{
 public:
@@ -35,6 +36,20 @@ public:
 	int Recal(u8 ID);//重置舵机中位
 	u8 getState() { return u8Status; }
 	u8 getLastError() { return u8Error; }
+	// Access under the existing shared servo bus lock. No heap allocation.
+	struct ReadHeaderDiagnostic {
+		uint32_t wrong_id = 0, wrong_length = 0;
+		uint32_t rx_ff = 0, rx_other_servo = 0, rx_zero = 0, rx_other = 0;
+		uint32_t ack_length = 0, read_echo_prefix = 0;
+		uint8_t address = 0, requested_bytes = 0;
+		uint8_t rx_id = 0, rx_length = 0, rx_status = 0;
+		uint8_t previous_id = 0, previous_command = 0, previous_address = 0;
+	};
+	// Separate ordinary reads from long feedback reads for each servo.
+	const ReadHeaderDiagnostic& getReadHeaderDiagnostic(u8 id, bool long_read) const {
+		return read_header_diag[id == 2 ? 1 : 0][long_read ? 1 : 0];
+	}
+
 public:
 	u8 Level;//舵机返回等级
 	u8 End;//处理器大小端结构
@@ -60,5 +75,11 @@ protected:
 	u16	SCS2Host(u8 DataL, u8 DataH);//2个8位数组合为1个16位数
 	int	Ack(u8 ID);//返回应答
 	int checkHead();//帧头检测
+private:
+	ReadHeaderDiagnostic read_header_diag[2][2]{};
+	u8 last_tx_id = 0, last_tx_command = 0, last_tx_address = 0;
+	void recordReadHeader(u8 id, u8 address, u8 count, const u8* header,
+	                      u8 previous_id, u8 previous_command, u8 previous_address);
+
 };
 #endif
