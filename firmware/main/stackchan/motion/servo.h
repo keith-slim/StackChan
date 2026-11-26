@@ -57,7 +57,10 @@ public:
      */
     void moveWithSpeed(int angle, int speed);
     // Rate-limited spring; speed is in tenths of a degree per second.
-    void trackWithSpeed(int angle, int speed);
+    uint32_t trackWithSpeed(int angle, int speed);
+    bool isTrackingCommandActive() const;
+    // Hardware feedback must be distinguished from the interpolated fallback.
+    virtual bool tryGetCurrentAngle(int& angle) { angle = getCurrentAngle(); return true; }
     void stopTrackingIfOwned(uint32_t revision);
 
     // One physical position sync at entry, then direct timed setpoints.
@@ -179,6 +182,7 @@ protected:
      * @param angle
      */
     virtual void set_angle_impl(int angle) = 0;
+    virtual void set_tracking_angle_impl(int angle, int rate) { set_angle_impl(angle); }
     virtual bool is_moving_impl()
     {
         return false;
@@ -202,6 +206,7 @@ protected:
     int _tracking_rate = 0;
     float _tracking_stiffness = 0.0f;
     float _tracking_damping = 0.0f;
+    uint32_t _tracking_tick = 0;
     bool _auto_torque_release_enabled = true;
     bool _auto_angle_sync_enabled     = true;
     // Track commands instead of polling the servo while idle with torque off.

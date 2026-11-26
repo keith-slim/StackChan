@@ -10,6 +10,7 @@
 #include <mooncake_log.h>
 #include <settings.h>
 #include <mutex>
+#include <cstdlib>
 
 using namespace smooth_ui_toolkit;
 using namespace stackchan::motion;
@@ -76,6 +77,16 @@ public:
 
     void set_angle_impl(int angle) override
     {
+        writeAngle(angle, 0);
+    }
+
+    void set_tracking_angle_impl(int angle, int rate) override
+    {
+        writeAngle(angle, rate);
+    }
+
+    void writeAngle(int angle, int rate)
+    {
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
         int mapped_angle = _zero_pos + angle * 16 / 5 / 10;  // 一步对应 0.3125度, 0.3125 = 5/16
@@ -88,10 +99,29 @@ public:
         }
 
         check_mode(Mode::Position);
-        _scs_bus.WritePos(_config.id, mapped_angle, 20, 0);
+        // Only the tracking path suppresses duplicate raw positions. The
+        // regular animation keeps its original 20 ms position command.
+        if (rate > 0 && _last_tracking_raw == mapped_angle) return;
+        uint16_t duration = 20;
+        if (rate > 0 && _last_tracking_raw >= 0) {
+            // SCS0009 position quantum is 0.3125 degrees. Time is ms.
+            // Rounded up so the requested segment does not exceed the rate.
+            const int delta = std::abs(mapped_angle - _last_tracking_raw);
+            const int ms = (delta * 3125 + rate - 1) / rate;
+            duration = static_cast<uint16_t>(uitk::clamp(ms, 20, 65535));
+        }
+        _scs_bus.WritePos(_config.id, mapped_angle, duration, 0);
+        _last_tracking_raw = rate > 0 ? mapped_angle : -1;
     }
 
     int getCurrentAngle() override
+    {
+        int angle = 0;
+        if (tryGetCurrentAngle(angle)) return angle;
+        return uitk::clamp(Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
+    }
+
+    bool tryGetCurrentAngle(int& angle) override
     {
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
         std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
@@ -103,13 +133,13 @@ public:
                            "id: {} ignore invalid current pos after retry: {}, error: {} ({}), fallback angle: {}",
                            _config.id, current_pos, communication_error_name(communication_error),
                            static_cast<unsigned>(communication_error), fallback_angle);
-            return fallback_angle;
+            return false;
         }
 
-        int angle = raw_pos_to_angle(current_pos);
+        angle = raw_pos_to_angle(current_pos);
         angle     = uitk::clamp(angle, getAngleLimit().x, getAngleLimit().y);
         // mclog::tagInfo(_tag, "id: {} current pos: {} angle: {}", _id, current_pos, angle);
-        return angle;
+        return true;
     }
 
     bool is_moving_impl() override
@@ -130,6 +160,7 @@ public:
         // and avoid adding a 10 ms timeout to every animation frame.
         if (_torque_command_known && _torque_commanded_enabled == enabled) return;
         _torque_command_known = true;
+        _last_tracking_raw = -1;
         _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
         Servo::setTorqueEnabled(enabled);
     }
@@ -202,6 +233,7 @@ private:
     int _zero_pos      = 0;
     Mode _current_mode = Mode::Position;
     bool _torque_command_known = false;
+    int _last_tracking_raw = -1;
 
     static constexpr uint32_t kStallFeedbackIntervalMs = 50;
     static constexpr int kStallMinTargetDeltaRaw       = 8;
@@ -263,6 +295,7 @@ private:
     void reset_runtime_limits()
     {
         _runtime_raw_pos_limit = _config.rawPosLimit;
+        _last_tracking_raw = -1;
         set_angle_limit(_config.angleLimit);
         reset_stall_detection();
     }
@@ -365,6 +398,7 @@ private:
 
         check_mode(Mode::Position);
         _scs_bus.WritePos(_config.id, raw_pos, 20, 0);
+        _last_tracking_raw = -1;
 
         mclog::tagWarn(_tag,
                        "id: {} stall detected, raw: {}, angle: {}, dir: {}, current: {}, load: {}, limit: [{}, {}]",
@@ -377,6 +411,7 @@ private:
             return;
         }
 
+        _last_tracking_raw = -1;
         _scs_bus.SwitchMode(_config.id, static_cast<uint8_t>(targetMode));
         _current_mode = targetMode;
     }

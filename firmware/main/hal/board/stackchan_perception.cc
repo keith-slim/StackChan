@@ -286,8 +286,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d)",
                      center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
                      yaw_delta, pitch_delta);
-            if (yaw_delta != 0 || pitch_delta != 0)
-                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true);
+            stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true);
         } else if (stackchan::stage1::IsFacePitchSearchRequested()) {
             // Keep acquiring faces while pitch sweeps; don't replace the sweep
             // with a zero/deadband body correction or a transient missing frame.

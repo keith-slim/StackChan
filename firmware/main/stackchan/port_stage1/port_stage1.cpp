@@ -66,17 +66,53 @@ std::atomic<int> search_start{0}; // signed DOA in tenths of degrees, 1001 = zer
 std::atomic<bool> search_cancel{false};
 std::atomic<bool> search_active{false};
 std::atomic<bool> wake_pitch_pending{false};
-struct PersonSearch {
+// The same owned command and feedback path is used by yaw and pitch search.
+constexpr int kPerceptionRate = 100; // tenths of a degree per second
+struct OwnedTracking {
+    bool commanded = false;
+    uint32_t revision = 0;
+    uint32_t last_poll = 0, last_sample = 0;
+    int last_angle = 0;
+    bool sampled = false;
+    void Issue(motion::Servo& servo, int target, uint32_t now) {
+        revision = servo.trackWithSpeed(target, kPerceptionRate);
+        commanded = true;
+        last_poll = now;
+        sampled = false;
+    }
+    bool Superseded(motion::Servo& servo) const {
+        return commanded && servo.getCommandRevision() != revision;
+    }
+    void Stop(motion::Servo& servo) {
+        if (commanded) servo.stopTrackingIfOwned(revision);
+        commanded = false;
+        sampled = false;
+    }
+    bool Sample(motion::Servo& servo, uint32_t now, int& angle, const char* axis) {
+        // Use the same feedback interval as the existing torque check.
+        if (now - last_poll < 200) return false;
+        last_poll = now;
+        if (!servo.tryGetCurrentAngle(angle)) return false;
+        if (sampled && now != last_sample) {
+            const float rate = (angle - last_angle) * 100.0f / (now - last_sample);
+            ESP_LOGI("STAGE1", "[TRACK_FEEDBACK] axis=%s actual=%d deg_per_sec=%.2f", axis, angle, rate);
+        } else {
+            ESP_LOGI("STAGE1", "[TRACK_FEEDBACK] axis=%s actual=%d", axis, angle);
+        }
+        sampled = true;
+        last_sample = now;
+        last_angle = angle;
+        return true;
+    }
+};
+OwnedTracking perception_yaw, perception_pitch;
+struct PersonSearch : OwnedTracking {
     enum Phase { First = 1, Reverse, Return };
     Phase phase = First;
     int direction = 1, origin = 0, target = 0;
-    bool running = false, commanded = false;
-    uint32_t revision = 0, epoch = 0;
-    void StopOwned(StackChan& sc) {
-        if (commanded)
-            sc.motion().yawServo().stopTrackingIfOwned(revision);
-        commanded = false;
-    }
+    bool running = false;
+    uint32_t epoch = 0;
+    void StopOwned(StackChan& sc) { Stop(sc.motion().yawServo()); }
     void End(StackChan& sc, bool stop) {
         if (stop) StopOwned(sc);
         *this = PersonSearch{};
@@ -90,14 +126,9 @@ struct PersonSearch {
 PersonSearch person_search;
 std::atomic<bool> face_pitch_requested{false};
 std::atomic<uint32_t> face_pitch_epoch{0};
-struct FacePitchSearch {
-    bool commanded = false;
+struct FacePitchSearch : OwnedTracking {
     bool upward = true;
-    uint32_t revision = 0;
-    void Pause(StackChan& sc) {
-        if (commanded) sc.motion().pitchServo().stopTrackingIfOwned(revision);
-        commanded = false;
-    }
+    void Pause(StackChan& sc) { Stop(sc.motion().pitchServo()); }
 };
 FacePitchSearch face_pitch_search;
 // LVGL is owned by Update(). Head pad/voice tasks only set these flags.
@@ -1110,6 +1141,8 @@ void Start() {
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
     face_pitch_search = FacePitchSearch{};
+    perception_yaw = OwnedTracking{};
+    perception_pitch = OwnedTracking{};
     face_pitch_requested.store(false);
     search_start.store(0); search_cancel.store(false); search_active.store(false);
     wake_pitch_pending.store(false);
@@ -1166,6 +1199,8 @@ void Stop() {
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
     face_pitch_search = FacePitchSearch{};
+    perception_yaw = OwnedTracking{};
+    perception_pitch = OwnedTracking{};
     face_pitch_requested.store(false);
     search_start.store(0); search_cancel.store(false); search_active.store(false);
     wake_pitch_pending.store(false);
@@ -1274,6 +1309,8 @@ void StartSpeechEffects(StackChan& sc, avatar::Emotion emotion) {
     if (speech_effects.active) return;
     person_search.Pause(sc);
     face_pitch_search.Pause(sc);
+    perception_yaw.Stop(sc.motion().yawServo());
+    perception_pitch.Stop(sc.motion().pitchServo());
     if (!speech_effects.armed) speech_effects.Arm(sc);
     speech_effects.active = true;
     speech_effects.Set(sc, emotion, GetHAL().millis());
@@ -1302,7 +1339,8 @@ bool IsIdleServoMotionBlocked() {
     // Suppress ordinary random head movement for the entire scene and
     // at least 3000ms from theatre start, even for 2.8s skits.
     const uint32_t until = r.theatre_motion_protect_until;
-    return owns_auto.load() || voice::IsBusy() || VoicePending() ||
+    return search_active.load() || search_cancel.load() || face_pitch_requested.load() ||
+           perception_look_pending.load() || owns_auto.load() || voice::IsBusy() || VoicePending() ||
            dream_remark.motif != avatar_dream::Motif::None ||
            (until != 0 && static_cast<int32_t>(GetHAL().millis() - until) < 0);
 }
@@ -1357,7 +1395,7 @@ bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking)
     constexpr int kMaxPitchDelta = 450;
     yaw_delta                    = std::clamp(yaw_delta, -kMaxYawDelta, kMaxYawDelta);
     pitch_delta                  = std::clamp(pitch_delta, -kMaxPitchDelta, kMaxPitchDelta);
-    if (yaw_delta == 0 && pitch_delta == 0) return false;
+    if (yaw_delta == 0 && pitch_delta == 0 && !face_tracking) return false;
     perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
     perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
     perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
@@ -1457,6 +1495,8 @@ void Update(StackChan& sc) {
         Runtime::SleepPreparing(r.phase) || search_motion.isModifyLocked() || sc.avatar().isModifyLocked();
     if (search_cancel.load()) {
         perception_look_pending.store(false);
+        perception_yaw.Stop(search_yaw);
+        perception_pitch.Stop(search_motion.pitchServo());
         ps.End(sc, true);
         search_cancel.store(false);
     }
@@ -1486,10 +1526,11 @@ void Update(StackChan& sc) {
         } else if (search_blocked) {
             ps.Pause(sc);
         } else {
-            if (ps.commanded && search_yaw.getCommandRevision() != ps.revision) {
+            int current = 0;
+            if (ps.Superseded(search_yaw)) {
+                ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] cancelled: revision=%u current=%u", ps.revision, search_yaw.getCommandRevision());
                 ps.End(sc, false); // stall protection or another owner
-            } else if (ps.commanded) {
-                const int current = search_yaw.getCurrentAngle();
+            } else if (ps.commanded && ps.Sample(search_yaw, now, current, "yaw")) {
                 // Keep the full-limit motion target, but reverse 10 degrees
                 // before it so the spring does not settle at the endpoint.
                 constexpr int kSearchTurnMargin = 100; // 0.1-degree units
@@ -1500,7 +1541,7 @@ void Update(StackChan& sc) {
                     ? (direction > 0 ? current >= search_limits.y - margin
                                      : current <= search_limits.x + margin)
                     : std::abs(current - ps.target) <= 5;
-                if (reached || !search_yaw.isMoving()) {
+                if (reached || (!search_yaw.isTrackingCommandActive() && std::abs(current - ps.target) <= 5)) {
                     if (ps.phase == PersonSearch::Return) {
                         ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] complete: no person");
                         ps.End(sc, false);
@@ -1521,9 +1562,7 @@ void Update(StackChan& sc) {
             // Issue the next target in this update, without a wait state.
             if (ps.running && !ps.commanded && !search_cancel.load()) {
                 ps.target = std::clamp(ps.target, search_limits.x, search_limits.y);
-                search_yaw.trackWithSpeed(ps.target, 100);
-                ps.revision = search_yaw.getCommandRevision();
-                ps.commanded = true;
+                ps.Issue(search_yaw, ps.target, now);
             }
         }
     }
@@ -1540,13 +1579,17 @@ void Update(StackChan& sc) {
     } else if (search_blocked || ps.running || search_cancel.load()) {
         fps.Pause(sc);
     } else {
-        if (fps.commanded && search_pitch.getCommandRevision() != fps.revision) {
+        if (fps.Superseded(search_pitch)) {
             // A different owner (including stall protection) superseded this target.
             fps.commanded = false;
             face_pitch_requested.store(false);
-            ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] cancelled by motion owner");
+            ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] cancelled: revision=%u current=%u", fps.revision, search_pitch.getCommandRevision());
         } else {
-            if (fps.commanded && !search_pitch.isMoving()) {
+            int measured = 0;
+            const auto limits = search_pitch.getAngleLimit();
+            const int goal = fps.upward ? limits.y : limits.x;
+            if (fps.commanded && fps.Sample(search_pitch, now, measured, "pitch") &&
+                !search_pitch.isTrackingCommandActive() && std::abs(measured - goal) <= 5) {
                 fps.commanded = false;
                 if (fps.upward) {
                     fps.upward = false;
@@ -1557,15 +1600,13 @@ void Update(StackChan& sc) {
                 }
             }
             if (!fps.commanded && face_pitch_requested.load()) {
-                const auto limits = search_pitch.getAngleLimit();
-                const int current = search_pitch.getCurrentAngle();
-                if (fps.upward && current >= limits.y) fps.upward = false;
+                int current = 0;
+                const bool measured_ok = search_pitch.tryGetCurrentAngle(current);
+                if (measured_ok && fps.upward && current >= limits.y) fps.upward = false;
                 const int target = fps.upward ? limits.y : limits.x;
                 if (limits.x < limits.y) {
-                    search_pitch.trackWithSpeed(target, 100);
-                    fps.revision = search_pitch.getCommandRevision();
-                    fps.commanded = true;
-                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d target=%d rate=100", current, target);
+                    fps.Issue(search_pitch, target, now);
+                    ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] pitch=%d measured=%d target=%d rate=%d", current, measured_ok, target, kPerceptionRate);
                 } else {
                     face_pitch_requested.store(false);
                     ESP_LOGI(LOG_TAG, "[FACE_PITCH_SEARCH] no available pitch range; returning to body tracking");
@@ -1573,12 +1614,15 @@ void Update(StackChan& sc) {
             }
         }
     }
+    if (search_blocked) {
+        perception_yaw.Stop(search_yaw);
+        perception_pitch.Stop(search_pitch);
+    }
     if (perception_look_pending.load(std::memory_order_acquire)) {
         const bool expired = static_cast<uint32_t>(now - perception_requested_at.load()) > 3000;
         // Wake-triggered tracking is allowed to replace the wake animation's
         // neck target; sleep and explicit skits retain priority.
-        const bool motion_available = device_state != kDeviceStateSpeaking && !ps.running && !speech_tracking_paused.load() && !r.cue_active && !Runtime::Sleeping(r.phase) &&
-                                      !Runtime::SleepPreparing(r.phase);
+        const bool motion_available = !search_blocked && !ps.running && !face_pitch_requested.load();
         if (expired) {
             perception_look_pending.store(false, std::memory_order_release);
             ESP_LOGW(LOG_TAG, "perception look expired while motion was busy");
@@ -1586,21 +1630,27 @@ void Update(StackChan& sc) {
             auto& motion           = sc.motion();
             auto& yaw              = motion.yawServo();
             auto& pitch            = motion.pitchServo();
-            const int yaw_before   = yaw.getCurrentAngle();
-            const int pitch_before = pitch.getCurrentAngle();
-            const auto yaw_limit   = yaw.getAngleLimit();
-            const auto pitch_limit = pitch.getAngleLimit();
-            const int yaw_target   = std::clamp(yaw_before + perception_yaw_delta.load(), yaw_limit.x, yaw_limit.y);
-            const int pitch_target =
-                std::clamp(pitch_before + perception_pitch_delta.load(), pitch_limit.x, pitch_limit.y);
-            ESP_LOGI(LOG_TAG, "perception look yaw=%d->%d pitch=%d->%d", yaw_before, yaw_target, pitch_before,
-                     pitch_target);
-            // ウェイク後は相手を待たせないよう、通常の小芝居より素早く向く。
-            if (perception_face_tracking.load(std::memory_order_relaxed)) {
-                motion.trackWithSpeed(yaw_target, pitch_target, 100);
-            } else {
-                motion.moveWithSpeed(yaw_target, pitch_target, 1000);
-            }
+            const int yaw_delta = perception_yaw_delta.load();
+            const int pitch_delta = perception_pitch_delta.load();
+            const bool face = perception_face_tracking.load(std::memory_order_relaxed);
+            const auto correct = [&](motion::Servo& servo, OwnedTracking& owned, int delta, const char* axis) {
+                if (delta == 0) {
+                    owned.Stop(servo);
+                    return;
+                }
+                int actual = 0;
+                if (!servo.tryGetCurrentAngle(actual)) {
+                    ESP_LOGW(LOG_TAG, "[TRACK_CORRECTION] axis=%s skipped: no measured position", axis);
+                    return;
+                }
+                const auto limits = servo.getAngleLimit();
+                const int target = std::clamp(actual + delta, limits.x, limits.y);
+                owned.Issue(servo, target, now);
+                ESP_LOGI(LOG_TAG, "[TRACK_CORRECTION] kind=%s axis=%s actual=%d target=%d rate=%d",
+                         face ? "face" : "body", axis, actual, target, kPerceptionRate);
+            };
+            correct(yaw, perception_yaw, yaw_delta, "yaw");
+            correct(pitch, perception_pitch, pitch_delta, "pitch");
         }
     }
     if (speech_effects.active) {

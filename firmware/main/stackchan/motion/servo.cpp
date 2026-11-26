@@ -61,25 +61,36 @@ void Servo::update()
     // velocity between updates and between retargets; never snap to a distant goal.
     if (_tracking_target) {
         const int goal = uitk::clamp(_tracking_goal, _angle_limit.x, _angle_limit.y);
-        const float error = goal - _tracking_position;
-        constexpr float dt = 0.02f;
-        const float acceleration = _tracking_stiffness * error - _tracking_damping * _tracking_velocity;
+        // Integrate actual elapsed time in bounded steps. The acceleration
+        // bound uses the existing spring damping time scale, not a second speed setting.
+        uint32_t elapsed = _last_tick - _tracking_tick;
+        _tracking_tick = _last_tick;
         const float rate = static_cast<float>(_tracking_rate);
-        _tracking_velocity = uitk::clamp(_tracking_velocity + acceleration * dt, -rate, rate);
-        const float next = _tracking_position + _tracking_velocity * dt;
-        if ((error >= 0.0f && next >= goal) || (error <= 0.0f && next <= goal) ||
-            (std::abs(error) <= 0.1f && std::abs(_tracking_velocity) <= 0.1f)) {
-            _tracking_position = static_cast<float>(goal);
-            _tracking_velocity = 0.0f;
-            _tracking_target = false;
-        } else {
-            _tracking_position = uitk::clamp(next, static_cast<float>(_angle_limit.x),
-                                              static_cast<float>(_angle_limit.y));
+        const float acceleration_limit = rate * _tracking_damping;
+        while (elapsed && _tracking_target) {
+            const uint32_t step = elapsed > 20 ? 20 : elapsed;
+            elapsed -= step;
+            const float dt = step * 0.001f;
+            const float error = goal - _tracking_position;
+            const float acceleration = uitk::clamp(
+                _tracking_stiffness * error - _tracking_damping * _tracking_velocity,
+                -acceleration_limit, acceleration_limit);
+            _tracking_velocity = uitk::clamp(_tracking_velocity + acceleration * dt, -rate, rate);
+            const float next = _tracking_position + _tracking_velocity * dt;
+            if ((error >= 0.0f && next >= goal) || (error <= 0.0f && next <= goal) ||
+                (std::abs(error) <= 0.1f && std::abs(_tracking_velocity) <= 0.1f)) {
+                _tracking_position = static_cast<float>(goal);
+                _tracking_velocity = 0.0f;
+                _tracking_target = false;
+            } else {
+                _tracking_position = uitk::clamp(next, static_cast<float>(_angle_limit.x),
+                                                  static_cast<float>(_angle_limit.y));
+            }
         }
         const int angle = uitk::clamp(static_cast<int>(std::lround(_tracking_position)), _angle_limit.x, _angle_limit.y);
         if (angle != static_cast<int>(_angle_anim.directValue()) || !_tracking_target) {
             _angle_anim.teleport(angle);
-            set_angle_impl(angle);
+            set_tracking_angle_impl(angle, _tracking_rate);
         }
         return;
     }
@@ -131,7 +142,7 @@ void Servo::moveWithSpeed(int angle, int speed)
     moveWithSpringParams(angle, spring_options.stiffness, spring_options.damping);
 }
 
-void Servo::trackWithSpeed(int angle, int speed)
+uint32_t Servo::trackWithSpeed(int angle, int speed)
 {
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     const bool continuing = _tracking_target && _torque_commanded_enabled;
@@ -149,7 +160,15 @@ void Servo::trackWithSpeed(int angle, int speed)
     _angle_anim.teleport(static_cast<int>(std::lround(position)));
     _snap_to_target_on_rest = false;
     if (!_torque_commanded_enabled) setTorqueEnabled(true);
+    if (!continuing) _tracking_tick = GetHAL().millis();
     _tracking_target = true;
+    return getCommandRevision();
+}
+
+bool Servo::isTrackingCommandActive() const
+{
+    std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+    return _tracking_target;
 }
 
 void Servo::stopTrackingIfOwned(uint32_t revision)

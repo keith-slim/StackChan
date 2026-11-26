@@ -77,81 +77,43 @@ void SCSerial::end()
 	}
 }
 
-int SCSerial::readSCS(unsigned char *nDat, int nLen, unsigned long TimeOut)
+int SCSerial::readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bool interByteTimeout)
 {
-	if (uart_num >= UART_NUM_MAX) {
-		return 0;
-	}
+	if (uart_num >= UART_NUM_MAX || nLen <= 0) return 0;
 
 	int size = 0;
-	int64_t t_begin = esp_timer_get_time() / 1000;
-
-	while (1) {
+	int64_t started = esp_timer_get_time() / 1000;
+	unsigned char discard[32];
+	while (size < nLen) {
 		size_t available = 0;
 		uart_get_buffered_data_len(uart_num, &available);
-
 		if (available > 0) {
-			unsigned char byte;
-			int len = uart_read_bytes(uart_num, &byte, 1, 0);
+			size_t count = static_cast<size_t>(nLen - size);
+			if (count > available) count = available;
+			if (!nDat && count > sizeof(discard)) count = sizeof(discard);
+			const int len = uart_read_bytes(uart_num, nDat ? nDat + size : discard, count, 0);
 			if (len > 0) {
-				if (nDat) {
-					nDat[size] = byte;
-				}
-				size++;
+				size += len;
+				if (interByteTimeout) started = esp_timer_get_time() / 1000;
+				if (size >= nLen) break;
+				if (esp_timer_get_time() / 1000 - started > static_cast<int64_t>(timeout)) break;
+				continue; // Drain buffered bytes without yielding between bytes.
 			}
 		}
-
-		if (size >= nLen) {
-			break;
-		}
-
-		if ((esp_timer_get_time() / 1000) - t_begin > static_cast<int64_t>(TimeOut)) {
-			break;
-		}
-
-		vTaskDelay(pdMS_TO_TICKS(1));
+		if (esp_timer_get_time() / 1000 - started > static_cast<int64_t>(timeout)) break;
+		vTaskDelay(1);
 	}
-
 	return size;
+}
+
+int SCSerial::readSCS(unsigned char *nDat, int nLen, unsigned long TimeOut)
+{
+	return readBytes(nDat, nLen, TimeOut, false);
 }
 
 int SCSerial::readSCS(unsigned char *nDat, int nLen)
 {
-	if (uart_num >= UART_NUM_MAX) {
-		return 0;
-	}
-
-	int size = 0;
-	int64_t t_begin = esp_timer_get_time() / 1000;
-
-	while (1) {
-		size_t available = 0;
-		uart_get_buffered_data_len(uart_num, &available);
-
-		if (available > 0) {
-			unsigned char byte;
-			int len = uart_read_bytes(uart_num, &byte, 1, 0);
-			if (len > 0) {
-				if (nDat) {
-					nDat[size] = byte;
-				}
-				size++;
-				t_begin = esp_timer_get_time() / 1000;
-			}
-		}
-
-		if (size >= nLen) {
-			break;
-		}
-
-		if ((esp_timer_get_time() / 1000) - t_begin > static_cast<int64_t>(IOTimeOut)) {
-			break;
-		}
-
-		vTaskDelay(pdMS_TO_TICKS(1));
-	}
-
-	return size;
+	return readBytes(nDat, nLen, IOTimeOut, true);
 }
 
 int SCSerial::writeSCS(unsigned char *nDat, int nLen)

@@ -24,6 +24,8 @@ public:
 	bool begin(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin, int buf_size = 1024);
 	void end();
 
+private:
+	int readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bool interByteTimeout);
 protected:
 	int writeSCS(unsigned char *nDat, int nLen);//输出nLen字节
 	int readSCS(unsigned char *nDat, int nLen);//输入nLen字节
