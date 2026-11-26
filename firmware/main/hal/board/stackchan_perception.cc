@@ -185,6 +185,10 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     bool face_center_locked           = false;
     int centered_frames               = 0;
     int face_missing_frames           = 0;
+    int person_missing_frames         = 0;
+    bool person_acquired              = false;
+    int last_search_direction         = 0;
+    bool face_sweep_attempted          = false;
     float filtered_center_x           = 0.5f;
     float filtered_center_y           = 0.5f;
     ESP_LOGI(kTag, "Realtime face tracking started");
@@ -214,11 +218,12 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         float center_x = 0.5f;
         float center_y = 0.5f;
         float score    = 0.0f;
+        float body_target_x = 0.5f;
         float body_target_y = 0.5f;
         float body_score    = 0.0f;
         const bool was_searching = stackchan::stage1::IsPersonSearchActive();
         bool valid_frame = false;
-        const bool face_detected = PostVision(center_x, center_y, score, body_target_y, body_score, valid_frame);
+        const bool face_detected = PostVision(center_x, center_y, score, body_target_x, body_target_y, body_score, valid_frame);
         // A request already in flight may complete after speech starts.
         if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking ||
             stackchan::stage1::IsSpeechTrackingPaused()) continue;
@@ -227,7 +232,12 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             if (valid_frame && ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore)) {
                 const bool found_face = face_detected && score >= kMinimumFaceScore;
                 stackchan::stage1::StopPersonSearch();
-                if (!found_face) stackchan::stage1::StartFacePitchSearch();
+                person_acquired = true;
+                person_missing_frames = 0;
+                if (!found_face && !face_sweep_attempted) {
+                    stackchan::stage1::StartFacePitchSearch();
+                    face_sweep_attempted = true;
+                }
                 ESP_LOGI(kTag, "[PERSON_SEARCH] found %s", found_face ? "face" : "body");
                 face_filter_initialized = false;
                 face_center_locked = false;
@@ -249,6 +259,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 ESP_LOGI(kTag, "[FACE_PITCH_SEARCH] face found score=%.3f", score);
             }
             person_missing_logged = false;
+            person_acquired = true;
+            person_missing_frames = 0;
             face_missing_frames   = 0;
             if (!wake_face_smile_shown && display_ && !stop_requested_.load(std::memory_order_acquire))
                 wake_face_smile_shown = display_->ShowWakeFaceSmile();
@@ -292,6 +304,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             // with a zero/deadband body correction or a transient missing frame.
         } else if (body_score >= kMinimumBodyScore) {
             person_missing_logged = false;
+            person_acquired = true;
+            person_missing_frames = 0;
             ++face_missing_frames;
             // 顔検出が一瞬抜けただけでは身体追従へ切り替えず、上下の往復を防ぐ。
             if (face_missing_frames >= 12) {
@@ -300,13 +314,17 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 centered_frames         = 0;
             }
             if (face_missing_frames >= 4) {
+                const float error_x = body_target_x - 0.5f;
                 const float error_y = 0.5f - body_target_y;
+                const int yaw_delta = std::abs(error_x) < 0.05f ? 0
+                    : static_cast<int>(std::clamp(error_x * 500.0f, -160.0f, 160.0f));
+                if (yaw_delta != 0) last_search_direction = yaw_delta > 0 ? 1 : -1;
                 const int pitch_delta = std::abs(error_y) < 0.08f
                                             ? 0
                                             : static_cast<int>(std::clamp(error_y * 300.0f, -100.0f, 100.0f));
-                ESP_LOGI(kTag, "Track body head_hint_y=%.3f score=%.3f pitch=%d", body_target_y, body_score,
-                         pitch_delta);
-                if (pitch_delta != 0) stackchan::stage1::RequestPerceptionLook(0, pitch_delta);
+                ESP_LOGI(kTag, "Track body head_hint=(%.3f,%.3f) score=%.3f correction=(%d,%d)",
+                         body_target_x, body_target_y, body_score, yaw_delta, pitch_delta);
+                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta);
             }
         } else {
             ++face_missing_frames;
@@ -318,6 +336,18 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             if (!person_missing_logged) {
                 ESP_LOGI(kTag, "No face or body in view; keeping audio direction and tracking");
                 person_missing_logged = true;
+            }
+            if (valid_frame && person_acquired) {
+                stackchan::stage1::RequestPerceptionLook(0, 0);
+                if (++person_missing_frames >= 4 && !stop_requested_.load(std::memory_order_acquire) &&
+                    Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
+                    person_acquired = false; // one bounded sweep per loss, not endless retries
+                    person_missing_frames = 0;
+                    ESP_LOGI(kTag, "[PERSON_SEARCH] restart: person lost");
+                    stackchan::stage1::StartPersonSearch(last_search_direction);
+                }
+            } else if (!valid_frame) {
+                person_missing_frames = 0;
             }
         }
 
@@ -341,7 +371,7 @@ bool StackChanPerception::PostAudio(const int16_t* pcm, size_t frames, float& an
     return ok;
 }
 
-bool StackChanPerception::PostVision(float& center_x, float& center_y, float& score, float& body_target_y,
+bool StackChanPerception::PostVision(float& center_x, float& center_y, float& score, float& body_target_x, float& body_target_y,
                                      float& body_score, bool& valid_frame)
 {
     valid_frame = false;
@@ -399,8 +429,11 @@ bool StackChanPerception::PostVision(float& center_x, float& center_y, float& sc
         }
         cJSON* head_hint = body ? cJSON_GetObjectItemCaseSensitive(body, "head_hint") : nullptr;
         if (cJSON_IsArray(head_hint) && cJSON_GetArraySize(head_hint) >= 2) {
+            cJSON* x = cJSON_GetArrayItem(head_hint, 0);
             cJSON* y = cJSON_GetArrayItem(head_hint, 1);
-            if (cJSON_IsNumber(y) && std::isfinite(y->valuedouble)) {
+            if (cJSON_IsNumber(x) && std::isfinite(x->valuedouble) &&
+                cJSON_IsNumber(y) && std::isfinite(y->valuedouble)) {
+                body_target_x = static_cast<float>(x->valuedouble);
                 body_target_y = static_cast<float>(y->valuedouble);
                 body_score    = best_body_score;
             }

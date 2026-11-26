@@ -1413,7 +1413,6 @@ bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking)
     constexpr int kMaxPitchDelta = 450;
     yaw_delta                    = std::clamp(yaw_delta, -kMaxYawDelta, kMaxYawDelta);
     pitch_delta                  = std::clamp(pitch_delta, -kMaxPitchDelta, kMaxPitchDelta);
-    if (yaw_delta == 0 && pitch_delta == 0 && !face_tracking) return false;
     perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
     perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
     perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
@@ -1527,6 +1526,8 @@ void Update(StackChan& sc) {
     const int start = search_blocked ? 0 : search_start.exchange(0);
     if (start != 0) {
         ps.End(sc, true);
+        perception_yaw.Stop(search_yaw);
+        perception_pitch.Stop(search_motion.pitchServo());
         const int delta = start == 1001 ? 0 : start;
         perception_look_pending.store(false);
         ps.running = true;
