@@ -264,10 +264,15 @@ public:
             const uint8_t data[] = {reg, value};
             return i2c_master_transmit(i2c_device_, data, sizeof(data), 100) == ESP_OK;
         };
-        if (enabled) {
-            return write(0x02, state | bit) && write(0x04, direction & ~bit);
-        }
-        return write(0x02, state & ~bit) && write(0x04, direction | bit);
+        // ALDO4 is already configured to 3.3 V by Pmic. SD_EN is
+        // active-high. Drive both states; leaving the disable pin floating
+        // does not guarantee that the card has actually powered down.
+        const uint8_t next_state = enabled ? (state | bit) : (state & ~bit);
+        if (!write(0x02, next_state) || !write(0x04, direction & ~bit)) return false;
+        uint8_t actual_state = 0, actual_direction = 0;
+        if (TryReadRegs(0x02, &actual_state, 1) != ESP_OK ||
+            TryReadRegs(0x04, &actual_direction, 1) != ESP_OK) return false;
+        return !(actual_direction & bit) && ((actual_state & bit) == (next_state & bit));
     }
 
     void ResetIli9342()

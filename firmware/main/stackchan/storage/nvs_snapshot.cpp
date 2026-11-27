@@ -356,24 +356,18 @@ bool BackupNvsIfChanged() {
     if(text==last_confirmed)return true; // Avoid repeated SD mounts when nothing changed.
     const int64_t now_us=esp_timer_get_time();
     if(last_failure_us && now_us-last_failure_us<60000000LL)return false; // Missing SD: retry at most once a minute.
-    std::string previous;
-    if(ReadConfig(previous)) {
-        if(previous==text){last_confirmed=text;return true;}
+    const auto result=SyncConfig(text, [](const std::string& previous) {
         std::vector<Item> items;
-        if(!ParseSnapshot(previous,items)) {
-            ESP_LOGW(kTag,"Existing SD config belongs to another format; will not overwrite it");
-            last_failure_us=now_us;
-            return false;
-        }
+        return ParseSnapshot(previous,items);
+    });
+    if(result==ConfigSyncResult::Failed) {
+        last_failure_us=esp_timer_get_time();
+        return false;
     }
-    const bool ok=WriteConfig(text);
-    if(ok) {
-        last_confirmed=text;
-        last_failure_us=0;
-        ESP_LOGI(kTag,"NVS snapshot saved to SD");
-    } else {
-        last_failure_us=now_us;
-    }
-    return ok;
+    last_confirmed=text;
+    last_failure_us=0;
+    if(result==ConfigSyncResult::Updated) ESP_LOGI(kTag,"NVS snapshot saved to SD");
+    else ESP_LOGI(kTag,"NVS snapshot unchanged on SD");
+    return true;
 }
 } // namespace stackchan::sd

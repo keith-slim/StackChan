@@ -21,4 +21,10 @@ bool WriteFile(const char* relative_path, const std::string& contents);
 // Primary: /sdcard/config.json; backup: /sdcard/Backup/config.json.
 bool ReadConfig(std::string& contents, bool* recovered = nullptr);
 bool WriteConfig(const std::string& contents);
+// Compare and, if necessary, replace the snapshot in one mounted session.
+// A mount/read error is not an absent file. Validate an existing generation
+// before any write or recovery; never overwrite another configuration format.
+enum class ConfigSyncResult { Failed, Unchanged, Updated };
+ConfigSyncResult SyncConfig(const std::string& contents,
+                            bool (*validate_existing)(const std::string&));
 } // namespace stackchan::sd
