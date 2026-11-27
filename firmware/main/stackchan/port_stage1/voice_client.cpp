@@ -81,6 +81,8 @@ bool Request(const Settings& config, const char* kind, const char* text, bool ma
                             std::strcmp(kind, "sleep_talk") == 0 ||
                             std::strcmp(kind, "dream_remark") == 0 ||
                             std::strcmp(kind, "monologue") == 0 ||
+                            std::strcmp(kind, "conversation_remark") == 0 ||
+                            std::strcmp(kind, "drowsy_reply") == 0 ||
                             std::strcmp(kind, "timer") == 0;
     if (!manual && autonomous && quiet_mode::Active()) {
         ESP_LOGI(TAG, "[SPEECH] kind=%s phase=suppressed_quiet", kind);

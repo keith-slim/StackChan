@@ -197,18 +197,28 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     while (!stop_requested_.load(std::memory_order_acquire) &&
            (esp_timer_get_time() - tracking_started_us) / 1000 < kTrackingMaxMs) {
         const int64_t frame_started_us = esp_timer_get_time();
-        const auto state               = Application::GetInstance().GetDeviceState();
-        const bool conversation_active = state == kDeviceStateConnecting || state == kDeviceStateListening ||
-                                         state == kDeviceStateSpeaking || state == kDeviceStateNotifying;
+        auto& app = Application::GetInstance();
+        const bool wake_handoff = app.IsWakeWordHandoffPending();
+        const auto state = app.GetDeviceState();
+        const bool conversation_active = !app.IsAnnouncementActive() &&
+            (state == kDeviceStateConnecting || state == kDeviceStateListening ||
+             state == kDeviceStateSpeaking || state == kDeviceStateNotifying);
         conversation_seen = conversation_seen || conversation_active;
         const int64_t tracking_elapsed_ms = (frame_started_us - tracking_started_us) / 1000;
-        if ((conversation_seen && state == kDeviceStateIdle) ||
-            (!conversation_seen && tracking_elapsed_ms >= kTrackingStartGraceMs))
+        if (!wake_handoff && ((conversation_seen && state == kDeviceStateIdle) ||
+            (!conversation_seen && tracking_elapsed_ms >= kTrackingStartGraceMs)))
             break;
+
+        // 独り言から会話へつなぐ際の一時的な待機で追従を終了させない。
+        if (wake_handoff && state == kDeviceStateIdle) {
+            vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
+            continue;
+        }
 
         // Keep audio transport bandwidth available during playback and
         // avoid tracking a deliberately moving expression pose.
         if (state == kDeviceStateSpeaking || stackchan::stage1::IsSpeechTrackingPaused()) {
+            stackchan::stage1::NoteCenteredFace(false, 0);
             face_filter_initialized = false;
             face_center_locked = false;
             face_pitch.Reset();
@@ -271,7 +281,10 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             continue;
         }
         const bool tracking_face = face_detected && score >= kMinimumFaceScore;
-        if (!tracking_face) face_pitch.Reset();
+        if (!tracking_face) {
+            face_pitch.Reset();
+            stackchan::stage1::NoteCenteredFace(false, 0);
+        }
         if (tracking_face) {
             if (stackchan::stage1::IsFacePitchSearchRequested()) {
                 stackchan::stage1::StopFacePitchSearch();
@@ -297,6 +310,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             const float filtered_y = 0.5f - filtered_center_y;
             const float raw_x = center_x - 0.5f;
             const float raw_y = 0.5f - center_y;
+            const bool face_centered = stackchan::stage1::FaceCenterEligible(raw_x, raw_y, filtered_x, filtered_y);
+            stackchan::stage1::NoteCenteredFace(face_centered, captured);
             const float error_x = stackchan::stage1::GuardedFaceError(raw_x, filtered_x, 0.025f);
             const float error_y = face_pitch.Update(raw_y, filtered_y);
             // 左右は顔が3フレーム中央にあれば固定する。上下は独立した保持条件を使う。
@@ -305,7 +320,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                     face_center_locked = false;
                     centered_frames    = 0;
                 }
-            } else if (stackchan::stage1::FaceCenterEligible(raw_x, raw_y, filtered_x, filtered_y)) {
+            } else if (face_centered) {
                 if (++centered_frames >= 3) face_center_locked = true;
             } else {
                 centered_frames = 0;
@@ -374,6 +389,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         if (frame_elapsed_ms < kTrackingIntervalMs)
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs - frame_elapsed_ms));
     }
+    stackchan::stage1::NoteCenteredFace(false, 0);
     stackchan::stage1::StopPersonSearch();
     ESP_LOGI(kTag, "Realtime face tracking stopped");
 }

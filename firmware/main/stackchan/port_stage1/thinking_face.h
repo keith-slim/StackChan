@@ -87,10 +87,13 @@ inline void AvatarThinkingFace::Render(bool speaking, uint8_t mouth, uint32_t el
     const auto px = [this](int n) { return stackchan::avatar::scaled(n, scale_); };
     const bool blink = elapsed_ms % avatar_config::CONVERSATION_BLINK_PERIOD_MS >=
         avatar_config::CONVERSATION_BLINK_PERIOD_MS - avatar_config::CONVERSATION_BLINK_MS;
+    // 聞き終わりのうなずきが済んでから、待ち時間に合わせて目だけを斜め上へ動かす。
+    const int look = static_cast<int>(std::clamp<uint32_t>(elapsed_ms, 650, 950) - 650);
     for (int side = 0; side < 2; ++side) {
         // 左の薄目は右の丸い目の半分の高さ。瞬き中だけは両目を同じ細さへ閉じる。
         lv_obj_set_size(eyes_[side], px(30), px(blink ? 2 : side ? 30 : 15));
-        lv_obj_align(eyes_[side], LV_ALIGN_CENTER, px(side ? 70 : -70), px(side ? -18 : -15));
+        lv_obj_align(eyes_[side], LV_ALIGN_CENTER, px((side ? 70 : -70) + 12 * look / 300),
+                     px((side ? -18 : -15) - 10 * look / 300));
     }
     // 手動プレビュー中でも、実際に音声が出ている場合だけ振幅で口を開く。
     const int opening = speaking ? std::min<unsigned>(mouth, 100) : 0;

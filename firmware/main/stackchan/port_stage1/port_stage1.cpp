@@ -57,6 +57,7 @@ std::atomic<int> queued_cue{-1};
 std::atomic<bool> manual_sleep_requested{false};
 std::atomic<uint32_t> manual_sleep_requested_at{0};
 PerceptionMailbox perception_looks;
+std::atomic<uint32_t> centered_face_at{0};
 std::atomic<bool> speech_tracking_paused{false};
 // Worker publishes requests/results; only the existing Stage1 update owns servos.
 std::atomic<uint32_t> search_start_epoch{0};
@@ -360,6 +361,9 @@ struct Runtime {
     avatar::FaceSnapshot conversation_face;
     uint32_t conversation_at = 0, listening_nod_at = 0;
     bool listening_nod = false;
+    uint32_t face_contact_since = 0, averted_at = 0, last_averted_at = 0;
+    int avert_direction = 1;
+    bool averted_this_listen = false;
     std::unique_ptr<AvatarThinkingFace> thinking_face;
     Clock schedule;
     Phase phase = Phase::Boot;
@@ -369,6 +373,10 @@ struct Runtime {
     bool motion_held = false;
     uitk::Vector2i sleep_home_origin{0, 0};
     bool sleep_yawn_return_started = false;
+    uint8_t nap_doze_step = 0;
+    int nap_doze_pitch = 0;
+    bool conversation_idle = true, conversation_replied = false;
+    uint32_t conversation_remark_at = 0;
     // S3 night sleep keeps its face visible for 3 s, then turns off only the
     // backlight. Never persist this transient brightness to NVS.
     bool night_light_armed = false, night_light_off = false;
@@ -513,6 +521,8 @@ struct Runtime {
         if (pose == ConversationPose::Listening) {
             thinking_face.reset();
             listening_nod = false;
+            face_contact_since = averted_at = 0;
+            averted_this_listen = false;
         }
         conversation_pose = pose;
         conversation_at = now;
@@ -520,6 +530,21 @@ struct Runtime {
             listening_nod = true;
             listening_nod_at = now;
         }
+    }
+    int ListeningGlance(uint32_t now) {
+        const uint32_t centered = centered_face_at.load();
+        if (!centered || static_cast<int32_t>(now - centered) > 700) face_contact_since = 0;
+        else if (!face_contact_since) face_contact_since = now;
+        else if (!averted_this_listen && now - face_contact_since >= 2200 &&
+                 (!last_averted_at || now - last_averted_at >= 12000)) {
+            averted_this_listen = true;
+            averted_at = last_averted_at = now;
+            avert_direction = (esp_random() & 1) ? 1 : -1;
+        }
+        if (!averted_at || now - averted_at >= 1000) return 0;
+        const auto elapsed = now - averted_at;
+        const uint32_t travel = std::min<uint32_t>({elapsed, 180, 1000 - elapsed});
+        return avert_direction * static_cast<int>(60U * travel / 180U);
     }
     void DrawConversation(StackChan& sc, uint32_t now) {
         auto& av = sc.avatar();
@@ -542,10 +567,11 @@ struct Runtime {
         const bool blink = (now - conversation_at) % avatar_config::CONVERSATION_BLINK_PERIOD_MS >=
             avatar_config::CONVERSATION_BLINK_PERIOD_MS - avatar_config::CONVERSATION_BLINK_MS;
         const int offset = nodding ? avatar_nod::Offset(now - listening_nod_at) : -5;
+        const int glance = conversation_pose == ConversationPose::Listening ? ListeningGlance(now) : 0;
         for (auto* eye : {&av.leftEye(), &av.rightEye()}) {
-            eye->setPosition({0, offset});
+            eye->setPosition({glance, offset});
             eye->setSize(nodding ? 0 : 6);
-            eye->setWeight(blink && !nodding ? 0 : 100);
+            eye->setWeight(blink && !nodding ? 0 : (glance ? 85 : 100));
         }
         av.mouth().setPosition({0, nodding ? offset : 0});
         av.mouth().setWeight(0);
@@ -674,6 +700,7 @@ struct Runtime {
             }
         } else if (next == Phase::NapDrowsy || next == Phase::NightDrowsy) {
             av.setEmotion(avatar::Emotion::Sleepy);
+            nap_doze_step = 0;
             if (!motion_held) {
                 sleep_home_origin = motion.getCurrentAngles();
                 if (!own_neck) { saved_angles = sleep_home_origin; own_neck = true; }
@@ -755,6 +782,33 @@ struct Runtime {
             color(65,48,28);
             ESP_LOGI(LOG_TAG, "S3 morning: sleepy face and greeting");
         }
+    }
+    void TickNapDoze(StackChan& sc, uint32_t elapsed, uint32_t now) {
+        if (motion_held || schedule.DrowsyDurationMs() != kNapDrowsyMs) return;
+        auto& motion = sc.motion();
+        if (motion.isModifyLocked() || sc.avatar().isModifyLocked()) return;
+        auto& pitch = motion.pitchServo();
+        const auto limit = pitch.getAngleLimit();
+        if ((nap_doze_step == 0 && elapsed >= 5800 && elapsed < 6500) ||
+            (nap_doze_step == 2 && elapsed >= 10700 && elapsed < 11400)) {
+            if (!pitch.tryGetCurrentAngle(nap_doze_pitch)) return;
+            pitch.moveWithDuration(std::clamp(nap_doze_pitch - 45, limit.x, limit.y), 380, now);
+            ++nap_doze_step;
+        } else if (nap_doze_step == 1 && elapsed >= 6360) {
+            nap_doze_step = 2;
+            pitch.moveWithDuration(nap_doze_pitch, 270, now);
+            sc.avatar().setEmotion(avatar::Emotion::Surprise);
+            if (const auto* config = voice::Current(); config && !voice::IsBusy())
+                voice::Request(*config, "drowsy_reply", "……起きてるよ。");
+        } else if (nap_doze_step >= 2 && nap_doze_step < 4 && elapsed >= 11400) {
+            nap_doze_step = 4;
+            sc.avatar().setEmotion(avatar::Emotion::Sleepy);
+            const int target = sleep_home_origin.y + (Home(motion).y - sleep_home_origin.y) * 2 / 3;
+            const uint32_t remain = kNapDrowsyMs > elapsed + 300 ? kNapDrowsyMs - elapsed - 300 : 300;
+            pitch.moveWithDuration(target, remain, now);
+        }
+        if (nap_doze_step == 2 && elapsed >= 7200 && sc.avatar().getEmotion() == avatar::Emotion::Surprise)
+            sc.avatar().setEmotion(avatar::Emotion::Sleepy);
     }
     void TickSleepYawn(StackChan& sc, uint32_t elapsed, uint32_t now) {
         if (motion_held || sleep_yawn_return_started || elapsed < 1200) return;
@@ -1276,6 +1330,9 @@ void OnStandby(bool ready) {
         interrupted.store(true);
     }
 }
+void NoteCenteredFace(bool centered, uint32_t captured) {
+    centered_face_at.store(centered ? captured : 0);
+}
 void NotifyExternalSpeech() {
     // Xiaozhi owns the speech bubble once any ASR/system/TTS text arrives.
     // The end of a wake animation must never delete a newer subtitle.
@@ -1672,6 +1729,16 @@ void Update(StackChan& sc) {
     const int sweep_left = search_limits.x + search_margin;
     const int sweep_right = search_limits.y - search_margin;
     const auto device_state = Application::GetInstance().GetDeviceState();
+    if (!Application::GetInstance().IsAnnouncementActive()) {
+        const bool was_idle = r.conversation_idle;
+        r.conversation_idle = device_state == kDeviceStateIdle;
+        if (was_idle && !r.conversation_idle) r.conversation_remark_at = 0;
+        if (device_state == kDeviceStateSpeaking) r.conversation_replied = true;
+        if (r.conversation_idle && r.conversation_replied) {
+            r.conversation_replied = false;
+            r.conversation_remark_at = now + 45000 + esp_random() % 30001;
+        }
+    }
     const bool search_blocked = device_state == kDeviceStateSpeaking || speech_tracking_paused.load() ||
         r.cue_active || r.own_neck || IsWakeSequenceActive() || Runtime::Sleeping(r.phase) ||
         Runtime::SleepPreparing(r.phase) || search_motion.isModifyLocked() || sc.avatar().isModifyLocked();
@@ -2012,13 +2079,25 @@ void Update(StackChan& sc) {
         old_phase == Phase::Awake && !quiet_mode::Active() && !event &&
         !accepted_wake && !wake_sequence_active.load() && !manual_sleep_requested.load();
     const bool weather_announced = poll_weather_change(weather_active, monologue_eligible);
-    tick_monologue(state.phase, monologue_eligible && !weather_announced);
+    bool conversation_remarked = false;
+    if (r.conversation_remark_at && static_cast<int32_t>(now - r.conversation_remark_at) >= 0) {
+        if (now - r.conversation_remark_at >= 45000 || quiet_mode::Active()) {
+            r.conversation_remark_at = 0;
+        } else if (monologue_eligible && !weather_announced) {
+            r.conversation_remark_at = 0;
+            if (const auto* config = voice::Current(); config && config->monologue_enabled)
+                conversation_remarked = voice::Request(*config, "conversation_remark", "recent conversation");
+        }
+    }
+    tick_monologue(state.phase, monologue_eligible && !weather_announced && !conversation_remarked);
     DreamRemarkTick(sc, state, now, event && !Application::GetInstance().IsAnnouncementActive());
     r.TickNightBacklight(now);
     if (state.phase == Phase::NapWake || state.phase == Phase::NightWake ||
         state.phase == Phase::MorningWake)
         r.TickWake(sc, state.phase_elapsed_ms);
     if (Runtime::SleepYawn(state.phase)) r.TickSleepYawn(sc, state.phase_elapsed_ms, now);
+    if (state.phase == Phase::NapDrowsy && standby)
+        r.TickNapDoze(sc, state.phase_elapsed_ms, now);
     sleep_wake_eligible.store(state.phase == Phase::NapSleep ||
                               state.phase == Phase::NightSleep ||
                               state.phase == Phase::NapYawn ||
