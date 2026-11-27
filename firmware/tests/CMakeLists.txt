@@ -46,3 +46,8 @@ add_executable(servo_reply_parser_test servo_reply_parser_test.cpp)
 target_include_directories(servo_reply_parser_test PRIVATE ../main/hal/drivers/FTServo_Arduino/src)
 target_compile_features(servo_reply_parser_test PRIVATE cxx_std_17)
 add_test(NAME servo_reply_parser_test COMMAND $<TARGET_FILE:servo_reply_parser_test>)
+
+add_executable(tracking_step_test tracking_step_test.cpp)
+target_include_directories(tracking_step_test PRIVATE ../main/stackchan/motion)
+target_compile_features(tracking_step_test PRIVATE cxx_std_17)
+add_test(NAME tracking_step_test COMMAND $<TARGET_FILE:tracking_step_test>)

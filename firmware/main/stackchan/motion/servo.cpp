@@ -5,6 +5,7 @@
  */
 #include "servo.h"
 #include "servo_executor.h"
+#include "tracking_step.h"
 #include <hal/hal.h>
 #include <cmath>
 
@@ -74,32 +75,30 @@ void Servo::update()
     // velocity between updates and between retargets; never snap to a distant goal.
     if (_profile == Profile::Tracking) {
         const int goal = uitk::clamp(_goal, _angle_limit.x, _angle_limit.y);
-        // Integrate actual elapsed time in bounded steps. The acceleration
-        // bound uses the existing spring damping time scale, not a second speed setting.
         uint32_t elapsed = _last_tick - _tracking_tick;
         _tracking_tick = _last_tick;
-        const float rate = static_cast<float>(_tracking_rate);
-        const float acceleration_limit = rate * _tracking_damping;
-        while (elapsed && _profile == Profile::Tracking) {
-            const uint32_t step = elapsed > 20 ? 20 : elapsed;
-            elapsed -= step;
-            const float dt = step * 0.001f;
-            const float error = goal - _tracking_position;
-            const float acceleration = uitk::clamp(
-                _tracking_stiffness * error - _tracking_damping * _tracking_velocity,
-                -acceleration_limit, acceleration_limit);
-            _tracking_velocity = uitk::clamp(_tracking_velocity + acceleration * dt, -rate, rate);
-            const float next = _tracking_position + _tracking_velocity * dt;
-            if ((error >= 0.0f && next >= goal) || (error <= 0.0f && next <= goal) ||
-                (std::abs(error) <= 0.1f && std::abs(_tracking_velocity) <= 0.1f)) {
-                _tracking_position = static_cast<float>(goal);
-                _tracking_velocity = 0.0f;
-                _profile = Profile::Idle;
-            } else {
-                _tracking_position = uitk::clamp(next, static_cast<float>(_angle_limit.x),
-                                                  static_cast<float>(_angle_limit.y));
-            }
+        if (elapsed > kTrackingReplanMs && !_tracking_replan_pending) {
+            _tracking_replan_pending = true;
+            _tracking_replan_tick = _last_tick - kTrackingReplanMs;
         }
+        if (_tracking_replan_pending) {
+            // A stalled control task must not send all missed time as a
+            // sudden position jump. Resume only from measured feedback.
+            if (_last_tick - _tracking_replan_tick < kTrackingReplanMs) return;
+            _tracking_replan_tick = _last_tick;
+            int measured = 0;
+            if (!tryGetCurrentAngle(measured)) return;
+            _tracking_position = static_cast<float>(uitk::clamp(measured, _angle_limit.x, _angle_limit.y));
+            _tracking_velocity = 0.0f;
+            _tracking_replan_pending = false;
+            elapsed = kTrackingStepMs;
+        }
+        const auto result = AdvanceTracking(_tracking_position, _tracking_velocity,
+            goal, _angle_limit.x, _angle_limit.y, static_cast<float>(_tracking_rate),
+            _tracking_stiffness, _tracking_damping, elapsed);
+        _tracking_position = result.position;
+        _tracking_velocity = result.velocity;
+        if (result.reached) _profile = Profile::Idle;
         const int angle = uitk::clamp(static_cast<int>(std::lround(_tracking_position)), _angle_limit.x, _angle_limit.y);
         if (angle != static_cast<int>(_angle_anim.directValue()) || _profile != Profile::Tracking) {
             _angle_anim.teleport(angle);
@@ -177,9 +176,12 @@ uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     const bool continuing = _profile == Profile::Tracking && _torque_commanded_enabled;
     const bool replacing_sweep = _profile == Profile::HardwareSweep;
-    const float position = continuing ? _tracking_position : static_cast<float>(
+    const bool resume_from_feedback = continuing && _tracking_replan_pending && measured_start;
+    const bool preserve_trajectory = continuing && !resume_from_feedback;
+    const bool pending_replan = preserve_trajectory && _tracking_replan_pending;
+    const float position = preserve_trajectory ? _tracking_position : static_cast<float>(
         uitk::clamp(measured_start ? *measured_start : getCurrentAngle(), _angle_limit.x, _angle_limit.y));
-    const float velocity = continuing ? _tracking_velocity : 0.0f;
+    const float velocity = preserve_trajectory ? _tracking_velocity : 0.0f;
     cancel_profile();
     _tracking_rate = uitk::clamp(speed, 1, 1000);
     const auto options = map_speed_to_spring_options(_tracking_rate);
@@ -190,7 +192,8 @@ uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
     _goal = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(static_cast<int>(std::lround(position)));
     if (!_torque_commanded_enabled) setTorqueEnabled(true);
-    if (!continuing) _tracking_tick = GetHAL().millis();
+    _tracking_replan_pending = pending_replan;
+    if (!preserve_trajectory) _tracking_tick = GetHAL().millis();
     _profile = Profile::Tracking;
     if (replacing_sweep) set_angle_impl(static_cast<int>(std::lround(position)));
     return getCommandRevision();
@@ -317,6 +320,7 @@ void Servo::cancel_profile(bool preserve_spring)
     _command_revision.fetch_add(1, std::memory_order_relaxed);
     _hardware_stop_requested.store(false, std::memory_order_release);
     _timed_move.Cancel();
+    _tracking_replan_pending = false;
     if (preserve_spring && _profile == Profile::Spring) return;
     _profile = Profile::Idle;
     _goal = static_cast<int>(_angle_anim.directValue());

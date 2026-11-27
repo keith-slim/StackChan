@@ -221,6 +221,8 @@ protected:
     float _tracking_stiffness = 0.0f;
     float _tracking_damping = 0.0f;
     uint32_t _tracking_tick = 0;
+    uint32_t _tracking_replan_tick = 0;
+    bool _tracking_replan_pending = false;
     bool _auto_torque_release_enabled = true;
     bool _auto_angle_sync_enabled     = true;
     // Track commands instead of polling the servo while idle with torque off.
