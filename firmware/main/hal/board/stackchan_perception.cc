@@ -315,7 +315,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             const bool face_centered = stackchan::stage1::FaceCenterEligible(raw_x, raw_y, filtered_x, filtered_y);
             stackchan::stage1::NoteCenteredFace(face_centered, captured);
             const float error_x = stackchan::stage1::GuardedFaceError(raw_x, filtered_x, 0.025f);
-            const float error_y = face_pitch.Update(raw_y, filtered_y, face_height);
+            const int pitch_delta = face_pitch.UpdateDelta(raw_y, filtered_y, face_height);
             // 左右は顔が3フレーム中央にあれば固定する。上下は独立した保持条件を使う。
             if (face_center_locked) {
                 if (stackchan::stage1::FaceCenterLost(raw_x, raw_y, filtered_x, filtered_y)) {
@@ -331,7 +331,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             const int yaw_delta = face_center_locked || std::abs(error_x) < 0.025f
                                       ? 0
                                       : static_cast<int>(std::clamp(error_x * 500.0f, -160.0f, 160.0f));
-            const int pitch_delta = static_cast<int>(std::clamp(error_y * 360.0f, -110.0f, 110.0f));
             ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d) face_h=%.3f pitch_band=%.3f",
                      center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
                      yaw_delta, pitch_delta, face_height, face_pitch.ResumeBand());

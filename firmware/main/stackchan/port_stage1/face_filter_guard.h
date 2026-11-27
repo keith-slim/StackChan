@@ -40,6 +40,14 @@ public:
         return std::clamp(face_height_ * kFaceHeightRatio, kMinResume, kMaxResume);
     }
 
+    int UpdateDelta(float raw, float filtered, float face_height) {
+        const float allowed_error = Update(raw, filtered, face_height);
+        // 停止幅を超えた分だけ補正する。生の座標が先に中央へ戻ったときは、その小さい誤差を使う。
+        const float remaining = std::min(std::abs(raw), std::abs(allowed_error)) - StopBand();
+        const float delta = std::clamp(remaining * 200.0f, 0.0f, 110.0f);
+        return static_cast<int>(std::copysign(delta, allowed_error));
+    }
+
     float Update(float raw, float filtered, float face_height = 0.0f) {
         // 初回の顔の大きさで保持幅を決め、その後の枠の揺れはゆっくり反映する。
         if (face_height > 0.0f && face_height <= 1.0f) {
@@ -47,8 +55,7 @@ public:
                 face_height_ + (face_height - face_height_) * kHeightFilterAlpha;
         }
         const float resume = ResumeBand();
-        const float scale = resume / kDefaultResume;
-        const float error = GuardedFaceError(raw, filtered, kStop * scale);
+        const float error = GuardedFaceError(raw, filtered, StopBand());
         if (error == 0.0f) {
             ResetMotion();
             return 0.0f;
@@ -65,7 +72,7 @@ public:
             pending_direction_ = 0;
             return 0.0f;
         }
-        const float immediate = kResumeImmediately * std::max(1.0f, scale);
+        const float immediate = kResumeImmediately * std::max(1.0f, resume / kDefaultResume);
         if (pending_direction_ == direction || (!reversing && displacement >= immediate)) {
             active_direction_ = direction;
             pending_direction_ = 0;
@@ -76,6 +83,7 @@ public:
     }
 
 private:
+    float StopBand() const { return kStop * (ResumeBand() / kDefaultResume); }
     float face_height_ = 0.0f;
     int active_direction_ = 0;
     int pending_direction_ = 0;

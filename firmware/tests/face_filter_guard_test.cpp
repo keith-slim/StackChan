@@ -71,5 +71,13 @@ int main() {
     check(near(near_face.ResumeBand(), 0.060f));
     near_face.Update(0.0f, 0.0f, 0.80f);
     check(near(near_face.ResumeBand(), 0.10f));
+
+    // Replay the sizes and offsets from the near-face oscillation on COM2.
+    FacePitchHold correction;
+    check(correction.UpdateDelta(-0.126f, -0.111f, 0.737f) == 0);
+    check(correction.UpdateDelta(-0.130f, -0.117f, 0.732f) == -11);
+    check(correction.UpdateDelta(-0.065f, -0.117f, 0.730f) == -1);
+    check(correction.UpdateDelta(-0.049f, -0.109f, 0.730f) == 0);
+    check(correction.UpdateDelta(0.250f, 0.211f, 0.731f) == 30);
     std::puts("face_filter_guard_test: passed");
 }
