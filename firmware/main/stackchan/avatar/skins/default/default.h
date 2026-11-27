@@ -55,6 +55,7 @@ public:
 
 private:
     bool _is_left_eye    = false;
+    bool _smiling = false;
     int _eyelid_offset_y = 0;
 
     std::unique_ptr<uitk::lvgl_cpp::Container> _container;

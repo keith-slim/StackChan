@@ -72,7 +72,9 @@ void DefaultEyes::setWeight(int weight)
 {
     Feature::setWeight(weight);
 
-    _eyelid_offset_y = -map_range(_weight, 0, 100, 0, (int)_eyelid->getHeight());
+    const int opening = map_range(_weight, 0, 100, 0, static_cast<int>(_eyelid->getHeight()));
+    // S3 smile: a rounded lower eyelid forms a symmetric upward arch.
+    _eyelid_offset_y = _smiling ? opening / 3 : -opening;
 
     _eyelid->setY(_eyelid_offset_y);
 }
@@ -89,6 +91,9 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
     if (getIgnoreEmotion()) {
         return;
     }
+
+    _smiling = emotion == Emotion::Happy || emotion == Emotion::Fun;
+    _eyelid->setRadius(_smiling ? LV_RADIUS_CIRCLE : 0);
 
     auto apply_style = [this](int weight, int rotation) {
         setWeight(weight);
@@ -110,7 +115,7 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
             break;
         case Emotion::Happy:
         case Emotion::Fun:
-            apply_style(72, 1550);
+            apply_style(72, 0);
             break;
         case Emotion::Angry:
             apply_style(70, 450);
