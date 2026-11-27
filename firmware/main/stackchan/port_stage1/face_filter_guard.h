@@ -8,21 +8,49 @@ inline float GuardedFaceError(float raw, float filtered, float deadband) {
     return std::abs(filtered) < deadband ? 0.0f : filtered;
 }
 
+inline float NormalizedFaceHeight(float top, float bottom, float image_height) {
+    if (!std::isfinite(top) || !std::isfinite(bottom) || !std::isfinite(image_height) ||
+        image_height <= 0.0f || bottom <= top) return 0.0f;
+    return (std::clamp(bottom, 0.0f, image_height) - std::clamp(top, 0.0f, image_height)) /
+           image_height;
+}
+
 class FacePitchHold {
     static constexpr float kStop = 0.035f;
-    static constexpr float kResume = 0.060f;
+    static constexpr float kDefaultResume = 0.060f;
+    static constexpr float kMinResume = 0.035f;
+    static constexpr float kMaxResume = 0.10f;
     static constexpr float kResumeImmediately = 0.10f;
+    static constexpr float kFaceHeightRatio = 0.18f;
+    static constexpr float kHeightFilterAlpha = 0.20f;
 
 public:
     void Reset() {
+        ResetMotion();
+        face_height_ = 0.0f;
+    }
+
+    void ResetMotion() {
         active_direction_ = 0;
         pending_direction_ = 0;
     }
 
-    float Update(float raw, float filtered) {
-        const float error = GuardedFaceError(raw, filtered, kStop);
+    float ResumeBand() const {
+        if (face_height_ == 0.0f) return kDefaultResume;
+        return std::clamp(face_height_ * kFaceHeightRatio, kMinResume, kMaxResume);
+    }
+
+    float Update(float raw, float filtered, float face_height = 0.0f) {
+        // 初回の顔の大きさで保持幅を決め、その後の枠の揺れはゆっくり反映する。
+        if (face_height > 0.0f && face_height <= 1.0f) {
+            face_height_ = face_height_ == 0.0f ? face_height :
+                face_height_ + (face_height - face_height_) * kHeightFilterAlpha;
+        }
+        const float resume = ResumeBand();
+        const float scale = resume / kDefaultResume;
+        const float error = GuardedFaceError(raw, filtered, kStop * scale);
         if (error == 0.0f) {
-            Reset();
+            ResetMotion();
             return 0.0f;
         }
 
@@ -33,11 +61,12 @@ public:
         const bool reversing = active_direction_ != 0;
         active_direction_ = 0;
         const float displacement = std::min(std::abs(raw), std::abs(error));
-        if (displacement < kResume) {
+        if (displacement < resume) {
             pending_direction_ = 0;
             return 0.0f;
         }
-        if (pending_direction_ == direction || (!reversing && displacement >= kResumeImmediately)) {
+        const float immediate = kResumeImmediately * std::max(1.0f, scale);
+        if (pending_direction_ == direction || (!reversing && displacement >= immediate)) {
             active_direction_ = direction;
             pending_direction_ = 0;
             return error;
@@ -47,6 +76,7 @@ public:
     }
 
 private:
+    float face_height_ = 0.0f;
     int active_direction_ = 0;
     int pending_direction_ = 0;
 };
