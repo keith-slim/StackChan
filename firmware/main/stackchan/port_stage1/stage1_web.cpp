@@ -10,6 +10,7 @@
 #include <stackchan/addons/neon_light/rgb_test.h>
 #include "stackchan/wifi/wifi_web.h"
 #include <hal/hal.h>
+#include <hal/board/stackchan_perception.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -84,7 +85,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily" data-page="daily">日常・睡眠</a><a href="#voice" data-page="voice">音声・文言</a><a href="#conversation" data-page="conversation">会話・音声入力</a><a href="#quiet" data-page="quiet">お黙り</a><a href="#environment" data-page="environment">天気・位置</a><a href="#actions" data-page="actions">実機テスト</a><a href="#wifi" data-page="wifi">ネットワーク</a><a href="#device" data-page="device">デバイス・AI</a><a href="#deviceInfo" data-page="deviceInfo">端末情報</a>
+<a href="#daily" data-page="daily">日常・睡眠</a><a href="#voice" data-page="voice">音声・文言</a><a href="#conversation" data-page="conversation">会話・音声入力</a><a href="#quiet" data-page="quiet">お黙り</a><a href="#environment" data-page="environment">天気・位置</a><a href="#actions" data-page="actions">実機テスト</a><a href="/face-monitor" target="_blank" rel="noopener">顔追従モニター ↗</a><a href="#wifi" data-page="wifi">ネットワーク</a><a href="#device" data-page="device">デバイス・AI</a><a href="#deviceInfo" data-page="deviceInfo">端末情報</a>
 </nav></aside><main>
 <h1 id="pageTitle">日常・睡眠</h1>
 <div class="settings-page" data-settings-page="daily">
@@ -951,6 +952,17 @@ esp_err_t Page(httpd_req_t* req) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, PAGE, HTTPD_RESP_USE_STRLEN);
 }
+esp_err_t FaceMonitor(httpd_req_t* req) {
+#if CONFIG_STACKCHAN_PERCEPTION_ENABLED
+    const auto url = StackChanPerception::MonitorUrl();
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", url.c_str());
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, nullptr, 0);
+#else
+    return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Face tracking is disabled");
+#endif
+}
 esp_err_t ReadConfig(httpd_req_t* req) {
     Config c;
     {
@@ -1515,7 +1527,7 @@ bool Start() {
     // IDF 6.1 supports allocating the HTTP server task stack from PSRAM.
     // Keep the HTTPD/lwIP kernel and DMA-only allocations on their default heaps.
     config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    config.max_uri_handlers = 15;
+    config.max_uri_handlers = 16;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -1541,6 +1553,8 @@ bool Start() {
     };
     httpd_uri_t page{};
     page.uri = "/"; page.method = HTTP_GET; page.handler = Page;
+    httpd_uri_t face_monitor{};
+    face_monitor.uri = "/face-monitor"; face_monitor.method = HTTP_GET; face_monitor.handler = FaceMonitor;
     httpd_uri_t read{};
     read.uri = "/api/stage1"; read.method = HTTP_GET; read.handler = ReadConfig;
     httpd_uri_t write{};
@@ -1576,6 +1590,7 @@ bool Start() {
     setup_write.uri = "/api/stage1/setup"; setup_write.method = HTTP_POST;
     setup_write.handler = MonitorPost; setup_write.user_ctx = &posts[7];
     if (httpd_register_uri_handler(server, &page) != ESP_OK ||
+        httpd_register_uri_handler(server, &face_monitor) != ESP_OK ||
         httpd_register_uri_handler(server, &read) != ESP_OK ||
         httpd_register_uri_handler(server, &write) != ESP_OK ||
         httpd_register_uri_handler(server, &action) != ESP_OK ||

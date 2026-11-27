@@ -8,10 +8,12 @@
 #include "board.h"
 #include "stackchan_camera.h"
 #include "stackchan_display.h"
+#include "system_info.h"
 #include "stackchan/port_stage1/port_stage1.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <string>
@@ -20,6 +22,7 @@
 #include <cJSON.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_random.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
@@ -84,6 +87,11 @@ bool JsonNumber(cJSON* object, const char* name, float& value)
     return true;
 }
 }  // namespace
+
+std::string StackChanPerception::MonitorUrl()
+{
+    return Endpoint("/monitor?device=") + SystemInfo::GetMacAddress();
+}
 
 StackChanPerception::StackChanPerception(StackChanCamera* camera, StackChanAvatarDisplay* display)
     : camera_(camera), display_(display)
@@ -193,6 +201,12 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     bool face_sweep_attempted          = false;
     float filtered_center_x           = 0.5f;
     float filtered_center_y           = 0.5f;
+    const std::string monitor_device  = SystemInfo::GetMacAddress();
+    const auto monitor_session        = static_cast<unsigned long>(esp_random());
+    unsigned long frame_number = 0, monitor_frame = 0;
+    const char* monitor_phase = "search";
+    float monitor_band = 0.0f;
+    int monitor_yaw = 0, monitor_pitch = 0;
     ESP_LOGI(kTag, "Realtime face tracking started");
     while (!stop_requested_.load(std::memory_order_acquire) &&
            (esp_timer_get_time() - tracking_started_us) / 1000 < kTrackingMaxMs) {
@@ -239,7 +253,13 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         const uint32_t generation = stackchan::stage1::PerceptionGeneration();
         const uint32_t captured = static_cast<uint32_t>(frame_started_us / 1000);
         bool valid_frame = false;
-        const bool face_detected = PostVision(center_x, center_y, score, face_height,
+        // 前フレームの補正値を次の既存リクエストに乗せ、同じJPEGに対応づける。
+        char monitor_header[112];
+        ++frame_number;
+        std::snprintf(monitor_header, sizeof(monitor_header), "%s,%lu,%lu,%lu,%s,%.4f,%d,%d",
+                      monitor_device.c_str(), monitor_session, frame_number, monitor_frame,
+                      monitor_phase, monitor_band, monitor_yaw, monitor_pitch);
+        const bool face_detected = PostVision(monitor_header, center_x, center_y, score, face_height,
                                              body_target_x, body_target_y, body_score, valid_frame);
         // A request already in flight may complete after speech starts.
         if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking ||
@@ -255,6 +275,10 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
             continue;
         }
+        monitor_frame = frame_number;
+        monitor_phase = "search";
+        monitor_band = 0.0f;
+        monitor_yaw = monitor_pitch = 0;
         if (stackchan::stage1::IsPersonSearchActive()) {
             face_pitch.Reset();
             if (valid_frame && ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore)) {
@@ -334,7 +358,12 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d) face_h=%.3f pitch_band=%.3f",
                      center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
                      yaw_delta, pitch_delta, face_height, face_pitch.ResumeBand());
-            stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true, captured, generation);
+            monitor_phase = "face";
+            monitor_band = face_pitch.ResumeBand();
+            if (stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true, captured, generation)) {
+                monitor_yaw = yaw_delta;
+                monitor_pitch = pitch_delta;
+            }
         } else if (stackchan::stage1::IsFacePitchSearchRequested()) {
             // Keep acquiring faces while pitch sweeps; don't replace the sweep
             // with a zero/deadband body correction or a transient missing frame.
@@ -360,7 +389,11 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                                             : static_cast<int>(std::clamp(error_y * 300.0f, -100.0f, 100.0f));
                 ESP_LOGI(kTag, "Track body head_hint=(%.3f,%.3f) score=%.3f correction=(%d,%d)",
                          body_target_x, body_target_y, body_score, yaw_delta, pitch_delta);
-                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, false, captured, generation);
+                monitor_phase = "body";
+                if (stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, false, captured, generation)) {
+                    monitor_yaw = yaw_delta;
+                    monitor_pitch = pitch_delta;
+                }
             }
         } else {
             ++face_missing_frames;
@@ -409,7 +442,7 @@ bool StackChanPerception::PostAudio(const int16_t* pcm, size_t frames, float& an
     return ok;
 }
 
-bool StackChanPerception::PostVision(float& center_x, float& center_y, float& score, float& face_height,
+bool StackChanPerception::PostVision(const char* monitor, float& center_x, float& center_y, float& score, float& face_height,
                                      float& body_target_x, float& body_target_y, float& body_score, bool& valid_frame)
 {
     valid_frame = false;
@@ -418,7 +451,8 @@ bool StackChanPerception::PostVision(float& center_x, float& center_y, float& sc
     if (!camera_->CaptureJpeg(&jpeg, &jpeg_size, 55) || !jpeg || jpeg_size == 0) return false;
     std::string response;
     const bool posted =
-        Post(Endpoint("/v1/vision/detect"), "image/jpeg", jpeg, jpeg_size, kVisionTimeoutMs, {}, response);
+        Post(Endpoint("/v1/vision/detect"), "image/jpeg", jpeg, jpeg_size, kVisionTimeoutMs,
+             {{"X-StackChan-Monitor", monitor}}, response);
     heap_caps_free(jpeg);
     if (!posted) return false;
 

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 class StackChanCamera;
 class StackChanAvatarDisplay;
@@ -17,6 +18,7 @@ public:
     void OnAudioInputFrame(const int16_t* samples, size_t frames, size_t channels, size_t microphone_channels);
     void OnWakeWordDetected();
     void OnConversationEnded();
+    static std::string MonitorUrl();
 
 private:
     static constexpr size_t kSampleRate     = 16000;
@@ -26,7 +28,7 @@ private:
     static void WorkerEntry(void* context);
     void RunWorker(uint64_t snapshot_end);
     bool PostAudio(const int16_t* pcm, size_t frames, float& angle_deg, float& confidence);
-    bool PostVision(float& center_x, float& center_y, float& score, float& face_height,
+    bool PostVision(const char* monitor, float& center_x, float& center_y, float& score, float& face_height,
                     float& body_target_x, float& body_target_y, float& body_score, bool& valid_frame);
 
     StackChanCamera* camera_ = nullptr;
