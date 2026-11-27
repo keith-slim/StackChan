@@ -1,6 +1,7 @@
 // Web access to the existing SETUP application's settings.
 // Never initialize or erase NVS, and never perform reset/OTA actions here.
 #include "setup_web.h"
+#include <stackchan/config/server_endpoint.h>
 #include "wake_net_threshold.h"
 #include "conversation_audio_settings.h"
 #include "application.h"
@@ -57,14 +58,14 @@ bool QueueConversationAudio(ConversationAudio::Settings value) {
     }
     return true;
 }
-constexpr size_t kMaxServerBase = 192;
-constexpr size_t kMaxEndpoint = 256;
+using config::server_endpoint::kMaxServerBase;
+using config::server_endpoint::kMaxEndpoint;
+using config::server_endpoint::BuildServerEndpoints;
+using config::server_endpoint::ServerBaseFromOta;
 constexpr const char* kOtaNamespace = "wifi";
 constexpr const char* kOtaKey = "ota_url";
 constexpr const char* kWebsocketNamespace = "websocket";
 constexpr const char* kWebsocketKey = "url";
-constexpr const char* kOtaSuffix = "/xiaozhi/ota/";
-constexpr const char* kWebsocketSuffix = "/xiaozhi/ws";
 
 extern "C" bool stackchan_sd_nvs_backup_pending(void);
 extern "C" void stackchan_nvs_commit_observer(void);
@@ -125,49 +126,6 @@ bool ReadStoredString(const char* name_space, const char* key,
     }
     output[capacity - 1] = '\0';
     return true;
-}
-bool ValidServerBase(const char* value) {
-    if (!value) return false;
-    const size_t length = std::strlen(value);
-    if (length < 8 || length > kMaxServerBase) return false;
-    const char* authority = nullptr;
-    if (std::strncmp(value, "http://", 7) == 0) authority = value + 7;
-    else if (std::strncmp(value, "https://", 8) == 0) authority = value + 8;
-    else return false;
-    if (!*authority || *authority == '/') return false;
-    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(authority); *p; ++p) {
-        if (*p <= 0x20 || *p == 0x7f || *p == '"' || *p == '\\' ||
-            *p == '?' || *p == '#' || *p == '@') return false;
-        if (*p == '/' && p[1] != '\0') return false;
-    }
-    return true;
-}
-bool BuildServerEndpoints(const char* base, char* ota, size_t ota_capacity,
-                          char* websocket, size_t websocket_capacity) {
-    if (!ValidServerBase(base)) return false;
-    char normalized[kMaxServerBase + 1]{};
-    std::snprintf(normalized, sizeof(normalized), "%s", base);
-    const size_t length = std::strlen(normalized);
-    if (length && normalized[length - 1] == '/') normalized[length - 1] = '\0';
-    const char* authority = std::strstr(normalized, "://");
-    if (!authority) return false;
-    authority += 3;
-    const char* ws_scheme = std::strncmp(normalized, "https://", 8) == 0 ? "wss" : "ws";
-    const int ota_length = std::snprintf(ota, ota_capacity, "%s%s", normalized, kOtaSuffix);
-    const int websocket_length = std::snprintf(websocket, websocket_capacity, "%s://%s%s",
-                                               ws_scheme, authority, kWebsocketSuffix);
-    return ota_length > 0 && static_cast<size_t>(ota_length) < ota_capacity &&
-           websocket_length > 0 && static_cast<size_t>(websocket_length) < websocket_capacity;
-}
-bool ServerBaseFromOta(const char* ota, char* output, size_t capacity) {
-    if (!ota || !output || capacity == 0) return false;
-    const size_t length = std::strlen(ota);
-    const size_t suffix_length = std::strlen(kOtaSuffix);
-    if (length <= suffix_length || std::strcmp(ota + length - suffix_length, kOtaSuffix) != 0 ||
-        length - suffix_length >= capacity) return false;
-    std::memcpy(output, ota, length - suffix_length);
-    output[length - suffix_length] = '\0';
-    return ValidServerBase(output);
 }
 bool SaveServerEndpoints(const char* ota, const char* websocket) {
     nvs_handle_t ota_handle = 0;
