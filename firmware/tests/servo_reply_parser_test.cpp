@@ -25,5 +25,12 @@ int main() {
     { ReplyParser p(2,15,56,true); std::vector<uint8_t> data(15,123); check(feed(p,frame(2,0,data))); uint8_t out[15]; p.CopyData(out); for(auto b:out) check(b==123); }
     { ReplyParser p(1,0,0,false); check(!feed(p,frame(2,0,{}))); check(feed(p,frame(1,0,{}))); }
     { ReplyParser p(1,2,56,true); check(!feed(p,{255,255,1,4,0,1})); check(feed(p,valid)); }
-    std::puts("servo_reply_parser_test: 9 cases passed");
+    // A complete embedded reply after a truncated leading frame is already
+    // available at the final byte; no extra byte may be required to rescan.
+    { ReplyParser p(1,15,56,true); auto reply=frame(1,0,std::vector<uint8_t>(15,12)); auto prefix=std::vector<uint8_t>{255,255,1,17,0}; prefix.insert(prefix.end(),reply.begin(),reply.end()); check(feed(p,prefix)); }
+    { ReplyParser p(2,15,56,true); auto ack=frame(1,0,{}); ReplyParser::Event e=ReplyParser::Event::None; for(auto b:ack)e=p.Feed(b); check(e==ReplyParser::Event::AckSkipped); check(feed(p,frame(2,0,std::vector<uint8_t>(15,123)))); }
+    { auto echo=frame(1,3,{42,0,100,0,20,0,0}); ReplyParser p(1,0,0,false,echo.data(),echo.size()); check(!feed(p,echo)); check(feed(p,frame(1,0,{}))); uint8_t out[6]{}; p.CopyFrame(out); check(out[2]==1&&out[3]==2&&out[4]==0); }
+    { ReplyParser p(2,15,56,true); check(!feed(p,frame(2,2,{56,15}))); check(feed(p,frame(2,0,std::vector<uint8_t>(15,123)))); }
+    { ReplyParser p(1,1,66,true); check(!feed(p,frame(1,0,{}))); check(feed(p,frame(1,0,{1}))); }
+    std::puts("servo_reply_parser_test: 14 cases passed");
 }

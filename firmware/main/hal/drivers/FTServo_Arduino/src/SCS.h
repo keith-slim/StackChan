@@ -75,7 +75,7 @@ protected:
 	virtual int writeSCS(unsigned char bDat) = 0;
 	virtual void rFlushSCS() = 0;
 	virtual void wFlushSCS() = 0;
-	virtual int readOptionalAck(u8* data, int count) { return 0; }
+	virtual int readOptionalAck(u8 id, u8* data, int count) { (void)id; (void)data; (void)count; return 0; }
 	virtual bool transmissionOk() const { return true; }
 protected:
 	void writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun);

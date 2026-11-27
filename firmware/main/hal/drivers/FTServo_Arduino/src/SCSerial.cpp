@@ -6,6 +6,8 @@
  */
 
 #include "SCSerial.h"
+#include "servo_reply_parser.h"
+#include <cstring>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -105,22 +107,20 @@ int SCSerial::readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bo
 	    call_started + static_cast<int64_t>(timeout) * 1000;
 	unsigned char discard[32];
 	while (size < nLen) {
-		size_t available = 0;
-		uart_get_buffered_data_len(uart_num, &available);
-		if (available > 0) {
-			size_t count = static_cast<size_t>(nLen - size);
-			if (count > available) count = available;
-			if (!nDat && count > sizeof(discard)) count = sizeof(discard);
-			const int len = uart_read_bytes(uart_num, nDat ? nDat + size : discard, count, 0);
-			if (len > 0) {
-				size += len;
-				if (size >= nLen) break;
-				if (esp_timer_get_time() >= deadline) break;
-				continue; // Drain buffered bytes without yielding between bytes.
-			}
-		}
+		const int64_t remaining = deadline - esp_timer_get_time();
+		if (remaining <= 0) break;
+		size_t count = static_cast<size_t>(nLen - size);
+		if (!nDat && count > sizeof(discard)) count = sizeof(discard);
+		// Wake as soon as the UART driver publishes data rather than
+		// sleeping for a full tick after every empty buffer check.
+		const int64_t tick_us = static_cast<int64_t>(portTICK_PERIOD_MS) * 1000;
+		const TickType_t ticks = static_cast<TickType_t>((remaining + tick_us - 1) / tick_us);
+		const int len = uart_read_bytes(uart_num, nDat ? nDat + size : discard, count, ticks);
+		if (len <= 0) break;
+		// A task preempted beyond its transaction deadline must not
+		// accept late bytes as feedback from the current command.
 		if (esp_timer_get_time() >= deadline) break;
-		vTaskDelay(1);
+		size += len;
 	}
 	const uint32_t elapsed = esp_timer_get_time() - call_started;
 	++_rx_calls;
@@ -139,6 +139,16 @@ int SCSerial::readSCS(unsigned char *nDat, int nLen)
 	return readBytes(nDat, nLen, IOTimeOut, true);
 }
 
+void SCSerial::rememberTx(const u8* data, int count)
+{
+	if (!_tx_frame_complete || count < 0 || count > static_cast<int>(sizeof(_tx_frame)) - _tx_frame_size) {
+		_tx_frame_complete = false;
+		return;
+	}
+	std::memcpy(_tx_frame + _tx_frame_size, data, count);
+	_tx_frame_size += count;
+}
+
 int SCSerial::writeSCS(unsigned char *nDat, int nLen)
 {
 	if (uart_num >= UART_NUM_MAX || nDat == NULL || !_tx_ok) {
@@ -147,6 +157,7 @@ int SCSerial::writeSCS(unsigned char *nDat, int nLen)
 
 	const int sent = uart_write_bytes(uart_num, reinterpret_cast<const char *>(nDat), nLen);
 	if (sent != nLen) _tx_ok = false;
+	else rememberTx(nDat, nLen);
 	return sent;
 }
 
@@ -158,6 +169,7 @@ int SCSerial::writeSCS(unsigned char bDat)
 
 	const int sent = uart_write_bytes(uart_num, reinterpret_cast<const char *>(&bDat), 1);
 	if (sent != 1) _tx_ok = false;
+	else rememberTx(&bDat, 1);
 	return sent;
 }
 
@@ -171,6 +183,8 @@ void SCSerial::rFlushSCS()
 	// After a failed TX, do not append another frame to undrained bytes.
 	if (!_tx_ok && uart_wait_tx_done(uart_num, 0) != ESP_OK) return;
 	_tx_ok = true;
+	_tx_frame_size = 0;
+	_tx_frame_complete = true;
 	drainEvents();
 	uart_flush_input(uart_num);
 }
@@ -195,21 +209,40 @@ void SCSerial::wFlushSCS()
 
 // Optional write replies: bounded microsecond polling, independent of RTOS tick.
 // Do not impose a full read timeout when a servo does not return an ACK.
-int SCSerial::readOptionalAck(u8* data, int count)
+int SCSerial::readOptionalAck(u8 id, u8* data, int count)
 {
-	if (uart_num >= UART_NUM_MAX || !data || count <= 0 || !_tx_ok) return 0;
+	if (uart_num >= UART_NUM_MAX || !data || count != 6 || !_tx_ok) return 0;
 	const int64_t started = esp_timer_get_time();
-	const int64_t deadline = started + 1000;
-	int size = 0;
-	while (size < count) {
-		const int received = uart_read_bytes(uart_num, data + size, count - size, 0);
-		if (received > 0) size += received;
-		if (size == count || esp_timer_get_time() >= deadline) break;
-		esp_rom_delay_us(20);
+	const int64_t deadline = started + 1000; // preserve the existing ACK budget
+	ftservo::ReplyParser parser(id, 0, 0, false, _tx_frame_complete ? _tx_frame : nullptr,
+	                            _tx_frame_complete ? _tx_frame_size : 0);
+	int seen = 0;
+	int result = 0;
+	bool resynced = false;
+	while (seen < 64 && esp_timer_get_time() < deadline) {
+		u8 byte = 0;
+		if (uart_read_bytes(uart_num, &byte, 1, 0) != 1) {
+			esp_rom_delay_us(20);
+			continue;
+		}
+		++seen;
+		if (esp_timer_get_time() >= deadline) break;
+		const auto event = parser.Feed(byte);
+		if (event == ftservo::ReplyParser::Event::Match) {
+			parser.CopyFrame(data);
+			result = count;
+			if (resynced || seen != count) ++_ack_resync;
+			break;
+		}
+		if (event == ftservo::ReplyParser::Event::Echo) { ++_ack_echo; resynced = true; }
+		if (event == ftservo::ReplyParser::Event::Header || event == ftservo::ReplyParser::Event::Checksum)
+			resynced = true;
 	}
 	const uint32_t elapsed = esp_timer_get_time() - started;
 	if (elapsed > _ack_max_us) _ack_max_us = elapsed;
-	return size;
+	// The caller distinguishes no reply from malformed data. Only a full,
+	// verified ACK returns six bytes; never expose uninitialized frame data.
+	return result ? result : (seen ? 1 : 0);
 }
 
 void SCSerial::drainEvents()
@@ -242,5 +275,6 @@ void SCSerial::reportDiagnostics()
 	ESP_LOGI(TAG, "[SERVO_IO] rx_calls=%lu rx_short=%lu rx_max_us=%lu ack_max_us=%lu tx_max_us=%lu tx_fail=%lu",
 	         (unsigned long)_rx_calls, (unsigned long)_rx_short, (unsigned long)_rx_max_us,
 	         (unsigned long)_ack_max_us, (unsigned long)_tx_max_us, (unsigned long)_tx_fail);
+	ESP_LOGI(TAG, "[SERVO_RX_RESYNC] ack_echo=%lu ack_resync=%lu", (unsigned long)_ack_echo, (unsigned long)_ack_resync);
 	_rx_max_us = _ack_max_us = _tx_max_us = 0;
 }

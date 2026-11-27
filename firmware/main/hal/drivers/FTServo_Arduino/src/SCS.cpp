@@ -228,6 +228,9 @@ int SCS::Read(u8 ID, u8 MemAddr, u8 *nData, u8 nLen)
         case ftservo::ReplyParser::Event::Checksum:
             u8Error = ERR_CRC_CMP;
             break;
+        case ftservo::ReplyParser::Event::AckSkipped:
+            if (ID == 1 || ID == 2) ++read_header_diag[ID - 1][nLen > 2 ? 1 : 0].ack_skipped;
+            break;
         case ftservo::ReplyParser::Event::Echo:
             if (ID == 1 || ID == 2) ++read_header_diag[ID - 1][nLen > 2 ? 1 : 0].read_echo_prefix;
             break;
@@ -327,11 +330,12 @@ bool SCS::validAck(u8 id, const u8* body)
 int	SCS::Ack(u8 ID)
 {
 	u8Error = 0;
+	u8Status = 0;
 	if (!transmissionOk()) { u8Error = ERR_NO_REPLY; return 0; }
 	if (!Level && (ID == 1 || ID == 2)) {
 		u8 frame[6];
 		auto& d = write_ack_diag[ID - 1];
-		const int received = readOptionalAck(frame, sizeof(frame));
+		const int received = readOptionalAck(ID, frame, sizeof(frame));
 		if (received == 0) ++d.absent;
 		else if (received == sizeof(frame) && frame[0] == 0xff &&
 		         frame[1] == 0xff && validAck(ID, frame + 2)) {
