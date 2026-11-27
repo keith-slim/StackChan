@@ -33,6 +33,8 @@ private:
 	uint32_t _event_full = 0, _rx_calls = 0, _rx_short = 0, _rx_max_us = 0, _ack_max_us = 0;
 	uint32_t _tx_max_us = 0, _tx_fail = 0;
 	int64_t _report_us = 0;
+	int64_t _reply_deadline_us = 0;
+	bool _tx_ok = true;
 	void drainEvents();
 	int readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bool interByteTimeout);
 protected:
@@ -43,6 +45,7 @@ protected:
 	void rFlushSCS();//
 	void wFlushSCS();//
 	int readOptionalAck(u8* data, int count) override;
+	bool transmissionOk() const override { return _tx_ok; }
 public:
 	unsigned long IOTimeOut;//输入输出超时
 	uart_port_t uart_num;//串口编号

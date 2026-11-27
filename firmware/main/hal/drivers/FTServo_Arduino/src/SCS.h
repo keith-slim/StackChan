@@ -76,6 +76,7 @@ protected:
 	virtual void rFlushSCS() = 0;
 	virtual void wFlushSCS() = 0;
 	virtual int readOptionalAck(u8* data, int count) { return 0; }
+	virtual bool transmissionOk() const { return true; }
 protected:
 	void writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun);
 	void Host2SCS(u8 *DataL, u8* DataH, u16 Data);//1个16位数拆分为2个8位数

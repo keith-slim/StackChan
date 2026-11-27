@@ -41,3 +41,8 @@ add_executable(server_boot_policy_test server_boot_policy_test.cpp)
 target_include_directories(server_boot_policy_test PRIVATE ../main)
 target_compile_features(server_boot_policy_test PRIVATE cxx_std_17)
 add_test(NAME server_boot_policy_test COMMAND $<TARGET_FILE:server_boot_policy_test>)
+
+add_executable(servo_reply_parser_test servo_reply_parser_test.cpp)
+target_include_directories(servo_reply_parser_test PRIVATE ../main/hal/drivers/FTServo_Arduino/src)
+target_compile_features(servo_reply_parser_test PRIVATE cxx_std_17)
+add_test(NAME servo_reply_parser_test COMMAND $<TARGET_FILE:servo_reply_parser_test>)

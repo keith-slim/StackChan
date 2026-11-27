@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 #include "SCS.h"
+#include "servo_reply_parser.h"
 
 SCS::SCS()
 {
@@ -198,67 +199,42 @@ void SCS::recordReadHeader(u8 id, u8 address, u8 count, const u8* header,
 
 int SCS::Read(u8 ID, u8 MemAddr, u8 *nData, u8 nLen)
 {
-	const u8 previous_id = last_tx_id;
-	const u8 previous_command = last_tx_command;
-	const u8 previous_address = last_tx_address;
-	rFlushSCS();
-	writeBuf(ID, MemAddr, &nLen, 1, INST_READ);
-	wFlushSCS();
-	u8Error = 0;
-	u8 bBuf[4];
-	u8Status = 0;
-	// Only discard checksum-valid, zero-data status frames during a data read.
-	// Bound the number of skipped replies; keep normal bulk payload reads.
-	for (int skipped = 0;;) {
-		if (!checkHead() || readSCS(bBuf, 3) != 3) {
-			u8Error = ERR_NO_REPLY;
-			return 0;
-		}
-		if (nLen == 0 || bBuf[1] != 2 ||
-		    (bBuf[0] != 1 && bBuf[0] != 2) || skipped >= 2) break;
-		recordReadHeader(ID, MemAddr, nLen, bBuf, previous_id, previous_command, previous_address);
-		if (readSCS(bBuf + 3, 1) != 1) {
-			u8Error = ERR_NO_REPLY;
-			return 0;
-		}
-		if (!validAck(bBuf[0], bBuf)) {
-			u8Error = ERR_CRC_CMP;
-			return 0;
-		}
-		if (ID == 1 || ID == 2) ++read_header_diag[ID - 1][nLen > 2 ? 1 : 0].ack_skipped;
-		++skipped;
-	}
-	if(bBuf[0]!=ID && ID!=0xfe){
-		recordReadHeader(ID, MemAddr, nLen, bBuf, previous_id, previous_command, previous_address);
-		u8Error = ERR_SLAVE_ID;
-		return 0;
-	}
-	if(bBuf[1]!=(nLen+2)){
-		recordReadHeader(ID, MemAddr, nLen, bBuf, previous_id, previous_command, previous_address);
-		u8Error = ERR_BUFF_LEN;
-		return 0;
-	}
-	int Size = readSCS(nData, nLen);
-	if(Size!=nLen){
-		u8Error = ERR_NO_REPLY;
-		return 0;
-	}
-	if(readSCS(bBuf+3, 1)!=1){
-		u8Error = ERR_NO_REPLY;
-		return 0;
-	}
-	u8 calSum = bBuf[0]+bBuf[1]+bBuf[2];
-	u8 i;
-	for(i=0; i<Size; i++){
-		calSum += nData[i];
-	}
-	calSum = ~calSum;
-	if(calSum!=bBuf[3]){
-		u8Error = ERR_CRC_CMP;
-		return 0;
-	}
-	u8Status = bBuf[2];
-	return Size;
+    if (!nData || !nLen || nLen > 253) { u8Error = ERR_BUFF_LEN; return 0; }
+    const u8 previous_id = last_tx_id;
+    const u8 previous_command = last_tx_command;
+    const u8 previous_address = last_tx_address;
+    rFlushSCS();
+    writeBuf(ID, MemAddr, &nLen, 1, INST_READ);
+    wFlushSCS();
+    u8Status = 0;
+    u8Error = ERR_NO_REPLY;
+    if (!transmissionOk()) return 0;
+    ftservo::ReplyParser parser(ID, nLen, MemAddr, true);
+    // SCSerial shares one response deadline across these reads. The byte
+    // budget also bounds CPU work when malformed data is continuously queued.
+    for (unsigned i = 0; i < static_cast<unsigned>(nLen) + 70; ++i) {
+        u8 byte = 0;
+        if (readSCS(&byte, 1) != 1) break;
+        switch (parser.Feed(byte)) {
+        case ftservo::ReplyParser::Event::Match:
+            parser.CopyData(nData);
+            u8Status = parser.Status();
+            u8Error = 0;
+            return nLen;
+        case ftservo::ReplyParser::Event::Header:
+            recordReadHeader(ID, MemAddr, nLen, parser.Header(), previous_id, previous_command, previous_address);
+            u8Error = parser.Header()[0] != ID ? ERR_SLAVE_ID : ERR_BUFF_LEN;
+            break;
+        case ftservo::ReplyParser::Event::Checksum:
+            u8Error = ERR_CRC_CMP;
+            break;
+        case ftservo::ReplyParser::Event::Echo:
+            if (ID == 1 || ID == 2) ++read_header_diag[ID - 1][nLen > 2 ? 1 : 0].read_echo_prefix;
+            break;
+        default: break;
+        }
+    }
+    return 0;
 }
 
 //读1字节，超时返回-1
@@ -351,6 +327,7 @@ bool SCS::validAck(u8 id, const u8* body)
 int	SCS::Ack(u8 ID)
 {
 	u8Error = 0;
+	if (!transmissionOk()) { u8Error = ERR_NO_REPLY; return 0; }
 	if (!Level && (ID == 1 || ID == 2)) {
 		u8 frame[6];
 		auto& d = write_ack_diag[ID - 1];
@@ -428,7 +405,7 @@ void SCS::syncReadBegin(u8 IDN, u8 rxLen, u32 TimeOut)
 void SCS::syncReadEnd()
 {
 	if(syncReadRxBuff){
-		delete syncReadRxBuff;
+		delete[] syncReadRxBuff;
 		syncReadRxBuff = NULL;
 	}
 }

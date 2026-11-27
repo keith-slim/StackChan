@@ -97,11 +97,12 @@ void SCSerial::end()
 
 int SCSerial::readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bool interByteTimeout)
 {
-	if (uart_num >= UART_NUM_MAX || nLen <= 0) return 0;
+	if (uart_num >= UART_NUM_MAX || nLen <= 0 || !_tx_ok) return 0;
 
 	int size = 0;
 	const int64_t call_started = esp_timer_get_time();
-	int64_t started = call_started / 1000;
+	const int64_t deadline = interByteTimeout ? _reply_deadline_us :
+	    call_started + static_cast<int64_t>(timeout) * 1000;
 	unsigned char discard[32];
 	while (size < nLen) {
 		size_t available = 0;
@@ -113,13 +114,12 @@ int SCSerial::readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bo
 			const int len = uart_read_bytes(uart_num, nDat ? nDat + size : discard, count, 0);
 			if (len > 0) {
 				size += len;
-				if (interByteTimeout) started = esp_timer_get_time() / 1000;
 				if (size >= nLen) break;
-				if (esp_timer_get_time() / 1000 - started > static_cast<int64_t>(timeout)) break;
+				if (esp_timer_get_time() >= deadline) break;
 				continue; // Drain buffered bytes without yielding between bytes.
 			}
 		}
-		if (esp_timer_get_time() / 1000 - started > static_cast<int64_t>(timeout)) break;
+		if (esp_timer_get_time() >= deadline) break;
 		vTaskDelay(1);
 	}
 	const uint32_t elapsed = esp_timer_get_time() - call_started;
@@ -141,20 +141,24 @@ int SCSerial::readSCS(unsigned char *nDat, int nLen)
 
 int SCSerial::writeSCS(unsigned char *nDat, int nLen)
 {
-	if (uart_num >= UART_NUM_MAX || nDat == NULL) {
+	if (uart_num >= UART_NUM_MAX || nDat == NULL || !_tx_ok) {
 		return 0;
 	}
 
-	return uart_write_bytes(uart_num, reinterpret_cast<const char *>(nDat), nLen);
+	const int sent = uart_write_bytes(uart_num, reinterpret_cast<const char *>(nDat), nLen);
+	if (sent != nLen) _tx_ok = false;
+	return sent;
 }
 
 int SCSerial::writeSCS(unsigned char bDat)
 {
-	if (uart_num >= UART_NUM_MAX) {
+	if (uart_num >= UART_NUM_MAX || !_tx_ok) {
 		return 0;
 	}
 
-	return uart_write_bytes(uart_num, reinterpret_cast<const char *>(&bDat), 1);
+	const int sent = uart_write_bytes(uart_num, reinterpret_cast<const char *>(&bDat), 1);
+	if (sent != 1) _tx_ok = false;
+	return sent;
 }
 
 void SCSerial::rFlushSCS()
@@ -163,6 +167,10 @@ void SCSerial::rFlushSCS()
 		return;
 	}
 
+	_reply_deadline_us = 0;
+	// After a failed TX, do not append another frame to undrained bytes.
+	if (!_tx_ok && uart_wait_tx_done(uart_num, 0) != ESP_OK) return;
+	_tx_ok = true;
 	drainEvents();
 	uart_flush_input(uart_num);
 }
@@ -174,9 +182,11 @@ void SCSerial::wFlushSCS()
 	}
 
 	const int64_t started = esp_timer_get_time();
-	const esp_err_t result = uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100));
+	const esp_err_t result = _tx_ok ? uart_wait_tx_done(uart_num, pdMS_TO_TICKS(20)) : ESP_FAIL;
 	const uint32_t elapsed = esp_timer_get_time() - started;
 	if (elapsed > _tx_max_us) _tx_max_us = elapsed;
+	_tx_ok = result == ESP_OK;
+	_reply_deadline_us = _tx_ok ? esp_timer_get_time() + static_cast<int64_t>(IOTimeOut) * 1000 : 0;
 	if (result != ESP_OK) {
 		++_tx_fail;
 		ESP_LOGW(TAG, "servo TX completion failed: %s", esp_err_to_name(result));
@@ -187,7 +197,7 @@ void SCSerial::wFlushSCS()
 // Do not impose a full read timeout when a servo does not return an ACK.
 int SCSerial::readOptionalAck(u8* data, int count)
 {
-	if (uart_num >= UART_NUM_MAX || !data || count <= 0) return 0;
+	if (uart_num >= UART_NUM_MAX || !data || count <= 0 || !_tx_ok) return 0;
 	const int64_t started = esp_timer_get_time();
 	const int64_t deadline = started + 1000;
 	int size = 0;
