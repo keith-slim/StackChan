@@ -69,7 +69,7 @@ std::atomic<bool> search_active{false};
 std::atomic<bool> wake_pitch_pending{false};
 // The same owned command and feedback path is used by yaw and pitch search.
 constexpr int kPerceptionRate = 200; // tenths of a degree per second
-constexpr int kFaceTrackingRate = 200; // face following only
+constexpr int kFaceTrackingRate = 300; // face following only
 constexpr int kFacePitchSearchRate = 200; // vertical face search only
 constexpr int kPersonSearchRate = 400; // horizontal search only
 // Physical servo resolution and settled offset differ by axis (0.1-degree units).
