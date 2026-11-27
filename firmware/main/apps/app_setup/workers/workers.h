@@ -93,75 +93,13 @@ public:
     void update() override;
 
 private:
-    enum class State {
-        None,
-        AppDownload,
-        WaitAppConnection,
-        AppConnected,
-        Done,
-    };
-
-    State _state      = State::AppDownload;
-    State _last_state = State::None;
-
-    uint32_t _last_tick = 0;
-    bool _is_first_in   = false;
-
-    AppConfigEvent _last_app_config_event = AppConfigEvent::None;
-    int _app_config_signal_id             = -1;
-
-    struct StateAppDownloadData {
-        std::unique_ptr<uitk::lvgl_cpp::Container> panel;
-        std::unique_ptr<uitk::lvgl_cpp::Label> title;
-        std::unique_ptr<uitk::lvgl_cpp::Qrcode> qrcode_ios;
-        std::unique_ptr<uitk::lvgl_cpp::Qrcode> qrcode_android;
-        std::unique_ptr<uitk::lvgl_cpp::Label> label_ios;
-        std::unique_ptr<uitk::lvgl_cpp::Label> label_android;
-        std::unique_ptr<uitk::lvgl_cpp::Button> btn_next;
-        std::unique_ptr<uitk::lvgl_cpp::Button> btn_quit;
-        std::unique_ptr<uitk::lvgl_cpp::Label> info;
-        bool next_clicked = false;
-        bool quit_clicked = false;
-
-        void reset()
-        {
-            panel.reset();
-            title.reset();
-            qrcode_ios.reset();
-            qrcode_android.reset();
-            label_ios.reset();
-            label_android.reset();
-            btn_next.reset();
-            btn_quit.reset();
-            info.reset();
-            next_clicked = false;
-            quit_clicked = false;
-        }
-    };
-    StateAppDownloadData _state_app_download_data;
-
-    struct StateWaitAppConnectionData {
-        std::unique_ptr<uitk::lvgl_cpp::Container> panel;
-        std::unique_ptr<uitk::lvgl_cpp::Button> btn_id;
-        std::unique_ptr<uitk::lvgl_cpp::Label> info;
-
-        void reset()
-        {
-            panel.reset();
-            btn_id.reset();
-            info.reset();
-        }
-    };
-    StateWaitAppConnectionData _state_wait_app_connection_data;
-
-    struct StateDoneData {
-        int reboot_count = 0;
-    };
-    StateDoneData _state_done_data;
-
-    void update_state();
-    void cleanup_ui();
-    void switch_state(State newState);
+    void stop_ap();
+    std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _info;
+    std::unique_ptr<uitk::lvgl_cpp::Button> _back;
+    bool _started = false;
+    bool _provisioning = false;
+    bool _close_requested = false;
 };
 
 /**

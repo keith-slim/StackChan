@@ -682,11 +682,11 @@ public:
         GetBacklight()->RestoreBrightness();
     }
 
-    // All fallback paths (no saved SSID, timeout, explicit reconfiguration) use
-    // the same BLE App setup flow. Never start the upstream configuration AP.
+    // Return to the launcher-owned local configuration AP without running
+    // the AI application or creating another Wi-Fi manager.
     void StartWifiConfigMode() override
     {
-        ESP_LOGW(TAG, "WiFi setup required; opening StackChan App setup");
+        ESP_LOGW(TAG, "WiFi setup required; opening local configuration AP");
         GetHAL().requestAppSetup();
     }
 

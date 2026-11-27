@@ -28,10 +28,10 @@ void AppLauncher::onLauncherOpen()
     LvglLockGuard lock;
 
     if (!_startup_checked && GetHAL().consumeAppSetupRequest()) {
-        mclog::tagInfo(getAppInfo().name, "resume App setup after network/binding failure");
+        mclog::tagInfo(getAppInfo().name, "resume local Wi-Fi setup after connection failure");
         _startup_worker = std::make_unique<setup_workers::WifiSetupWorker>();
-    } else if (!_startup_checked && !GetHAL().isAppConfiged()) {
-        mclog::tagInfo(getAppInfo().name, "app not configured, start startup worker");
+    } else if (!_startup_checked && !GetHAL().hasSavedWifi()) {
+        mclog::tagInfo(getAppInfo().name, "no saved Wi-Fi, start startup worker");
         _startup_worker = std::make_unique<setup_workers::StartupWorker>();
     } else {
         create_launcher_view();

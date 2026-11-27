@@ -54,14 +54,7 @@ enum class ImuMotionEvent {
  * @brief
  *
  */
-enum class AppConfigEvent {
-    None = 0,
-    AppConnected,
-    AppDisconnected,
-    TryWifiConnect,
-    WifiConnectFailed,
-    WifiConnected,
-};
+
 
 /**
  * @brief
@@ -215,13 +208,10 @@ public:
     uitk::Signal<const char*> onBleAvatarData;
     uitk::Signal<const char*> onBleConfigData;
     uitk::Signal<const char*> onBleRgbData;
-    uitk::Signal<AppConfigEvent> onAppConfigEvent;
 
     void startBleServer();
     bool isBleConnected();
-    void startAppConfigServer();
-    bool isAppConfiged();
-    void resetAppConfiged();
+    bool hasSavedWifi();
 
     /* --------------------------------- HeadPet -------------------------------- */
     uitk::Signal<HeadPetGesture> onHeadPetGesture;
