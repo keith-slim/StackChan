@@ -36,3 +36,8 @@ add_executable(server_endpoint_test server_endpoint_test.cpp)
 target_include_directories(server_endpoint_test PRIVATE ../main)
 target_compile_features(server_endpoint_test PRIVATE cxx_std_17)
 add_test(NAME server_endpoint_test COMMAND $<TARGET_FILE:server_endpoint_test>)
+
+add_executable(server_boot_policy_test server_boot_policy_test.cpp)
+target_include_directories(server_boot_policy_test PRIVATE ../main)
+target_compile_features(server_boot_policy_test PRIVATE cxx_std_17)
+add_test(NAME server_boot_policy_test COMMAND $<TARGET_FILE:server_boot_policy_test>)

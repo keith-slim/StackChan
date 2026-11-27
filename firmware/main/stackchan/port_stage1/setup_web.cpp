@@ -2,6 +2,7 @@
 // Never initialize or erase NVS, and never perform reset/OTA actions here.
 #include "setup_web.h"
 #include <stackchan/config/server_endpoint.h>
+#include <stackchan/config/server_boot_policy.h>
 #include "wake_net_threshold.h"
 #include "conversation_audio_settings.h"
 #include "application.h"
@@ -186,14 +187,26 @@ esp_err_t Read(httpd_req_t* request) {
     AddBool(root, "start_ai_on_boot", ai.startAiAgentOnBoot);
     cJSON_AddNumberToObject(root, "wake_threshold", WakeNetThreshold::Get());
 
-    char ota_url[kMaxEndpoint]{};
+    char endpoint[kMaxEndpoint]{};
     char server_base[kMaxServerBase + 1]{};
-    if (!ReadStoredString(kOtaNamespace, kOtaKey, ota_url, sizeof(ota_url))) {
-        cJSON_Delete(root);
-        return Reply(request, "500 Internal Server Error", "{\"error\":\"server setting unavailable\"}");
+    namespace boot = stackchan::config::server_boot;
+    // Display the actual configured WebSocket target in direct mode.
+    // The legacy path still uses the OTA base until provisioning is replaced.
+    if (boot::ReadDirectProtocol() == boot::Protocol::Websocket) {
+        if (!ReadStoredString(kWebsocketNamespace, kWebsocketKey, endpoint, sizeof(endpoint))) {
+            cJSON_Delete(root);
+            return Reply(request, "500 Internal Server Error", "{\"error\":\"server setting unavailable\"}");
+        }
+        if (!config::server_endpoint::ServerBaseFromWebsocket(endpoint, server_base, sizeof(server_base)))
+            server_base[0] = '\0';
+    } else {
+        if (!ReadStoredString(kOtaNamespace, kOtaKey, endpoint, sizeof(endpoint))) {
+            cJSON_Delete(root);
+            return Reply(request, "500 Internal Server Error", "{\"error\":\"server setting unavailable\"}");
+        }
+        if (!endpoint[0]) std::snprintf(endpoint, sizeof(endpoint), "%s", CONFIG_OTA_URL);
+        if (!ServerBaseFromOta(endpoint, server_base, sizeof(server_base))) server_base[0] = '\0';
     }
-    if (!ota_url[0]) std::snprintf(ota_url, sizeof(ota_url), "%s", CONFIG_OTA_URL);
-    if (!ServerBaseFromOta(ota_url, server_base, sizeof(server_base))) server_base[0] = '\0';
     cJSON_AddStringToObject(root, "server_base_url", server_base);
 
     hal_toggles::ToggleStates states{};

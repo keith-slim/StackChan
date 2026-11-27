@@ -15,6 +15,7 @@
 #include <freertos/task.h>
 #include "board/hal_bridge.h"
 #include "stackchan/storage/nvs_snapshot.h"
+#include "stackchan/config/server_boot_policy.h"
 #include "stackchan/speech_mouth.h"
 #include "stackchan/wifi/wifi_web.h"
 
@@ -72,6 +73,7 @@ void Hal::init()
         esp_restart();
         return;
     }
+    stackchan::config::server_boot::PrepareStoredProtocol();
     xiaozhi_mcp_init();
     head_touch_init();
     io_expander_init();
@@ -276,6 +278,9 @@ static void _stackchan_update_task(void* param)
             continue;
         }
 
+        // Direct boot does not run the OTA version check. Keep bootloader
+        // rollback confirmation on the existing stable-uptime path.
+        _confirm_ota_image_if_stable();
         if (!is_setup_done) {
             // Setup when xiaozhi ready
             GetHAL().startSntp();
