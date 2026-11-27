@@ -15,6 +15,7 @@
 #include <freertos/task.h>
 #include "board/hal_bridge.h"
 #include "stackchan/storage/nvs_snapshot.h"
+#include "stackchan/storage/factory_reset.h"
 #include "stackchan/config/server_boot_policy.h"
 #include "stackchan/speech_mouth.h"
 #include "stackchan/wifi/wifi_web.h"
@@ -64,6 +65,7 @@ void Hal::init()
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    ESP_ERROR_CHECK(stackchan::storage::CompletePendingFactoryReset());
 
     xiaozhi_board_init();
     // The display/SD shared-bus controller is ready here; settings consumers
@@ -350,7 +352,8 @@ bool Hal::isBatteryCharging()
 void Hal::factoryReset()
 {
     mclog::tagInfo(_tag, "start factory reset");
-    ESP_ERROR_CHECK(nvs_flash_erase());
+    _sd_backup_ready.store(false, std::memory_order_release);
+    ESP_ERROR_CHECK(stackchan::storage::RequestFactoryReset());
     reboot();
 }
 

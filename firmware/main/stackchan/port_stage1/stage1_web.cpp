@@ -285,9 +285,9 @@ Webとの接続が切れた場合は新しいIPアドレスから開き直して
 <small>ランチャーのアイコン表示だけを変更します。AI自動起動とは別設定です。SETUPは非表示になりません。</small></section>
 </div>
 <div class="settings-page" data-settings-page="deviceInfo" hidden>
-<section id="deviceInfo" class="card"><h2>アカウント・端末情報（閲覧のみ）</h2>
+<section id="deviceInfo" class="card"><h2>端末情報（閲覧のみ）</h2>
 <div id="setupInfoRows"></div>
-<small>アカウント名と端末名は本体保存済み情報を表示します。ここからサーバーへの再取得、解除、初期化、OTA更新は行いません。</small>
+<small>ファームウェア・MACアドレス・バッテリー情報を表示します。</small>
 </section>
 </div>
 <section id="setupSharedStatus" class="card" hidden><h2>本体SETUPの読込・保存状態</h2>
@@ -853,8 +853,6 @@ async function setupLoad(){
     setupField(apps,'app_visibility',label,[[false,'非表示'],[true,'表示']],Boolean(d.app_visibility_mask&(1<<i)),key);
    }
   }else{apps.textContent='NVSからアプリ表示設定を読み込めません。編集を無効にしました。';}
-  setupInfo('アカウント名',d.account_username||'未取得');
-  setupInfo('端末名',d.device_name||'未取得');
   setupInfo('ファームウェア',d.firmware_version);
   setupInfo('Wi-Fi MAC',d.mac);
   setupInfo('バッテリー',d.battery+'%'+(d.charging?'（充電中）':''));

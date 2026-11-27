@@ -268,12 +268,6 @@ private:
  * @brief
  *
  */
-class SystemUpdateWorker : public WorkerBase {
-public:
-    SystemUpdateWorker();
-    ~SystemUpdateWorker();
-    void update() override;
-};
 
 /**
  * @brief
@@ -391,51 +385,4 @@ private:
  * @brief
  *
  */
-class AccountWorker : public WorkerBase {
-public:
-    class PanelInfo {
-    public:
-        PanelInfo(lv_obj_t* parent, int posY, std::string_view title, std::string_view info);
-
-    private:
-        std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
-        std::unique_ptr<uitk::lvgl_cpp::Label> _label_title;
-        std::unique_ptr<uitk::lvgl_cpp::Label> _label_info;
-    };
-
-    class PageAccount {
-    public:
-        PageAccount(std::string_view username, std::string_view deviceName);
-
-        bool isUnbindClicked() const
-        {
-            return _is_unbind_clicked;
-        }
-
-        bool isQuitClicked() const
-        {
-            return _is_quit_clicked;
-        }
-
-    private:
-        std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
-        std::unique_ptr<uitk::lvgl_cpp::Label> _label_title;
-        std::unique_ptr<PanelInfo> _panel_username;
-        std::unique_ptr<PanelInfo> _panel_device_name;
-        std::unique_ptr<uitk::lvgl_cpp::Button> _btn_unbind;
-        std::unique_ptr<uitk::lvgl_cpp::Button> _btn_quit;
-
-        bool _is_unbind_clicked = false;
-        bool _is_quit_clicked   = false;
-    };
-
-    AccountWorker();
-    ~AccountWorker();
-    void update() override;
-
-private:
-    std::unique_ptr<PageAccount> _page_account;
-    std::unique_ptr<FactoryResetWorker> _worker_reset;
-};
-
 }  // namespace setup_workers

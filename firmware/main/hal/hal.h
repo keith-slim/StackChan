@@ -105,10 +105,7 @@ enum class WifiStatus {
  * @brief
  *
  */
-struct UserAccountInfo_t {
-    std::string username;
-    std::string deviceName;
-};
+
 
 /**
  * @brief
@@ -289,14 +286,6 @@ public:
     /* --------------------------------- EzData --------------------------------- */
     void startEzDataService(std::function<void(std::string_view)> onStartLog);
     uitk::Signal<std::string_view> onEzdataPairCode;
-
-    /* ------------------------------- User Acount ------------------------------ */
-    UserAccountInfo_t getUserAccountInfo();
-    bool updateAccountInfo(std::function<void(std::string_view)> onLog);
-    bool unbindAccount(std::function<void(std::string_view)> onLog);
-
-    /* ----------------------------------- OTA ---------------------------------- */
-    bool updateFirmware(std::function<void(std::string_view)> onLog);
 
     /* ---------------------------------- Audio --------------------------------- */
     void setSpeakerVolume(uint8_t volume, bool permanent = false);

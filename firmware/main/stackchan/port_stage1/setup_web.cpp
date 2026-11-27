@@ -219,11 +219,6 @@ esp_err_t Read(httpd_req_t* request) {
         cJSON_AddNumberToObject(root, "app_visibility_mask", mask);
     }
 
-    // Account information is the existing local cache. Do not start account
-    // network requests or disclose authentication tokens from a Web GET.
-    const auto account = hal.getUserAccountInfo();
-    cJSON_AddStringToObject(root, "account_username", account.username.c_str());
-    cJSON_AddStringToObject(root, "device_name", account.deviceName.c_str());
     const std::string version(common::FirmwareVersion);
     cJSON_AddStringToObject(root, "firmware_version", version.c_str());
     const std::string mac = hal.getFactoryMacString(":");
@@ -237,7 +232,7 @@ esp_err_t Read(httpd_req_t* request) {
     constexpr const char* required[] = {
         "brightness", "volume", "timezone", "idle_movement", "start_ai_on_boot",
         "server_base_url", "wake_threshold",
-        "app_visibility_loaded", "account_username", "device_name",
+        "app_visibility_loaded",
         "firmware_version", "mac", "battery", "charging", "sd_pending"
     };
     for (const char* key : required) {
