@@ -185,6 +185,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     bool face_filter_initialized      = false;
     bool wake_face_smile_shown         = false;
     bool face_center_locked           = false;
+    stackchan::stage1::FacePitchHold face_pitch;
     int centered_frames               = 0;
     int face_missing_frames           = 0;
     int person_missing_frames         = 0;
@@ -210,6 +211,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         if (state == kDeviceStateSpeaking || stackchan::stage1::IsSpeechTrackingPaused()) {
             face_filter_initialized = false;
             face_center_locked = false;
+            face_pitch.Reset();
             centered_frames = 0;
             face_missing_frames = 0;
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
@@ -229,15 +231,20 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         const bool face_detected = PostVision(center_x, center_y, score, body_target_x, body_target_y, body_score, valid_frame);
         // A request already in flight may complete after speech starts.
         if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking ||
-            stackchan::stage1::IsSpeechTrackingPaused()) continue;
+            stackchan::stage1::IsSpeechTrackingPaused()) {
+            face_pitch.Reset();
+            continue;
+        }
         if (stop_requested_.load(std::memory_order_acquire)) break;
         if (generation != stackchan::stage1::PerceptionGeneration() ||
             !stackchan::stage1::IsPerceptionFresh(static_cast<uint32_t>(esp_timer_get_time() / 1000), captured) || !valid_frame) {
             person_missing_frames = 0;
+            face_pitch.Reset();
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
             continue;
         }
         if (stackchan::stage1::IsPersonSearchActive()) {
+            face_pitch.Reset();
             if (valid_frame && ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore)) {
                 const bool found_face = face_detected && score >= kMinimumFaceScore;
                 stackchan::stage1::StopPersonSearch();
@@ -259,10 +266,13 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             continue;
         }
         if (was_searching || stackchan::stage1::IsPersonSearchStopping()) {
+            face_pitch.Reset();
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
             continue;
         }
-        if (face_detected && score >= kMinimumFaceScore) {
+        const bool tracking_face = face_detected && score >= kMinimumFaceScore;
+        if (!tracking_face) face_pitch.Reset();
+        if (tracking_face) {
             if (stackchan::stage1::IsFacePitchSearchRequested()) {
                 stackchan::stage1::StopFacePitchSearch();
                 ESP_LOGI(kTag, "[FACE_PITCH_SEARCH] face found score=%.3f", score);
@@ -288,8 +298,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             const float raw_x = center_x - 0.5f;
             const float raw_y = 0.5f - center_y;
             const float error_x = stackchan::stage1::GuardedFaceError(raw_x, filtered_x, 0.025f);
-            const float error_y = stackchan::stage1::GuardedFaceError(raw_y, filtered_y, 0.035f);
-            // 3フレーム中央なら固定し、大きく外れるまで追従を再開しない。
+            const float error_y = face_pitch.Update(raw_y, filtered_y);
+            // 左右は顔が3フレーム中央にあれば固定する。上下は独立した保持条件を使う。
             if (face_center_locked) {
                 if (stackchan::stage1::FaceCenterLost(raw_x, raw_y, filtered_x, filtered_y)) {
                     face_center_locked = false;
@@ -301,13 +311,10 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 centered_frames = 0;
             }
             // CoreS3実機のyaw負方向が画像の左、pitch正方向が画像の上を向く。
-            // 顔中心を画面中央の約8px以内へ収める。
             const int yaw_delta = face_center_locked || std::abs(error_x) < 0.025f
                                       ? 0
                                       : static_cast<int>(std::clamp(error_x * 500.0f, -160.0f, 160.0f));
-            const int pitch_delta = face_center_locked || std::abs(error_y) < 0.035f
-                                        ? 0
-                                        : static_cast<int>(std::clamp(error_y * 360.0f, -110.0f, 110.0f));
+            const int pitch_delta = static_cast<int>(std::clamp(error_y * 360.0f, -110.0f, 110.0f));
             ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d)",
                      center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
                      yaw_delta, pitch_delta);
