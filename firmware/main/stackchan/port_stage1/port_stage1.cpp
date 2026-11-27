@@ -1,5 +1,6 @@
 // Stage-1 orchestration and persistent settings; no Gemini protocol changes.
 #include "port_stage1.h"
+#include <stackchan/config/low_battery.h>
 #include "perception_mailbox.h"
 #include "stage1_clock.h"
 #include "rest_face.h"
@@ -1281,6 +1282,7 @@ void NotifyExternalSpeech() {
     r.own_speech = false;
 }
 bool RequestWakeTouch(const char* source) {
+    if (low_battery::Active()) return true;
     if (!enabled.load()) return false;
     if (wake_sequence_active.load()) {
         dream_remark_cancel_requested.store(true);
@@ -1292,6 +1294,7 @@ bool RequestWakeTouch(const char* source) {
     return true;
 }
 bool RequestWakeWord() {
+    if (low_battery::Active()) return true;
     if (!enabled.load()) return false;
     if (wake_sequence_active.load()) {
         dream_remark_cancel_requested.store(true);
@@ -1384,6 +1387,7 @@ bool IsConversationFaceActive() {
 }
 bool IsAutonomousSceneActive() { return owns_auto.load(); }
 bool IsIdleServoMotionBlocked() {
+    if (low_battery::Active()) return true;
     // Suppress ordinary random head movement for the entire scene and
     // at least 3000ms from theatre start, even for 2.8s skits.
     const uint32_t until = r.theatre_motion_protect_until;
@@ -1393,6 +1397,7 @@ bool IsIdleServoMotionBlocked() {
            (until != 0 && static_cast<int32_t>(GetHAL().millis() - until) < 0);
 }
 bool RequestSleep() {
+    if (low_battery::Active()) return false;
     if (!enabled.load()) return false;
     manual_sleep_requested_at.store(GetHAL().millis());
     manual_sleep_requested.store(true);
@@ -1400,6 +1405,7 @@ bool RequestSleep() {
     return true;
 }
 bool RequestCue(const char* id) {
+    if (low_battery::Active()) return false;
     if (!id || !enabled.load() || owns_auto.load()) return false;
     for (int i = 0; i < static_cast<int>(Cue::Count); ++i) {
         if (std::strcmp(id, cue_names[i]) != 0) continue;
@@ -1413,24 +1419,28 @@ bool RequestCue(const char* id) {
     return false;
 }
 
-bool IsSpeechTrackingPaused() { return speech_tracking_paused.load(); }
+bool IsSpeechTrackingPaused() { return low_battery::Active() || speech_tracking_paused.load(); }
 void RequestWakeSearchPitch() {
+    if (low_battery::Active()) return;
     last_yaw_direction.store(0);
     wake_pitch_pending.store(true);
 }
 void StartPersonSearch(int yaw_delta) {
+    if (low_battery::Active()) return;
     perception_looks.Invalidate();
     search_active.store(true);
     search_start_epoch.store(speech_motion_epoch.load());
     search_start.store(yaw_delta == 0 ? kSearchZero : std::clamp(yaw_delta, -700, 700));
 }
 void ResumePersonSearch() {
+    if (low_battery::Active()) return;
     perception_looks.Invalidate();
     search_active.store(true);
     search_start_epoch.store(speech_motion_epoch.load());
     search_start.store(kSearchResume);
 }
 void StartFacePitchSearch() {
+    if (low_battery::Active()) return;
     perception_looks.Invalidate();
     face_pitch_epoch.store(speech_motion_epoch.load());
     face_pitch_requested.store(true);
@@ -1458,15 +1468,124 @@ bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking) {
 }
 bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking,
                            uint32_t captured, uint32_t generation) {
-    if (!enabled.load() || speech_tracking_paused.load() || search_active.load() ||
+    if (low_battery::Active() || !enabled.load() || speech_tracking_paused.load() || search_active.load() ||
         search_cancel.load()) return false;
     return perception_looks.Publish({std::clamp(yaw_delta, -900, 900),
         std::clamp(pitch_delta, -450, 450), face_tracking, captured, generation}, GetHAL().millis());
 }
 
+// The board latches three fresh low-battery samples. All scene work stays
+// under the existing LVGL update lock; the PMIC timer performs only the final
+// storage-serialized, freshly verified power-off command.
+static bool TickLowBattery(StackChan& sc, uint32_t now) {
+    namespace low = stackchan::low_battery;
+    static bool entered = false, motion_done = false, torque_released = false, app_mode_set = false;
+    static uint32_t entered_at = 0, scene_epoch = 0, last_motion_check = 0;
+    static low::Sequence sequence;
+    auto& app = Application::GetInstance();
+    const uint32_t current_epoch = low::Epoch();
+    if (!(current_epoch & 1U) || (entered && scene_epoch != current_epoch)) {
+        if (!entered) return false;
+        if (!app.SetLowBatteryMode(false)) return true;
+        sc.motion().cancelTimedMove();
+        sc.motion().setTorqueEnabled(false);
+        sc.avatar().setModifyLock(false);
+        sc.avatar().setEmotion(avatar::Emotion::Neutral);
+        sc.avatar().clearSpeech();
+        sc.avatar().mouth().setWeight(0);
+        speech_tracking_paused.store(false);
+        search_cancel.store(false);
+        person_search = PersonSearch{};
+        face_pitch_search = FacePitchSearch{};
+        perception_looks.Invalidate();
+        idle.store(app.GetDeviceState() == kDeviceStateIdle);
+        interrupted.store(true);
+        entered = false;
+        ESP_LOGI(LOG_TAG, "[LOW_BATTERY] phase=restored_external_power");
+        return low::Active();
+    }
+    if (!entered) {
+        entered = true;
+        entered_at = now;
+        scene_epoch = current_epoch;
+        last_motion_check = now - 200;
+        motion_done = torque_released = app_mode_set = false;
+        sequence.Begin(now);
+        sc.prepareFaceTakeover();
+        // Do not let an old sleep or speech gesture restore its previous neck
+        // pose just before the slow return to the calibrated home.
+        r.restore_neck_on_release = false;
+        speech_effects.owns_neck = false;
+        speech_effects.End(sc);
+        CancelForExternalChange(sc, "low_battery");
+        StopPersonSearch();
+        face_pitch_search.Pause(sc);
+        perception_yaw.Stop(sc.motion().yawServo());
+        perception_pitch.Stop(sc.motion().pitchServo());
+        speech_tracking_paused.store(true);
+        wake_intents.store(0);
+        sleep_wake_eligible.store(false);
+        manual_sleep_requested.store(false);
+        voice::Quiet();
+        voice::Reset();
+        environment::SetIdle(false);
+        sc.avatar().setModifyLock(true);
+        sc.avatar().setEmotion(avatar::Emotion::LowBattery);
+        sc.avatar().setSpeech(low::kPhrase);
+        ESP_LOGI(LOG_TAG, "[LOW_BATTERY] phase=scene_started");
+    }
+    if (!app_mode_set) app_mode_set = app.SetLowBatteryMode(true);
+    if (!motion_done && now - last_motion_check >= 200) {
+        last_motion_check = now;
+        // A native sweep must be stopped before issuing another target.
+        // Never initiate the farewell move from interpolated fallback data.
+        int yaw = 0, pitch = 0;
+        if (person_search.End(sc, true) &&
+            sc.motion().yawServo().tryGetCurrentAngle(yaw) &&
+            sc.motion().pitchServo().tryGetCurrentAngle(pitch)) {
+            sc.motion().yawServo().trackWithSpeed(0, 100, &yaw);
+            sc.motion().pitchServo().trackWithSpeed(0, 100, &pitch);
+            motion_done = true;
+            ESP_LOGI(LOG_TAG, "[LOW_BATTERY] phase=slow_home yaw=%d pitch=%d rate=100", yaw, pitch);
+        } else if (now - entered_at >= 3000) {
+            // Physical feedback is unavailable. Skip motion rather than
+            // guessing the pose or holding up the battery protection.
+            sc.motion().setTorqueEnabled(false);
+            motion_done = true;
+            ESP_LOGW(LOG_TAG, "[LOW_BATTERY] phase=home_skipped_no_feedback");
+        }
+    }
+    if (sc.avatar().getEmotion() != avatar::Emotion::LowBattery)
+        sc.avatar().setEmotion(avatar::Emotion::LowBattery);
+    // Only the existing PCM observer controls mouth opening; no extra timer.
+    sc.avatar().mouth().setWeight(app.GetDeviceState() == kDeviceStateSpeaking
+        ? speech_mouth::Opening(now) : 0);
+    if (sequence.phase == low::Phase::Admission && app_mode_set &&
+        now - sequence.since < low::kAdmissionTimeoutMs &&
+        app.RequestAnnouncement("low_battery", low::kPhrase, true)) {
+        sequence.Queued(now);
+        ESP_LOGI(LOG_TAG, "[LOW_BATTERY] phase=announcement_requested");
+    }
+    const auto before = sequence.phase;
+    const bool due = sequence.Tick(now, app.IsAnnouncementActive(),
+                                   app.GetAudioService().IsPlaybackIdle());
+    if (sequence.phase == low::Phase::Grace && before != low::Phase::Grace)
+        ESP_LOGI(LOG_TAG, "[LOW_BATTERY] phase=grace_started duration_ms=30000 source=%s",
+                 before == low::Phase::Speech ? "announcement_ended_or_timeout" : "announcement_unavailable");
+    if (due && !torque_released) {
+        sc.motion().cancelTimedMove();
+        sc.motion().setTorqueEnabled(false);
+        torque_released = true;
+        low::MarkReady(scene_epoch);
+        ESP_LOGI(LOG_TAG, "[LOW_BATTERY] phase=ready_for_power_off");
+    }
+    return true;
+}
+
 void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
+    if (TickLowBattery(sc, now)) return;
     quiet_mode::Tick();
     // Evaluate the monologue deadline exactly once, after the actual
     // event/scene decision (including the early-return conversation paths).

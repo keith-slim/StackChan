@@ -8,6 +8,7 @@
 #include "axp2101.h"
 #include "settings.h"
 #include "stackchan/config/charge_protection.h"
+#include "stackchan/config/low_battery.h"
 #include <atomic>
 #include <nvs.h>
 
@@ -259,23 +260,24 @@ public:
         return ((confirmed & mask) != 0) == enabled ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
     }
 
-    esp_err_t TryReadPowerStatus(bool& has_external_power, bool& charging, bool& discharging)
+    esp_err_t TryReadPowerStatus(bool& has_external_power, bool& charging, bool& discharging, bool& present)
     {
-        uint8_t power_status = 0;
-        esp_err_t err        = TryReadRegs(0x01, &power_status, 1);
+        uint8_t status[2]{};
+        esp_err_t err        = TryReadRegs(0x00, status, sizeof(status));
         if (err != ESP_OK) {
             return err;
         }
 
+        const uint8_t power_status = status[1];
         const uint8_t current_direction = (power_status & 0b01100000) >> 5;
         if (current_direction == 3) {
             return ESP_ERR_INVALID_RESPONSE;
         }
-        const bool is_charging_done = (power_status & 0b00000111) == 0b00000100;
-
-        // Treat any non-discharging state as externally powered so a plugged-in cable
-        // still counts even after the battery is full.
-        has_external_power = current_direction != 2 || is_charging_done;
+        // VBUS_GOOD is a hardware indication of accepted external power.
+        // Charging is a second conservative veto. A merely idle battery
+        // current or old charge-done flag is not proof of USB presence.
+        present = (status[0] & 0x08) != 0;
+        has_external_power = (status[0] & 0x20) != 0 || current_direction == 1;
         charging           = current_direction == 1;
         discharging        = current_direction == 2;
         return ESP_OK;
@@ -294,6 +296,26 @@ public:
 
         level = battery_level;
         return ESP_OK;
+    }
+
+    bool TryLowBatteryPowerOff()
+    {
+        uint8_t control = 0;
+        if (TryReadRegs(0x10, &control, 1) != ESP_OK) return false;
+        // Re-read the hardware status immediately before the irreversible
+        // write. Invalid or externally-powered samples can NEVER shut down.
+        bool external = false, charging = false, discharging = false, present = false;
+        int level = -1;
+        if (TryReadBatteryLevel(level) != ESP_OK ||
+            TryReadPowerStatus(external, charging, discharging, present) != ESP_OK ||
+            !stackchan::low_battery::CanPowerOff({level, true, present, external, charging, discharging}) ||
+            !stackchan::low_battery::Ready()) return false;
+        const uint8_t data[] = {0x10, static_cast<uint8_t>((control & ~0x02U) | 0x01U)};
+        ESP_LOGW(TAG, "[LOW_BATTERY] phase=power_off level=%d", level);
+        const auto err = i2c_master_transmit(i2c_device_, data, sizeof(data), 20);
+        if (err != ESP_OK)
+            ESP_LOGW(TAG, "[LOW_BATTERY] phase=power_off_command_failed error=%s", esp_err_to_name(err));
+        return err == ESP_OK;
     }
 };
 
@@ -485,6 +507,7 @@ private:
     int64_t last_power_state_check_ms_        = 0;
     int64_t last_power_error_log_ms_          = 0;
     uint32_t consecutive_power_read_failures_ = 0;
+    stackchan::low_battery::Detector low_battery_detector_;
     int64_t last_charge_check_ms_ = -30000;
     int last_charge_policy_ = -1;
     bool last_charge_error_ = false;
@@ -522,8 +545,18 @@ private:
         bool charging           = false;
         bool discharging        = false;
         int battery_level       = 0;
-        esp_err_t status_err    = pmic_->TryReadPowerStatus(has_external_power, charging, discharging);
+        bool battery_present    = false;
+        esp_err_t status_err    = pmic_->TryReadPowerStatus(has_external_power, charging, discharging, battery_present);
         esp_err_t level_err     = pmic_->TryReadBatteryLevel(battery_level);
+        namespace low = stackchan::low_battery;
+        const low::Sample sample{battery_level, status_err == ESP_OK && level_err == ESP_OK,
+                                 battery_present, has_external_power, charging, discharging};
+        const bool previous = low_battery_detector_.active;
+        const bool shutdown = low_battery_detector_.Observe(sample);
+        low::Publish(sample, shutdown);
+        if (shutdown != previous)
+            ESP_LOGI(TAG, "[LOW_BATTERY] phase=%s level=%d external=%d",
+                     shutdown ? "detected" : "canceled", battery_level, has_external_power);
 
         {
             std::lock_guard<std::mutex> lock(power_state_mutex_);
@@ -558,6 +591,13 @@ private:
             last_power_error_log_ms_         = 0;
         }
         PollChargeProtection(battery_level);
+        if (low::Ready() && low::CanPowerOff(sample)) {
+            // Existing SD transaction mutex covers FAT close and unmount.
+            // Never block the power timer on an active card operation.
+            stackchan::sd::TryWhenIdle([](void* ctx) {
+                return static_cast<Pmic*>(ctx)->TryLowBatteryPowerOff();
+            }, pmic_);
+        }
     }
 
     void PollPowerState()

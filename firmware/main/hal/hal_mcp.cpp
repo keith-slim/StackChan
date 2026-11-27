@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include <stackchan/config/low_battery.h>
 #include "hal.h"
 #include <mooncake_log.h>
 #include <mcp_server.h>
@@ -114,6 +115,7 @@ void Hal::xiaozhi_mcp_init()
 
                            LvglLockGuard lock;
 
+                           if (stackchan::low_battery::Active()) return false;
                            stackchan::stage1::CancelForExternalChange(GetStackChan());
                            stackchan::stage1::NotifyManualMotion();
                            auto& motion = GetStackChan().motion();
@@ -162,6 +164,7 @@ void Hal::xiaozhi_mcp_init()
                 mclog::tagWarn(_tag, "relative head motion rejected: no measured angle");
                 return false;
             }
+            if (stackchan::low_battery::Active()) return false;
             stackchan::stage1::CancelForExternalChange(GetStackChan());
             stackchan::stage1::NotifyManualMotion();
             const auto limit = servo.getAngleLimit();

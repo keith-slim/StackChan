@@ -15,9 +15,11 @@
 #include <atomic>
 #include <stackchan/avatar/avatar/elements/emotion.h>
 #include <hal/utils/psram_allocator.h>
+#include <apps/common/status_bar/battery_indicator.h>
 
 class StackChanAvatarDisplay : public LvglDisplay {
 private:
+    std::unique_ptr<view::BatteryIndicator> battery_indicator_;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_       = nullptr;
     int speaking_modifier_id_           = -1;

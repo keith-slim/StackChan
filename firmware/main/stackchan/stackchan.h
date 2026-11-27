@@ -8,6 +8,7 @@
 #include "modifiers/modifiers.h"
 #include "json/json_helper.h"
 #include "port_stage1/port_stage1.h"
+#include "config/low_battery.h"
 #include <memory>
 
 namespace stackchan {
@@ -144,7 +145,8 @@ public:
         // Acquire theatre/nap/gesture ownership before ordinary idle modifiers.
         // Otherwise a random idle movement can run on the same tick as a skit starts.
         stage1::Update(*this);
-        _modifier_pool.forEach([this](Modifier* modifier, int id) { modifier->_update(*this); });
+        if (!low_battery::Active())
+            _modifier_pool.forEach([this](Modifier* modifier, int id) { modifier->_update(*this); });
         _modifier_pool.cleanup();
 
         if (_avatar) {

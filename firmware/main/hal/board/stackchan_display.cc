@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "stackchan_display.h"
+#include <stackchan/config/low_battery.h>
 #include <application.h>
 #include <stackchan/port_stage1/port_stage1.h>
 #include <stackchan/modifiers/idle_lifecycle.h>
@@ -231,6 +232,7 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
 StackChanAvatarDisplay::~StackChanAvatarDisplay()
 {
     ESP_LOGI(TAG, "Destroying StackChanAvatarDisplay");
+    battery_indicator_.reset();
     stackchan::stage1::Stop(); // Remove scene children before LVGL / avatar teardown.
     if (idle_recovery_timer_) {
         lv_timer_delete(idle_recovery_timer_);
@@ -316,6 +318,10 @@ void StackChanAvatarDisplay::SetupUI()
     });
 
     stackchan.attachAvatar(std::move(avatar));
+    // Sibling of the avatar panel: sleep/theatre face overlays cannot cover
+    // the indicator; the existing photo preview still owns the full screen.
+    battery_indicator_ = std::make_unique<view::BatteryIndicator>(lv_screen_active(), 0xffffff, true);
+    battery_indicator_->Align(LV_ALIGN_TOP_RIGHT, -4, 3);
     stackchan::stage1::Start();
     stackchan.addModifier(std::make_unique<BreathModifier>());
     blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
@@ -336,7 +342,7 @@ void StackChanAvatarDisplay::SetupUI()
     // LVGL timers run under the LVGL task's existing display lock.
     idle_recovery_timer_ = lv_timer_create([](lv_timer_t* timer) {
         auto* self = static_cast<StackChanAvatarDisplay*>(lv_timer_get_user_data(timer));
-        if (!self || !GetStackChan().hasAvatar()) return;
+        if (!self || !GetStackChan().hasAvatar() || stackchan::low_battery::Active()) return;
         const auto decision = stackchan::idle_lifecycle::Resolve(CurrentIdleState(
             Application::GetInstance().GetDeviceState() == kDeviceStateIdle,
             self->is_sleeping_));
@@ -391,6 +397,7 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
 
 bool StackChanAvatarDisplay::ShowWakeFaceSmile()
 {
+    if (stackchan::low_battery::Active()) return false;
     // Called by the existing perception worker, never the audio feed task.
     if (!wake_face_armed_.load() || Application::GetInstance().GetDeviceState() != kDeviceStateListening)
         return false;
@@ -558,6 +565,7 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     }
 
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) return true;
 
     // CONNECTING/LISTENING each emit a normal neutral UI callback.
     // Consume only that callback; subsequent LLM emotions (even neutral)
@@ -746,7 +754,7 @@ void StackChanAvatarDisplay::PauseSubtitleReview()
 
 void StackChanAvatarDisplay::AdvanceSubtitle()
 {
-    if (!subtitle_reviewing_) return;
+    if (stackchan::low_battery::Active() || !subtitle_reviewing_) return;
     const uint32_t now = lv_tick_get();
     if (static_cast<int32_t>(now - subtitle_review_wait_until_ms_) < 0) return;
     if (subtitle_displaying_ && static_cast<int32_t>(now - subtitle_until_ms_) < 0) return;
@@ -847,6 +855,7 @@ void StackChanAvatarDisplay::SetChatMessage(
     }
 
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) return;
 
     // Boot fallback is a local hint, not an audio-synchronised TTS subtitle.
     // Never park it in the normal assistant queue waiting for SPEAKING.
@@ -992,6 +1001,7 @@ void StackChanAvatarDisplay::RemoveChatMessage(const char* role, const char* con
     auto& stackchan = GetStackChan();
     if (!stackchan.hasAvatar()) return;
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) return;
     if (!startup_hint_text_.empty() && startup_hint_text_ == content) {
         startup_hint_text_.clear();
         stackchan.avatar().clearSpeech();
@@ -1006,6 +1016,7 @@ void StackChanAvatarDisplay::ClearChatMessages()
     }
 
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) return;
 
     // The network may disconnect while the user is still reading the
     // post-speech subtitle review. Keep the timer and unread text alive.
@@ -1026,7 +1037,7 @@ void StackChanAvatarDisplay::ClearChatMessages()
 void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
 {
     DisplayLockGuard lock(this);
-    if (preview_image_ == nullptr) {
+    if (preview_image_ == nullptr || (image && stackchan::low_battery::Active())) {
         return;
     }
 
@@ -1054,6 +1065,9 @@ void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
 
 void StackChanAvatarDisplay::UpdateStatusBar(bool update_all)
 {
+    (void)update_all;
+    DisplayLockGuard lock(this);
+    if (battery_indicator_) battery_indicator_->Update();
 }
 
 void StackChanAvatarDisplay::SetTheme(Theme* theme)
@@ -1098,6 +1112,30 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     auto& avatar = stackchan.avatar();
 
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) {
+        // The shutdown scene owns the face, neck and fixed caption.
+        // Actual PCM still drives its mouth through the normal audio observer.
+        const bool speaking = strcmp(status, Lang::Strings::SPEAKING) == 0;
+        stackchan::speech_mouth::SetPlaying(speaking);
+        _is_xiaozhi_idle.store(strcmp(status, Lang::Strings::STANDBY) == 0);
+        if (_is_xiaozhi_idle.load()) _is_xiaozhi_ready = true;
+        ResetSubtitleQueue();
+        subtitle_speaking_ = false;
+        startup_hint_text_.clear();
+        wake_face_armed_.store(false);
+        wake_face_active_ = wake_face_waiting_neutral_ = false;
+        if (preview_image_) {
+            esp_timer_stop(preview_timer_);
+            lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+            preview_image_cached_.reset();
+        }
+        if (speaking_modifier_id_ >= 0) {
+            stackchan.removeModifier(speaking_modifier_id_);
+            speaking_modifier_id_ = -1;
+        }
+        speech_emotion_active_ = speech_emotion_explicit_ = false;
+        return;
+    }
 
     // Alert(ERROR) after a failed snore/sleep-talk connection is not user
     // activity. Do not call OnStandby(false) or reset the nap scheduler.

@@ -32,6 +32,9 @@ private:
     // replacing an expression never destroys an unrelated reaction.
     std::unique_ptr<Decorator> _s3_decoration_one;
     std::unique_ptr<Decorator> _s3_decoration_two;
+    lv_obj_t* _low_battery_lines[3]{};
+    bool _low_eye_visible[2]{true, true};
+    bool _low_mouth_visible = true;
 };
 
 /**

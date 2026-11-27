@@ -1,4 +1,5 @@
 #include "cores3_sd.h"
+#include "stackchan/config/low_battery.h"
 #include "hal/board/config.h"
 
 #include <algorithm>
@@ -93,6 +94,7 @@ bool verified_write(const std::string& path, const std::string& data) {
 class Access {
 public:
     Access() : guard_(storage_mutex) {
+        if (stackchan::low_battery::Active()) return;
         log_sd_memory("before_sd_access");
         if (!config.display_io || !config.set_power) return;
         if (config.camera_mutex) {
@@ -313,6 +315,11 @@ bool write_config_locked(const std::string& text) {
     return true;
 }
 } // namespace
+
+bool TryWhenIdle(bool (*callback)(void*), void* context) {
+    std::unique_lock<std::mutex> lock(storage_mutex, std::try_to_lock);
+    return lock.owns_lock() && callback && callback(context);
+}
 
 void Configure(const Config& next) {
     std::lock_guard<std::mutex> lock(storage_mutex);

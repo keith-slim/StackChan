@@ -67,3 +67,8 @@ add_executable(charge_protection_test charge_protection_test.cpp)
 target_include_directories(charge_protection_test PRIVATE ../main)
 target_compile_features(charge_protection_test PRIVATE cxx_std_17)
 add_test(NAME charge_protection_test COMMAND $<TARGET_FILE:charge_protection_test>)
+
+add_executable(low_battery_test low_battery_test.cpp)
+target_include_directories(low_battery_test PRIVATE ../main)
+target_compile_features(low_battery_test PRIVATE cxx_std_17)
+add_test(NAME low_battery_test COMMAND $<TARGET_FILE:low_battery_test>)

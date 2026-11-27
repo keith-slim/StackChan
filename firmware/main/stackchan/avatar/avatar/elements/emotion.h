@@ -16,6 +16,7 @@ enum class Emotion {
     Sleepy,
     Fun, // S3: laughing; Happy eyes with heart decoration
     Surprise, // conversation startle; keep the normal lip-sync mouth
+    LowBattery, // dedicated shutdown face, not a general LLM emotion
 };
 
 }  // namespace stackchan::avatar

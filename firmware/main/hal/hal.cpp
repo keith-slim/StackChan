@@ -17,6 +17,7 @@
 #include "stackchan/storage/nvs_snapshot.h"
 #include "stackchan/storage/factory_reset.h"
 #include "stackchan/config/server_boot_policy.h"
+#include <stackchan/config/low_battery.h>
 #include "stackchan/speech_mouth.h"
 #include "stackchan/wifi/wifi_web.h"
 
@@ -205,7 +206,7 @@ static void _sd_backup_task(void*)
 
 static void _schedule_sd_backup_if_safe()
 {
-    if (!_sd_backup_ready.load(std::memory_order_acquire) ||
+    if (stackchan::low_battery::Active() || !_sd_backup_ready.load(std::memory_order_acquire) ||
         _sd_nvs_revision.load(std::memory_order_acquire) ==
             _sd_saved_revision.load(std::memory_order_acquire) ||
         _sd_backup_running.load(std::memory_order_acquire) ||
@@ -262,8 +263,10 @@ static void _stackchan_update_task(void* param)
 
         // Apply a saved Wi-Fi change after the HTTP response and only while
         // conversation processing is idle; reuse this task (no new stack).
-        stackchan::wifi::web::ApplyPendingIfIdle();
-        tools::update_reminders();
+        if (!stackchan::low_battery::Active()) {
+            stackchan::wifi::web::ApplyPendingIfIdle();
+            tools::update_reminders();
+        }
 
         // Keep the conversation pacing delay OUTSIDE the LVGL lock so
         // subtitles and audio-related UI callbacks are not blocked by it.
@@ -275,6 +278,7 @@ static void _stackchan_update_task(void* param)
 
         LvglLockGuard lock;
         GetStackChan().update();
+        if (stackchan::low_battery::Active()) continue;
 
         if (!hal_bridge::is_xiaozhi_ready()) {
             continue;

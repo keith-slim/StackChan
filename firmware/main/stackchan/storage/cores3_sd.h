@@ -14,6 +14,8 @@ struct Config {
     bool (*set_power)(void*, bool) = nullptr;
 };
 void Configure(const Config& config);
+// Execute the final PMIC command only when no SD transaction owns the bus.
+bool TryWhenIdle(bool (*callback)(void*), void* context);
 // Relative paths only; no absolute paths, traversal, or arbitrary mounts.
 bool ReadFile(const char* relative_path, std::string& contents);
 bool WriteFile(const char* relative_path, const std::string& contents);
