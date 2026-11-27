@@ -61,3 +61,9 @@ add_executable(face_filter_guard_test face_filter_guard_test.cpp)
 target_include_directories(face_filter_guard_test PRIVATE ../main/stackchan/port_stage1)
 target_compile_features(face_filter_guard_test PRIVATE cxx_std_17)
 add_test(NAME face_filter_guard_test COMMAND $<TARGET_FILE:face_filter_guard_test>)
+
+
+add_executable(charge_protection_test charge_protection_test.cpp)
+target_include_directories(charge_protection_test PRIVATE ../main)
+target_compile_features(charge_protection_test PRIVATE cxx_std_17)
+add_test(NAME charge_protection_test COMMAND $<TARGET_FILE:charge_protection_test>)

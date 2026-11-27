@@ -3,6 +3,7 @@
 #include "setup_web.h"
 #include <stackchan/config/server_endpoint.h>
 #include <stackchan/config/server_boot_policy.h>
+#include <stackchan/config/charge_protection.h>
 #include "wake_net_threshold.h"
 #include "conversation_audio_settings.h"
 #include "application.h"
@@ -55,6 +56,21 @@ bool QueueConversationAudio(ConversationAudio::Settings value) {
             conversation_save_state.store(saved ? kWakeSaved : kWakeFailed);
         })) {
         conversation_save_state.store(kWakeFailed);
+        return false;
+    }
+    return true;
+}
+namespace charge = stackchan::charge;
+std::atomic<int> charge_save_state{kWakeIdle};
+bool QueueChargeProtection(charge::Settings value) {
+    if (charge_save_state.exchange(kWakePending) == kWakePending) return false;
+    if (!Application::GetInstance().Schedule([value]() {
+            const bool saved = charge::Save(value);
+            ESP_LOGI(kTag, "Charge protection settings save: enabled=%d low=%d high=%d result=%d",
+                     value.enabled, value.low, value.high, saved);
+            charge_save_state.store(saved ? kWakeSaved : kWakeFailed);
+        })) {
+        charge_save_state.store(kWakeFailed);
         return false;
     }
     return true;
@@ -171,6 +187,16 @@ esp_err_t Read(httpd_req_t* request) {
         std::snprintf(response, sizeof(response),
             "{\"state\":%d,\"gain_db\":%d,\"vad_mode\":%d,\"agc\":%d}",
             conversation_save_state.load(), value.gain_db, value.vad_mode, value.agc);
+        return Reply(request, "200 OK", response);
+    }
+    if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK &&
+        std::strcmp(query, "charge_protection=1") == 0) {
+        const auto value = charge::Get();
+        char response[192];
+        std::snprintf(response, sizeof(response),
+            "{\"state\":%d,\"loaded\":%s,\"enabled\":%s,\"low\":%d,\"high\":%d,\"applied\":%d}",
+            charge_save_state.load(), charge::Loaded() ? "true" : "false",
+            value.enabled ? "true" : "false", value.low, value.high, charge::Applied());
         return Reply(request, "200 OK", response);
     }
     auto* root = cJSON_CreateObject();
@@ -343,6 +369,18 @@ esp_err_t Write(httpd_req_t* request) {
         cJSON_Delete(root);
         if (!valid) return Reply(request, "400 Bad Request", "{\"error\":\"invalid conversation audio settings\"}");
         if (!QueueConversationAudio(settings))
+            return Reply(request, "503 Service Unavailable", "{\"error\":\"save busy or queue unavailable\"}");
+        return Reply(request, "202 Accepted", "{\"queued\":true}");
+    } else if (valid && std::strcmp(field, "charge_protection") == 0) {
+        charge::Settings settings;
+        valid = cJSON_IsObject(value) &&
+            Boolean(cJSON_GetObjectItemCaseSensitive(value, "enabled"), settings.enabled) &&
+            Number(cJSON_GetObjectItemCaseSensitive(value, "low"), 10, 95, 1, settings.low) &&
+            Number(cJSON_GetObjectItemCaseSensitive(value, "high"), 15, 100, 1, settings.high) &&
+            charge::Valid(settings);
+        cJSON_Delete(root);
+        if (!valid) return Reply(request, "400 Bad Request", "{\"error\":\"invalid charge protection settings\"}");
+        if (!QueueChargeProtection(settings))
             return Reply(request, "503 Service Unavailable", "{\"error\":\"save busy or queue unavailable\"}");
         return Reply(request, "202 Accepted", "{\"queued\":true}");
     } else if (valid && std::strcmp(field, "server_base_url") == 0) {

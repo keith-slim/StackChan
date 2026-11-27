@@ -277,6 +277,13 @@ Webとの接続が切れた場合は新しいIPアドレスから開き直して
 <section id="device" class="card"><h2>デバイス設定</h2>
 <div id="setupDeviceFields"></div>
 <small>明るさ・音量は本体と同じ値を保存して反映します。タイムゾーンも本体SETUPと同じ選択肢です。</small></section>
+<section id="chargeSetup" class="card"><h2>バッテリー充電保護</h2>
+<div class="setup-row"><label>充電保護 <select id="chargeEnabled" disabled><option value="true">有効</option><option value="false">無効</option></select></label></div>
+<div class="setup-row"><label>充電再開（%） <input id="chargeLow" type="number" min="10" max="95" step="1" value="30" disabled></label></div>
+<div class="setup-row"><label>充電停止（%） <input id="chargeHigh" type="number" min="15" max="100" step="1" value="80" disabled></label></div>
+<div class="buttons"><button id="chargeSave" type="button" disabled>保存</button><button id="chargeReload" type="button">再読み込み</button></div>
+<p id="chargeStatus" class="status" role="status">読み込み中…</p>
+<small>上下限の差は5%以上。USB給電は維持し、強制放電は行いません。無効にすると通常充電に戻ります。残量を30秒ごとに確認し、設定変更は次の有効な電源監視で反映します。</small></section>
 <section id="aiSetup" class="card"><h2>AI設定</h2>
 <div id="setupAiFields"></div>
 <small>本体SETUPの「General」と共通の設定値です。保存後は次回の本体起動時に確実に適用されます。</small></section>
@@ -764,6 +771,58 @@ convSave.addEventListener('click',async()=>{
  }catch(e){convStatus.textContent='保存失敗または未確認: '+e.message;}
  finally{convEnable(convLoaded);}
 });
+const chargeEnabled=document.getElementById('chargeEnabled'),chargeLow=document.getElementById('chargeLow'),chargeHigh=document.getElementById('chargeHigh');
+const chargeSave=document.getElementById('chargeSave'),chargeReload=document.getElementById('chargeReload'),chargeStatus=document.getElementById('chargeStatus');
+let chargeLoaded=false,chargeBusy=false;
+function chargeEnable(enabled){
+ [chargeEnabled,chargeLow,chargeHigh,chargeSave].forEach(el=>{el.disabled=!enabled;});
+ chargeReload.disabled=chargeBusy;
+}
+function validCharge(d){
+ return typeof d.enabled==='boolean'&&Number.isInteger(d.low)&&Number.isInteger(d.high)&&
+ d.low>=10&&d.low<=95&&d.high>=15&&d.high<=100&&d.high-d.low>=5;
+}
+async function readCharge(){
+ const r=await fetch('/api/stage1/setup?charge_protection=1',{cache:'no-store'});
+ if(!r.ok)throw Error('HTTP '+r.status);
+ const d=await r.json();if(!validCharge(d))throw Error('設定値が不正です');return d;
+}
+function renderCharge(d){
+ chargeEnabled.value=String(d.enabled);chargeLow.value=String(d.low);chargeHigh.value=String(d.high);
+}
+function chargeActual(d){
+ return '充電許可状態: '+(d.applied===1?'許可':d.applied===0?'停止':'未確認');
+}
+async function loadCharge(){
+ if(chargeBusy)return;
+ chargeBusy=true;chargeEnable(false);chargeLoaded=false;
+ try{
+  const d=await readCharge();renderCharge(d);chargeLoaded=true;
+  chargeStatus.textContent=(d.loaded?'設定読み込み完了。':'保存設定の読込異常。自動制御は停止中。再保存で復旧できます。')+chargeActual(d);
+ }catch(e){chargeStatus.textContent='読込失敗: '+e.message;}
+ finally{chargeBusy=false;chargeEnable(chargeLoaded);}
+}
+chargeReload.addEventListener('click',loadCharge);
+chargeSave.addEventListener('click',async()=>{
+ if(!chargeLoaded||chargeBusy)return;
+ const value={enabled:chargeEnabled.value==='true',low:chargeLow.valueAsNumber,high:chargeHigh.valueAsNumber};
+ if(!validCharge(value)){chargeStatus.textContent='再開10～95%、停止15～100%、上下限の差は5%以上にしてください。';return;}
+ chargeBusy=true;chargeEnable(false);chargeStatus.textContent='NVSへ保存要求中…';
+ try{
+  const r=await fetch('/api/stage1/setup',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({field:'charge_protection',value})});
+  if(r.status!==202)throw Error('HTTP '+r.status+': '+await r.text());
+  for(let i=0;i<30;i++){
+   await new Promise(resolve=>setTimeout(resolve,300));
+   const d=await readCharge();if(d.state===1)continue;
+   if(d.state!==2||!d.loaded||d.enabled!==value.enabled||d.low!==value.low||d.high!==value.high)
+    throw Error('保存結果を確認できません');
+   renderCharge(d);chargeStatus.textContent='NVS保存済み。次の有効な電源監視で適用します。SD同期は別途実行。';return;
+  }
+  chargeStatus.textContent='保存結果が未確認です。再読み込みしてください。';
+ }catch(e){chargeStatus.textContent='保存失敗または未確認: '+e.message;}
+ finally{chargeBusy=false;chargeEnable(chargeLoaded);}
+});
 const setupServerUrl=document.getElementById('setupServerUrl');
 const setupServerSave=document.getElementById('setupServerSave');
 const setupServerStatus=document.getElementById('setupServerStatus');
@@ -862,7 +921,7 @@ async function setupLoad(){
 }
 document.getElementById('setupReload').addEventListener('click',setupLoad);
 // Avoid concurrent large JSON responses on the memory-constrained server.
-Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(loadEnvironment).then(wifiLoad).then(setupLoad).then(loadConversation);
+Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(loadEnvironment).then(wifiLoad).then(setupLoad).then(loadConversation).then(loadCharge);
 </script></body></html>)STAGE1PAGE";
 
 void Reply(httpd_req_t* req, const char* status, const char* body) {

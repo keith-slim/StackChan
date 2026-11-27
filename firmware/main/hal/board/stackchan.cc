@@ -7,6 +7,9 @@
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "settings.h"
+#include "stackchan/config/charge_protection.h"
+#include <atomic>
+#include <nvs.h>
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -26,6 +29,56 @@
 #define TAG "M5Stack-StackChan-Board"
 
 #define XPOWERS_AXP2101_ICC_CHG_SET (0x62)
+
+extern "C" void stackchan_nvs_commit_observer(void);
+namespace stackchan::charge {
+namespace {
+constexpr char kNamespace[] = "sc_charge";
+constexpr char kKey[] = "policy";
+std::atomic<int> desired{-1};
+std::atomic<int> applied{-1};
+}
+void Load() {
+    nvs_handle_t handle = 0;
+    int32_t stored = Pack(Settings{});
+    auto err = nvs_open(kNamespace, NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        err = nvs_get_i32(handle, kKey, &stored);
+        nvs_close(handle);
+    }
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        desired.store(Pack(Settings{}));
+    } else if (err == ESP_OK && ValidPacked(stored)) {
+        desired.store(stored);
+    } else {
+        ESP_LOGW(TAG, "Charge protection settings unavailable: %s; no automatic switching",
+                 esp_err_to_name(err));
+        desired.store(-1);
+    }
+}
+Settings Get() {
+    const int value = desired.load();
+    return ValidPacked(value) ? Unpack(value) : Settings{};
+}
+bool Loaded() { return desired.load() >= 0; }
+bool Save(Settings s) {
+    if (!Valid(s)) return false;
+    const int packed = Pack(s);
+    if (desired.load() == packed) return true;
+    nvs_handle_t handle = 0;
+    auto err = nvs_open(kNamespace, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return false;
+    err = nvs_set_i32(handle, kKey, packed);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) return false;
+    desired.store(packed);
+    stackchan_nvs_commit_observer();
+    return true;
+}
+int Applied() { return applied.load(); }
+void ReportApplied(int value) { applied.store(value); }
+} // namespace stackchan::charge
 
 namespace {
 
@@ -174,6 +227,36 @@ public:
         val &= 0xE0;
         WriteReg(XPOWERS_AXP2101_ICC_CHG_SET, val | opt);
         return true;
+    }
+
+    // AXP2101 status1: bit 5 VBUS good, bit 3 battery present.
+    // Reg 0x18 bit 1 controls ONLY the main battery charger.
+    esp_err_t ApplyChargeProtection(stackchan::charge::Settings settings, int level,
+                                    bool& enabled, bool& changed)
+    {
+        constexpr uint8_t reg = 0x18, mask = 1U << 1;
+        uint8_t status_reg = 0x00, status = 0, control = 0;
+        // This is called from the existing power polling timer. Bound new
+        // I2C operations and never reboot on a transient bus failure.
+        auto read = [this](uint8_t address, uint8_t& value) {
+            return i2c_master_transmit_receive(i2c_device_, &address, 1, &value, 1, 20);
+        };
+        auto err = read(status_reg, status);
+        if (err != ESP_OK) return err;
+        err = read(reg, control);
+        if (err != ESP_OK) return err;
+        const bool current = (control & mask) != 0;
+        enabled = stackchan::charge::Target(settings, current, true,
+                   (status & 0x08) != 0, (status & 0x20) != 0, level);
+        changed = enabled != current;
+        if (!changed) return ESP_OK;
+        const uint8_t data[] = {reg, static_cast<uint8_t>(enabled ? control | mask : control & ~mask)};
+        err = i2c_master_transmit(i2c_device_, data, sizeof(data), 20);
+        if (err != ESP_OK) return err;
+        uint8_t confirmed = 0;
+        err = read(reg, confirmed);
+        if (err != ESP_OK) return err;
+        return ((confirmed & mask) != 0) == enabled ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
     }
 
     esp_err_t TryReadPowerStatus(bool& has_external_power, bool& charging, bool& discharging)
@@ -402,6 +485,36 @@ private:
     int64_t last_power_state_check_ms_        = 0;
     int64_t last_power_error_log_ms_          = 0;
     uint32_t consecutive_power_read_failures_ = 0;
+    int64_t last_charge_check_ms_ = -30000;
+    int last_charge_policy_ = -1;
+    bool last_charge_error_ = false;
+
+    void PollChargeProtection(int level)
+    {
+        namespace charge = stackchan::charge;
+        if (!charge::Loaded()) return;
+        const auto settings = charge::Get();
+        const int packed = charge::Pack(settings);
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        if (packed == last_charge_policy_ && now_ms - last_charge_check_ms_ < 30000) return;
+        last_charge_policy_ = packed;
+        last_charge_check_ms_ = now_ms;
+        bool enabled = false, changed = false;
+        const auto err = pmic_->ApplyChargeProtection(settings, level, enabled, changed);
+        if (err != ESP_OK) {
+            charge::ReportApplied(-1);
+            if (!last_charge_error_)
+                ESP_LOGW(TAG, "Charge protection I2C failed: %s; retry on next check", esp_err_to_name(err));
+            last_charge_error_ = true;
+            return;
+        }
+        const int previous = charge::Applied();
+        charge::ReportApplied(enabled ? 1 : 0);
+        if (changed || previous != (enabled ? 1 : 0) || last_charge_error_)
+            ESP_LOGI(TAG, "[CHARGE_PROTECTION] charger=%s level=%d low=%d high=%d protection=%d",
+                     enabled ? "enabled" : "disabled", level, settings.low, settings.high, settings.enabled);
+        last_charge_error_ = false;
+    }
 
     void RefreshPowerState()
     {
@@ -444,6 +557,7 @@ private:
             consecutive_power_read_failures_ = 0;
             last_power_error_log_ms_         = 0;
         }
+        PollChargeProtection(battery_level);
     }
 
     void PollPowerState()
@@ -683,6 +797,7 @@ public:
 #if CONFIG_STACKCHAN_PERCEPTION_ENABLED
         perception_ = new StackChanPerception(camera_, static_cast<StackChanAvatarDisplay*>(display_));
 #endif
+        stackchan::charge::Load();
         StartTouchpadTimer();
         GetBacklight()->RestoreBrightness();
     }
