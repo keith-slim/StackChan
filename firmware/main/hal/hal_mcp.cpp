@@ -154,14 +154,17 @@ void Hal::xiaozhi_mcp_init()
 
             LvglLockGuard lock;
             auto& motion = GetStackChan().motion();
-            stackchan::stage1::CancelForExternalChange(GetStackChan());
-            stackchan::stage1::NotifyManualMotion();
-
-            // Single-axis voice movement: no command is sent to the untouched axis.
+            // A failed read must not move the head or revoke another owner's motion.
             const bool yaw_axis = yaw_delta != 0;
             auto& servo = yaw_axis ? motion.yawServo() : motion.pitchServo();
+            int before = 0;
+            if (!servo.tryGetCurrentAngle(before)) {
+                mclog::tagWarn(_tag, "relative head motion rejected: no measured angle");
+                return false;
+            }
+            stackchan::stage1::CancelForExternalChange(GetStackChan());
+            stackchan::stage1::NotifyManualMotion();
             const auto limit = servo.getAngleLimit();
-            const int before = servo.getCurrentAngle();
             const int delta = (yaw_axis ? yaw_delta : pitch_delta) * 10;
             const int target = stackchan::motion::clampRelativeAngle(before, delta, limit.x, limit.y);
             mclog::tagInfo(_tag, "relative {}: {} -> {}, limits: {}..{}",
