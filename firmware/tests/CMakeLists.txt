@@ -51,3 +51,13 @@ add_executable(tracking_step_test tracking_step_test.cpp)
 target_include_directories(tracking_step_test PRIVATE ../main/stackchan/motion)
 target_compile_features(tracking_step_test PRIVATE cxx_std_17)
 add_test(NAME tracking_step_test COMMAND $<TARGET_FILE:tracking_step_test>)
+
+add_executable(perception_mailbox_test perception_mailbox_test.cpp)
+target_include_directories(perception_mailbox_test PRIVATE ../main/stackchan/port_stage1)
+target_compile_features(perception_mailbox_test PRIVATE cxx_std_17)
+add_test(NAME perception_mailbox_test COMMAND $<TARGET_FILE:perception_mailbox_test>)
+
+add_executable(face_filter_guard_test face_filter_guard_test.cpp)
+target_include_directories(face_filter_guard_test PRIVATE ../main/stackchan/port_stage1)
+target_compile_features(face_filter_guard_test PRIVATE cxx_std_17)
+add_test(NAME face_filter_guard_test COMMAND $<TARGET_FILE:face_filter_guard_test>)

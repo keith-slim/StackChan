@@ -1,5 +1,6 @@
 // Stage-1 orchestration and persistent settings; no Gemini protocol changes.
 #include "port_stage1.h"
+#include "perception_mailbox.h"
 #include "stage1_clock.h"
 #include "rest_face.h"
 #include "dream_face.h"
@@ -54,11 +55,7 @@ std::atomic<bool> owns_auto{false};
 std::atomic<int> queued_cue{-1};
 std::atomic<bool> manual_sleep_requested{false};
 std::atomic<uint32_t> manual_sleep_requested_at{0};
-std::atomic<int> perception_yaw_delta{0};
-std::atomic<int> perception_pitch_delta{0};
-std::atomic<uint32_t> perception_requested_at{0};
-std::atomic<bool> perception_look_pending{false};
-std::atomic<bool> perception_face_tracking{false};
+PerceptionMailbox perception_looks;
 std::atomic<bool> speech_tracking_paused{false};
 // Worker publishes requests/results; only the existing Stage1 update owns servos.
 std::atomic<uint32_t> search_start_epoch{0};
@@ -1049,7 +1046,7 @@ struct SpeechEffectsRuntime {
             } else {
                 if (!owns_neck) {
                     speech_tracking_paused.store(true);
-                    perception_look_pending.store(false);
+                    perception_looks.Invalidate();
                     origin = motion.getCurrentAngles();
                     owns_neck = true;
                     yaw_revision = motion.yawServo().getCommandRevision();
@@ -1113,7 +1110,7 @@ struct SpeechEffectsRuntime {
                 GetHAL().releaseConversationRgbColor();
         }
         speech_tracking_paused.store(false);
-        perception_look_pending.store(false);
+        perception_looks.Invalidate();
         *this = SpeechEffectsRuntime{};
     }
 };
@@ -1176,6 +1173,7 @@ void DreamRemarkTick(StackChan& sc, const State& state, uint32_t now, bool inter
 }
 
 void Start() {
+    perception_looks.Invalidate();
     // Start after the StackChanAvatarDisplay has attached its avatar.
     quiet_mode::Init();
     voice::Init();
@@ -1232,6 +1230,7 @@ void Start() {
 }
 void Stop() {
     enabled.store(false);
+    perception_looks.Invalidate();
     environment::SetIdle(false);
     Application::GetInstance().SetWakeWordAnnouncementProvider({});
     voice::Cancel();
@@ -1333,6 +1332,7 @@ void CancelForExternalChange(StackChan& sc, const char* source) {
     interrupted.store(true); // Reset idle deadlines even if the caller is a touch event.
 }
 void NotifyManualMotion() {
+    perception_looks.Invalidate();
     speech_motion_epoch.fetch_add(1);
     if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=manual_motion");
     manual_motion.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true);
@@ -1354,6 +1354,7 @@ void PrepareSpeechExpression(StackChan& sc, const char* source) {
 void BeginSpeechTurn(StackChan& sc) { speech_effects.Arm(sc); }
 void StartSpeechEffects(StackChan& sc, avatar::Emotion emotion) {
     if (speech_effects.active) return;
+    perception_looks.Invalidate();
     person_search.Pause(sc);
     face_pitch_search.Pause(sc);
     perception_yaw.Stop(sc.motion().yawServo());
@@ -1387,7 +1388,7 @@ bool IsIdleServoMotionBlocked() {
     // at least 3000ms from theatre start, even for 2.8s skits.
     const uint32_t until = r.theatre_motion_protect_until;
     return search_active.load() || search_cancel.load() || face_pitch_requested.load() ||
-           perception_look_pending.load() || owns_auto.load() || voice::IsBusy() || VoicePending() ||
+           perception_looks.Pending() || owns_auto.load() || voice::IsBusy() || VoicePending() ||
            dream_remark.motif != avatar_dream::Motif::None ||
            (until != 0 && static_cast<int32_t>(GetHAL().millis() - until) < 0);
 }
@@ -1405,6 +1406,7 @@ bool RequestCue(const char* id) {
         int empty = -1;
         // Refuse overlapping requests rather than replacing a queued action.
         if (!queued_cue.compare_exchange_strong(empty, i)) return false;
+        perception_looks.Invalidate();
         speech_motion_epoch.fetch_add(1);
         return true;
     }
@@ -1417,22 +1419,26 @@ void RequestWakeSearchPitch() {
     wake_pitch_pending.store(true);
 }
 void StartPersonSearch(int yaw_delta) {
+    perception_looks.Invalidate();
     search_active.store(true);
     search_start_epoch.store(speech_motion_epoch.load());
     search_start.store(yaw_delta == 0 ? kSearchZero : std::clamp(yaw_delta, -700, 700));
 }
 void ResumePersonSearch() {
+    perception_looks.Invalidate();
     search_active.store(true);
     search_start_epoch.store(speech_motion_epoch.load());
     search_start.store(kSearchResume);
 }
 void StartFacePitchSearch() {
+    perception_looks.Invalidate();
     face_pitch_epoch.store(speech_motion_epoch.load());
     face_pitch_requested.store(true);
 }
-void StopFacePitchSearch() { face_pitch_requested.store(false); }
+void StopFacePitchSearch() { if (face_pitch_requested.exchange(false)) perception_looks.Invalidate(); }
 bool IsFacePitchSearchRequested() { return face_pitch_requested.load(); }
 void StopPersonSearch() {
+    perception_looks.Invalidate();
     StopFacePitchSearch();
     wake_pitch_pending.store(false);
     search_start.store(0);
@@ -1445,19 +1451,17 @@ bool IsPersonSearchActive() { return search_active.load(); }
 bool IsPersonSearchStopping() { return search_cancel.load(); }
 
 
-bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking)
-{
-    constexpr int kMaxYawDelta   = 900;
-    constexpr int kMaxPitchDelta = 450;
-    yaw_delta                    = std::clamp(yaw_delta, -kMaxYawDelta, kMaxYawDelta);
-    pitch_delta                  = std::clamp(pitch_delta, -kMaxPitchDelta, kMaxPitchDelta);
-    perception_yaw_delta.store(yaw_delta, std::memory_order_relaxed);
-    perception_pitch_delta.store(pitch_delta, std::memory_order_relaxed);
-    perception_requested_at.store(GetHAL().millis(), std::memory_order_relaxed);
-    if (speech_tracking_paused.load() || search_active.load() || search_cancel.load()) return false;
-    perception_face_tracking.store(face_tracking, std::memory_order_relaxed);
-    perception_look_pending.store(true, std::memory_order_release);
-    return true;
+uint32_t PerceptionGeneration() { return perception_looks.Generation(); }
+bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking) {
+    const auto generation = PerceptionGeneration();
+    return RequestPerceptionLook(yaw_delta, pitch_delta, face_tracking, GetHAL().millis(), generation);
+}
+bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking,
+                           uint32_t captured, uint32_t generation) {
+    if (!enabled.load() || speech_tracking_paused.load() || search_active.load() ||
+        search_cancel.load()) return false;
+    return perception_looks.Publish({std::clamp(yaw_delta, -900, 900),
+        std::clamp(pitch_delta, -450, 450), face_tracking, captured, generation}, GetHAL().millis());
 }
 
 void Update(StackChan& sc) {
@@ -1553,7 +1557,7 @@ void Update(StackChan& sc) {
         r.cue_active || r.own_neck || IsWakeSequenceActive() || Runtime::Sleeping(r.phase) ||
         Runtime::SleepPreparing(r.phase) || search_motion.isModifyLocked() || sc.avatar().isModifyLocked();
     if (search_cancel.load()) {
-        perception_look_pending.store(false);
+        perception_looks.Invalidate();
         if (ps.End(sc, true)) {
             perception_yaw.Stop(search_yaw);
             perception_pitch.Stop(search_motion.pitchServo());
@@ -1574,7 +1578,7 @@ void Update(StackChan& sc) {
         perception_pitch.Stop(search_motion.pitchServo());
         const bool resume = start == kSearchResume;
         const int delta = (resume || start == kSearchZero) ? 0 : start;
-        perception_look_pending.store(false);
+        perception_looks.Invalidate();
         ps.running = true;
         ps.direction = (resume ? last_yaw_direction.load() : delta) < 0 ? -1 : 1;
         int measured_origin = 0;
@@ -1745,25 +1749,25 @@ void Update(StackChan& sc) {
         }
     }
     if (search_blocked) {
+        perception_looks.Invalidate();
         perception_yaw.Stop(search_yaw);
         perception_pitch.Stop(search_pitch);
     }
-    if (perception_look_pending.load(std::memory_order_acquire)) {
-        const bool expired = static_cast<uint32_t>(now - perception_requested_at.load()) > 3000;
-        // Wake-triggered tracking is allowed to replace the wake animation's
-        // neck target; sleep and explicit skits retain priority.
+    {
+        PerceptionLook look;
         const bool motion_available = !search_blocked && !ps.running && !search_cancel.load() && !face_pitch_requested.load();
-        if (expired) {
-            perception_look_pending.store(false, std::memory_order_release);
+        const auto result = perception_looks.Take(GetHAL().millis(), motion_available, look);
+        if (result == PerceptionMailbox::Result::Expired) {
             ESP_LOGW(LOG_TAG, "perception look expired while motion was busy");
-        } else if (motion_available && perception_look_pending.exchange(false)) {
-            auto& motion           = sc.motion();
-            auto& yaw              = motion.yawServo();
-            auto& pitch            = motion.pitchServo();
-            const int yaw_delta = perception_yaw_delta.load();
-            const int pitch_delta = perception_pitch_delta.load();
-            const bool face = perception_face_tracking.load(std::memory_order_relaxed);
+        } else if (result == PerceptionMailbox::Result::Ready) {
+            auto& motion = sc.motion();
+            auto& yaw = motion.yawServo();
+            auto& pitch = motion.pitchServo();
+            const int yaw_delta = look.yaw;
+            const int pitch_delta = look.pitch;
+            const bool face = look.face;
             const auto correct = [&](motion::Servo& servo, OwnedTracking& owned, int delta, const char* axis) {
+                if (look.generation != PerceptionGeneration() || !IsPerceptionFresh(GetHAL().millis(), look.captured)) return;
                 if (delta == 0) {
                     owned.Stop(servo);
                     return;
@@ -1773,6 +1777,7 @@ void Update(StackChan& sc) {
                     ESP_LOGW(LOG_TAG, "[TRACK_CORRECTION] axis=%s skipped: no measured position", axis);
                     return;
                 }
+                if (look.generation != PerceptionGeneration() || !IsPerceptionFresh(GetHAL().millis(), look.captured)) return;
                 const auto limits = servo.getAngleLimit();
                 const int target = std::clamp(actual + delta, limits.x, limits.y);
                 if (&servo == &yaw && target != actual)

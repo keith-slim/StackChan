@@ -1,4 +1,6 @@
 #include "stackchan_perception.h"
+#include <stackchan/port_stage1/perception_mailbox.h>
+#include <stackchan/port_stage1/face_filter_guard.h>
 
 #include "sdkconfig.h"
 
@@ -221,12 +223,20 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         float body_target_y = 0.5f;
         float body_score    = 0.0f;
         const bool was_searching = stackchan::stage1::IsPersonSearchActive();
+        const uint32_t generation = stackchan::stage1::PerceptionGeneration();
+        const uint32_t captured = static_cast<uint32_t>(frame_started_us / 1000);
         bool valid_frame = false;
         const bool face_detected = PostVision(center_x, center_y, score, body_target_x, body_target_y, body_score, valid_frame);
         // A request already in flight may complete after speech starts.
         if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking ||
             stackchan::stage1::IsSpeechTrackingPaused()) continue;
         if (stop_requested_.load(std::memory_order_acquire)) break;
+        if (generation != stackchan::stage1::PerceptionGeneration() ||
+            !stackchan::stage1::IsPerceptionFresh(static_cast<uint32_t>(esp_timer_get_time() / 1000), captured) || !valid_frame) {
+            person_missing_frames = 0;
+            vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
+            continue;
+        }
         if (stackchan::stage1::IsPersonSearchActive()) {
             if (valid_frame && ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore)) {
                 const bool found_face = face_detected && score >= kMinimumFaceScore;
@@ -273,15 +283,19 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 filtered_center_x += (center_x - filtered_center_x) * kFilterAlpha;
                 filtered_center_y += (center_y - filtered_center_y) * kFilterAlpha;
             }
-            const float error_x = filtered_center_x - 0.5f;
-            const float error_y = 0.5f - filtered_center_y;
+            const float filtered_x = filtered_center_x - 0.5f;
+            const float filtered_y = 0.5f - filtered_center_y;
+            const float raw_x = center_x - 0.5f;
+            const float raw_y = 0.5f - center_y;
+            const float error_x = stackchan::stage1::GuardedFaceError(raw_x, filtered_x, 0.025f);
+            const float error_y = stackchan::stage1::GuardedFaceError(raw_y, filtered_y, 0.035f);
             // 3フレーム中央なら固定し、大きく外れるまで追従を再開しない。
             if (face_center_locked) {
-                if (std::abs(error_x) > 0.075f || std::abs(error_y) > 0.10f) {
+                if (stackchan::stage1::FaceCenterLost(raw_x, raw_y, filtered_x, filtered_y)) {
                     face_center_locked = false;
                     centered_frames    = 0;
                 }
-            } else if (std::abs(error_x) < 0.035f && std::abs(error_y) < 0.05f) {
+            } else if (stackchan::stage1::FaceCenterEligible(raw_x, raw_y, filtered_x, filtered_y)) {
                 if (++centered_frames >= 3) face_center_locked = true;
             } else {
                 centered_frames = 0;
@@ -297,7 +311,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             ESP_LOGI(kTag, "Track face=(%.3f,%.3f) filtered=(%.3f,%.3f) score=%.3f locked=%d correction=(%d,%d)",
                      center_x, center_y, filtered_center_x, filtered_center_y, score, face_center_locked,
                      yaw_delta, pitch_delta);
-            stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true);
+            stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, true, captured, generation);
         } else if (stackchan::stage1::IsFacePitchSearchRequested()) {
             // Keep acquiring faces while pitch sweeps; don't replace the sweep
             // with a zero/deadband body correction or a transient missing frame.
@@ -322,7 +336,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                                             : static_cast<int>(std::clamp(error_y * 300.0f, -100.0f, 100.0f));
                 ESP_LOGI(kTag, "Track body head_hint=(%.3f,%.3f) score=%.3f correction=(%d,%d)",
                          body_target_x, body_target_y, body_score, yaw_delta, pitch_delta);
-                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta);
+                stackchan::stage1::RequestPerceptionLook(yaw_delta, pitch_delta, false, captured, generation);
             }
         } else {
             ++face_missing_frames;
@@ -336,7 +350,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 person_missing_logged = true;
             }
             if (valid_frame && person_acquired) {
-                stackchan::stage1::RequestPerceptionLook(0, 0);
+                stackchan::stage1::RequestPerceptionLook(0, 0, false, captured, generation);
                 if (++person_missing_frames >= 4 && !stop_requested_.load(std::memory_order_acquire) &&
                     Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
                     person_acquired = false; // one bounded sweep per loss, not endless retries
