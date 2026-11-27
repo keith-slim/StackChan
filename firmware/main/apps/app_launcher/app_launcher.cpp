@@ -82,11 +82,9 @@ void AppLauncher::create_launcher_view()
     int restore_app_id   = -1;
     const int warm_index = GetHAL().getWarmRebootTarget();
     if (warm_index >= 0) {
-        // Existing callers store an index in the unfiltered app list.
-        if (!app_props.empty()) {
-            const auto index = uitk::clamp(warm_index, 0, static_cast<int>(app_props.size()) - 1);
-            restore_app_id   = app_props[index].appID;
-        }
+        // Persisted 0 and 6 identify AI and SETUP in the old seven-app
+        // layout. Resolve through installed IDs, never the current list index.
+        restore_app_id = hal_toggles::boot_focus_app_id(warm_index);
         GetHAL().clearWarmRebootRequest();
     }
     std::vector<mooncake::AppProps_t> filtered_props;

@@ -60,14 +60,7 @@ extern "C" void app_main(void)
         GetMooncake().installApp(std::make_unique<AppLauncher>());
         hal_toggles::register_app_id(hal_toggles::App::AiAgent,
                                      GetMooncake().installApp(std::make_unique<AppAiAgent>()));
-        hal_toggles::register_app_id(hal_toggles::App::Avatar, GetMooncake().installApp(std::make_unique<AppAvatar>()));
-        hal_toggles::register_app_id(hal_toggles::App::EspnowRemote,
-                                     GetMooncake().installApp(std::make_unique<AppEspnowControl>()));
-        hal_toggles::register_app_id(hal_toggles::App::AppCenter,
-                                     GetMooncake().installApp(std::make_unique<AppAppCenter>()));
-        hal_toggles::register_app_id(hal_toggles::App::Ezdata, GetMooncake().installApp(std::make_unique<AppEzdata>()));
-        hal_toggles::register_app_id(hal_toggles::App::Dance, GetMooncake().installApp(std::make_unique<AppDance>()));
-        GetMooncake().installApp(std::make_unique<AppSetup>());
+        hal_toggles::register_setup_app_id(GetMooncake().installApp(std::make_unique<AppSetup>()));
 
         // Main loop
         while (1) {

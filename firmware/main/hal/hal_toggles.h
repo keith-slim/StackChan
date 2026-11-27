@@ -9,7 +9,7 @@ namespace hal_toggles {
 inline constexpr const char* NVS_NAMESPACE = "feature_toggles";
 inline constexpr const char* MASK_KEY      = "visible_mask";
 
-enum class App { AiAgent, Avatar, EspnowRemote, AppCenter, Ezdata, Dance, Count };
+enum class App { AiAgent, Count };
 inline constexpr size_t TOGGLE_COUNT = static_cast<size_t>(App::Count);
 using ToggleStates                   = std::array<bool, TOGGLE_COUNT>;
 
@@ -21,21 +21,24 @@ struct ToggleInfo {
 // Keep these keys compatible with the original PR's saved preferences.
 inline constexpr std::array<ToggleInfo, TOGGLE_COUNT> TOGGLE_LIST = {{
     {"ai_agent", "AI.AGENT"},
-    {"avatar", "AVATAR"},
-    {"espnow_remote", "ESPNOW.REMOTE"},
-    {"app_center", "APP.CENTER"},
-    {"ezdata", "EZDATA"},
-    {"dance", "DANCE"},
 }};
 
 inline constexpr ToggleStates default_states()
 {
-    return {true, true, true, true, true, true};
+    return {true};
 }
 
 // Associate persistent feature keys with actual Mooncake IDs at installation.
 // Neither translated display names nor filtered menu positions identify an app.
-inline std::array<int, TOGGLE_COUNT> registered_app_ids = {-1, -1, -1, -1, -1, -1};
+inline std::array<int, TOGGLE_COUNT> registered_app_ids = {-1};
+inline int registered_setup_app_id = -1;
+inline void register_setup_app_id(int id) { registered_setup_app_id = id; }
+// Keep the old on-flash codes; removed applications resolve to the safe SETUP focus.
+inline int boot_focus_app_id(int legacy_target) {
+    if (legacy_target == 0) return registered_app_ids[0];
+    if (legacy_target >= 1) return registered_setup_app_id;
+    return -1;
+}
 inline void register_app_id(App app, int app_id)
 {
     const auto index = static_cast<size_t>(app);

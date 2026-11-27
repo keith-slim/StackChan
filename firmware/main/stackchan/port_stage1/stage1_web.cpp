@@ -651,9 +651,7 @@ const setupTz=[
  ['AEST-10','Sydney (UTC+10)'],['SBT-11','Noumea (UTC+11)'],
  ['NZST-12','Auckland (UTC+12)'],['FJT-13','Fiji (UTC+13)'],
  ['LINT-14','Line Islands (UTC+14)']];
-const setupAppNames=[
- ['ai_agent','AI.AGENT'],['avatar','AVATAR'],['espnow_remote','ESPNOW.REMOTE'],
- ['app_center','APP.CENTER'],['ezdata','EZDATA'],['dance','DANCE']];
+const setupAppNames=[['ai_agent','AI.AGENT']];
 async function setupSave(field,value,app){
  setupStatus.textContent='NVSへ保存中: '+field;
  try{
