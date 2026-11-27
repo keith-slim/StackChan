@@ -30,6 +30,7 @@ namespace {
 constexpr const char* TAG = "STAGE1-WEB";
 httpd_handle_t server = nullptr;
 std::atomic<bool> attempted{false};
+std::atomic<bool> ready{false};
 // HTTPD task stack is allocated in PSRAM; retain headroom for lwIP and kernel objects.
 constexpr size_t MIN_FREE_INTERNAL = 12000;
 constexpr size_t MIN_FREE_PSRAM = 16384;
@@ -1484,6 +1485,8 @@ esp_err_t MonitorPost(httpd_req_t* req) {
     return result;
 }
 
+bool IsReady() { return ready.load(); }
+
 bool Start() {
     // Only called by Application's main event loop, before activation or
     // on a later retry. Never compete with the Wi-Fi provisioning HTTPD.
@@ -1593,6 +1596,7 @@ bool Start() {
         attempted.store(false);
         return false;
     }
+    ready.store(true);
     ESP_LOGI(TAG, "ready: port=80 internal_free=%u largest=%u psram=%u",
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),

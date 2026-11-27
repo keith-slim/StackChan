@@ -232,6 +232,7 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
 StackChanAvatarDisplay::~StackChanAvatarDisplay()
 {
     ESP_LOGI(TAG, "Destroying StackChanAvatarDisplay");
+    HideSetupQr();
     battery_indicator_.reset();
     stackchan::stage1::Stop(); // Remove scene children before LVGL / avatar teardown.
     if (idle_recovery_timer_) {
@@ -1063,10 +1064,106 @@ void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
     ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, 6000 * 1000));
 }
 
+void StackChanAvatarDisplay::HideSetupQr()
+{
+    if (setup_qr_timer_) {
+        lv_timer_delete(setup_qr_timer_);
+        setup_qr_timer_ = nullptr;
+    }
+    if (setup_qr_overlay_) {
+        auto* overlay = setup_qr_overlay_;
+        setup_qr_overlay_ = nullptr;
+        lv_obj_delete(overlay);
+    }
+    if (setup_qr_battery_index_ >= 0 && battery_indicator_) {
+        battery_indicator_->RestoreIndex(setup_qr_battery_index_);
+    }
+    setup_qr_battery_index_ = -1;
+}
+
+bool StackChanAvatarDisplay::ShowSetupQr(const std::string& url)
+{
+    // MCP runs outside the LVGL task. Never change the conversation state,
+    // avatar visibility, motion ownership, or underlying subtitle queue.
+    if (!Lock(1000)) return false;
+    const bool available = !stackchan::low_battery::Active() &&
+        GetStackChan().hasAvatar() && preview_image_ &&
+        lv_obj_get_parent(preview_image_) == lv_screen_active() && !url.empty();
+    if (!available) {
+        Unlock();
+        return false;
+    }
+    HideSetupQr();
+    auto* overlay = lv_obj_create(lv_screen_active());
+    if (!overlay) { Unlock(); return false; }
+    setup_qr_overlay_ = overlay;
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_center(overlay);
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(overlay, [](lv_event_t* event) {
+        auto* self = static_cast<StackChanAvatarDisplay*>(lv_event_get_user_data(event));
+        self->HideSetupQr();
+    }, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(overlay, [](lv_event_t* event) {
+        auto* self = static_cast<StackChanAvatarDisplay*>(lv_event_get_user_data(event));
+        if (self->setup_qr_overlay_ == lv_event_get_target(event)) {
+            self->setup_qr_overlay_ = nullptr;
+            self->setup_qr_battery_index_ = -1; // parent screen may be deleting its children
+            self->HideSetupQr();
+        }
+    }, LV_EVENT_DELETE, this);
+
+    auto* qr = lv_qrcode_create(overlay);
+    if (!qr) { HideSetupQr(); Unlock(); return false; }
+    lv_qrcode_set_size(qr, 168);
+    lv_qrcode_set_dark_color(qr, lv_color_black());
+    lv_qrcode_set_light_color(qr, lv_color_white());
+    lv_qrcode_set_quiet_zone(qr, true);
+    if (lv_qrcode_update(qr, url.data(), static_cast<uint32_t>(url.size())) != LV_RESULT_OK) {
+        HideSetupQr(); Unlock(); return false;
+    }
+    lv_obj_align(qr, LV_ALIGN_CENTER, 0, -4);
+    lv_obj_remove_flag(qr, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(qr, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto label = [overlay](const char* text, lv_align_t align, int x, int y) {
+        auto* obj = lv_label_create(overlay);
+        lv_obj_set_style_text_font(obj, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(obj, lv_color_white(), 0);
+        lv_label_set_text(obj, text);
+        lv_obj_align(obj, align, x, y);
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+    };
+    label("Web SETUP", LV_ALIGN_TOP_MID, -36, 7);
+    label(url.c_str(), LV_ALIGN_BOTTOM_MID, 0, -23);
+    label("Tap to close", LV_ALIGN_BOTTOM_MID, 0, -3);
+    if (battery_indicator_) setup_qr_battery_index_ = battery_indicator_->BringToFront();
+
+    setup_qr_started_ms_ = lv_tick_get();
+    setup_qr_timer_ = lv_timer_create([](lv_timer_t* timer) {
+        auto* self = static_cast<StackChanAvatarDisplay*>(lv_timer_get_user_data(timer));
+        if (stackchan::low_battery::Active() || !self->setup_qr_overlay_ ||
+            lv_obj_get_parent(self->setup_qr_overlay_) != lv_screen_active() ||
+            lv_tick_elaps(self->setup_qr_started_ms_) >= 30000) {
+            self->HideSetupQr();
+        }
+    }, 100, this);
+    if (!setup_qr_timer_) { HideSetupQr(); Unlock(); return false; }
+    ESP_LOGI(TAG, "[SETUP_QR] displayed for 30 seconds or until tapped");
+    Unlock();
+    return true;
+}
+
 void StackChanAvatarDisplay::UpdateStatusBar(bool update_all)
 {
     (void)update_all;
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) HideSetupQr();
     if (battery_indicator_) battery_indicator_->Update();
 }
 
@@ -1113,6 +1210,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     DisplayLockGuard lock(this);
     if (stackchan::low_battery::Active()) {
+        HideSetupQr();
         // The shutdown scene owns the face, neck and fixed caption.
         // Actual PCM still drives its mouth through the normal audio observer.
         const bool speaking = strcmp(status, Lang::Strings::SPEAKING) == 0;

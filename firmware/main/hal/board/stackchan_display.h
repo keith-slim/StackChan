@@ -82,6 +82,12 @@ private:
     esp_timer_handle_t preview_timer_                = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
 
+    lv_obj_t* setup_qr_overlay_ = nullptr;
+    lv_timer_t* setup_qr_timer_ = nullptr;
+    uint32_t setup_qr_started_ms_ = 0;
+    int32_t setup_qr_battery_index_ = -1;
+    void HideSetupQr(); // caller owns the LVGL lock (or is the LVGL timer/event)
+
     void CreateIdleMotionModifier();
 
 protected:
@@ -107,6 +113,8 @@ public:
     virtual void SetTheme(Theme* theme) override;
     virtual void SetStatus(const char* status) override;
     virtual void ShowNotification(const char* notification, int duration_ms = 3000) override;
+
+    bool ShowSetupQr(const std::string& url);
 
     void ArmWakeFaceSmile() { wake_face_armed_.store(true); }
     bool ShowWakeFaceSmile();

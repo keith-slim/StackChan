@@ -7,6 +7,10 @@
 #include "hal.h"
 #include <mooncake_log.h>
 #include <mcp_server.h>
+#include <board.h>
+#include <wifi_manager.h>
+#include "board/stackchan_display.h"
+#include <stackchan/port_stage1/stage1_web.h>
 #include <stackchan/stackchan.h>
 #include <stackchan/motion/motion_math.h>
 #include <stackchan/port_stage1/port_stage1.h>
@@ -79,6 +83,25 @@ void Hal::xiaozhi_mcp_init()
                 date_time, weekday, zone_name, utc_offset, timezone, static_cast<long long>(now));
             mclog::tagInfo(_tag, "get_local_time: {}", result);
             return result;
+        });
+
+    // Display the live local Web SETUP address; never accept a URL from speech.
+    mclog::tagInfo(_tag, "add robot.show_setup_qr tool");
+    mcp_server.AddTool(
+        "self.robot.show_setup_qr",
+        "Show this device's Web SETUP QR code for 30 seconds or until tapped. "
+        "Call only when the user asks for the settings page or its QR code (設定画面は？). "
+        "Does not change settings or end the conversation. Returns false if unavailable.",
+        std::vector<Property>{}, [](const PropertyList&) -> ReturnValue {
+            auto& wifi = WifiManager::GetInstance();
+            if (stackchan::low_battery::Active() || !stackchan::stage1::web::IsReady() ||
+                !wifi.IsInitialized() || !wifi.IsConnected() || wifi.IsConfigMode()) return false;
+            const auto ip = wifi.GetIpAddress();
+            if (ip.empty() || ip == "0.0.0.0") return false;
+            auto* display = static_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay());
+            const bool shown = display && display->ShowSetupQr("http://" + ip + "/");
+            mclog::tagInfo(_tag, "show_setup_qr: shown={}", shown);
+            return shown;
         });
 
     mclog::tagInfo(_tag, "add robot.get_head_angles tool");

@@ -46,6 +46,12 @@ public:
     BatteryIndicator(const BatteryIndicator&) = delete;
     BatteryIndicator& operator=(const BatteryIndicator&) = delete;
     void Align(lv_align_t alignment, int x, int y) { lv_obj_align(root_, alignment, x, y); }
+    int32_t BringToFront() {
+        const int32_t index = lv_obj_get_index(root_);
+        lv_obj_move_to_index(root_, -1);
+        return index;
+    }
+    void RestoreIndex(int32_t index) { lv_obj_move_to_index(root_, index); }
     void Update() {
         using namespace stackchan::low_battery;
         const int bits = sample_bits.load();
