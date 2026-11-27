@@ -52,6 +52,7 @@ void Motion::UpdateWorker(void* arg)
     TickType_t previous_update = last;
     while (!self->_worker_stop.load()) {
         self->_yaw_servo->servicePriorityStop();
+        self->_pitch_servo->servicePriorityStop();
         executor::service();
         const TickType_t now = xTaskGetTickCount();
         const TickType_t elapsed = now - last;
@@ -95,6 +96,8 @@ void Motion::update()
 void Motion::updateServos()
 {
     _yaw_servo->update();
+    _yaw_servo->servicePriorityStop();
+    _pitch_servo->servicePriorityStop();
     executor::service(); // dispatch before lower-priority pitch monitoring
     _pitch_servo->update();
 }
@@ -131,32 +134,47 @@ void Motion::movePitchWithSpeed(int angle, int speed)
 
 void Motion::move(int yawAngle, int pitchAngle)
 {
-    _yaw_servo->move(yawAngle);
-    _pitch_servo->move(pitchAngle);
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->move(yawAngle);
+        _pitch_servo->move(pitchAngle);
+    });
 }
 
 void Motion::moveWithSpeed(int yawAngle, int pitchAngle, int speed)
 {
-    _yaw_servo->moveWithSpeed(yawAngle, speed);
-    _pitch_servo->moveWithSpeed(pitchAngle, speed);
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->moveWithSpeed(yawAngle, speed);
+        _pitch_servo->moveWithSpeed(pitchAngle, speed);
+    });
 }
 
 void Motion::trackWithSpeed(int yawAngle, int pitchAngle, int speed)
 {
-    _yaw_servo->trackWithSpeed(yawAngle, speed);
-    _pitch_servo->trackWithSpeed(pitchAngle, speed);
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->trackWithSpeed(yawAngle, speed);
+        _pitch_servo->trackWithSpeed(pitchAngle, speed);
+    });
 }
 
 void Motion::moveWithDuration(int yawAngle, int pitchAngle, uint32_t duration_ms, uint32_t now)
 {
-    _yaw_servo->moveWithDuration(yawAngle, duration_ms, now);
-    _pitch_servo->moveWithDuration(pitchAngle, duration_ms, now);
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->moveWithDuration(yawAngle, duration_ms, now);
+        _pitch_servo->moveWithDuration(pitchAngle, duration_ms, now);
+    });
 }
 
 void Motion::cancelTimedMove()
 {
-    _yaw_servo->cancelTimedMove();
-    _pitch_servo->cancelTimedMove();
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->cancelTimedMove();
+        _pitch_servo->cancelTimedMove();
+    });
 }
 
 void Motion::moveRelativeFrom(const uitk::Vector2i& origin, int yawDelta, int pitchDelta, int speed)
@@ -171,14 +189,16 @@ void Motion::moveRelativeFrom(const uitk::Vector2i& origin, int yawDelta, int pi
 
 void Motion::goHome(int speed)
 {
-    _yaw_servo->moveWithSpeed(0, speed);
-    _pitch_servo->moveWithSpeed(0, speed);
+    moveWithSpeed(0, 0, speed);
 }
 
 void Motion::stop()
 {
-    _yaw_servo->move(_yaw_servo->getCurrentAngle());
-    _pitch_servo->move(_pitch_servo->getCurrentAngle());
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->move(_yaw_servo->getCurrentAngle());
+        _pitch_servo->move(_pitch_servo->getCurrentAngle());
+    });
 }
 
 void Motion::lookAtNormalized(float x, float y, int speed)
@@ -196,7 +216,9 @@ void Motion::lookAtPoint(float x, float y, float z, int speed)
 
 bool Motion::isMoving()
 {
-    return _yaw_servo->isMoving() || _pitch_servo->isMoving();
+    bool moving = false;
+    executor::invoke([&] { moving = _yaw_servo->isMoving() || _pitch_servo->isMoving(); });
+    return moving;
 }
 
 int Motion::getCurrentYawAngle()
@@ -211,25 +233,38 @@ int Motion::getCurrentPitchAngle()
 
 uitk::Vector2i Motion::getCurrentAngles()
 {
-    return uitk::Vector2i(_yaw_servo->getCurrentAngle(), _pitch_servo->getCurrentAngle());
+    uitk::Vector2i result(0, 0);
+    executor::invoke([&] {
+        result = uitk::Vector2i(_yaw_servo->getCurrentAngle(), _pitch_servo->getCurrentAngle());
+    });
+    return result;
 }
 
 void Motion::setTorqueEnabled(bool enabled)
 {
-    _yaw_servo->setTorqueEnabled(enabled);
-    _pitch_servo->setTorqueEnabled(enabled);
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->setTorqueEnabled(enabled);
+        _pitch_servo->setTorqueEnabled(enabled);
+    });
 }
 
 void Motion::setAutoTorqueReleaseEnabled(bool enabled)
 {
-    _yaw_servo->setAutoTorqueReleaseEnabled(enabled);
-    _pitch_servo->setAutoTorqueReleaseEnabled(enabled);
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->setAutoTorqueReleaseEnabled(enabled);
+        _pitch_servo->setAutoTorqueReleaseEnabled(enabled);
+    });
 }
 
 void Motion::setAutoAngleSyncEnabled(bool enabled)
 {
-    _yaw_servo->setAutoAngleSyncEnabled(enabled);
-    _pitch_servo->setAutoAngleSyncEnabled(enabled);
+    // Submit a paired operation as one owner request, not two independently interleaved calls.
+    executor::invoke([&] {
+        _yaw_servo->setAutoAngleSyncEnabled(enabled);
+        _pitch_servo->setAutoAngleSyncEnabled(enabled);
+    });
 }
 
 void Motion::setModifyLock(bool locked)

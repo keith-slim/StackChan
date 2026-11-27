@@ -188,6 +188,7 @@ protected:
      */
     virtual void set_angle_impl(int angle) = 0;
     virtual void set_tracking_angle_impl(int angle, int rate) { set_angle_impl(angle); }
+    virtual void reanchor_tracking_impl(int measured) { (void)measured; }
     virtual bool write_hardware_sweep(int angle, int rate, int measured) { return false; }
     virtual bool hold_hardware_sweep(int& measured) { return false; }
     virtual bool supports_hardware_sweep() const { return false; }
@@ -215,6 +216,8 @@ protected:
     std::atomic<bool> _hardware_stop_requested{false};
     std::atomic<uint32_t> _hardware_stop_revision{0};
     std::atomic<const char*> _hardware_stop_reason{"unspecified"};
+    uint32_t _hardware_stop_attempt_tick = 0;
+    bool _hardware_stop_attempted = false;
     float _tracking_position = 0.0f;
     float _tracking_velocity = 0.0f;
     int _tracking_rate = 0;

@@ -81,6 +81,7 @@ void Servo::update()
             _tracking_replan_pending = true;
             _tracking_replan_tick = _last_tick - kTrackingReplanMs;
         }
+        bool replanned = false;
         if (_tracking_replan_pending) {
             // A stalled control task must not send all missed time as a
             // sudden position jump. Resume only from measured feedback.
@@ -91,6 +92,9 @@ void Servo::update()
             _tracking_position = static_cast<float>(uitk::clamp(measured, _angle_limit.x, _angle_limit.y));
             _tracking_velocity = 0.0f;
             _tracking_replan_pending = false;
+            _angle_anim.teleport(static_cast<int>(_tracking_position));
+            reanchor_tracking_impl(static_cast<int>(_tracking_position));
+            replanned = true;
             elapsed = kTrackingStepMs;
         }
         const auto result = AdvanceTracking(_tracking_position, _tracking_velocity,
@@ -100,7 +104,7 @@ void Servo::update()
         _tracking_velocity = result.velocity;
         if (result.reached) _profile = Profile::Idle;
         const int angle = uitk::clamp(static_cast<int>(std::lround(_tracking_position)), _angle_limit.x, _angle_limit.y);
-        if (angle != static_cast<int>(_angle_anim.directValue()) || _profile != Profile::Tracking) {
+        if (replanned || angle != static_cast<int>(_angle_anim.directValue()) || _profile != Profile::Tracking) {
             _angle_anim.teleport(angle);
             set_tracking_angle_impl(angle, _tracking_rate);
         }
@@ -192,6 +196,7 @@ uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
     _goal = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(static_cast<int>(std::lround(position)));
     if (!_torque_commanded_enabled) setTorqueEnabled(true);
+    if (!preserve_trajectory && measured_start) reanchor_tracking_impl(static_cast<int>(std::lround(position)));
     _tracking_replan_pending = pending_replan;
     if (!preserve_trajectory) _tracking_tick = GetHAL().millis();
     _profile = Profile::Tracking;
@@ -232,6 +237,12 @@ void Servo::servicePriorityStop()
     if (_profile != Profile::HardwareSweep) return;
     if (sweep_cancelled() && !_hardware_stop_requested.load()) requestHardwareStop("detection_or_end");
     if (!_hardware_stop_requested.load() || _hardware_stop_revision.load() != getCommandRevision()) return;
+    // Multiple dispatch checkpoints may observe the same priority request.
+    // First attempt is immediate; subsequent attempts are at most 50 Hz.
+    const uint32_t now = GetHAL().millis();
+    if (_hardware_stop_attempted && now - _hardware_stop_attempt_tick < 20) return;
+    _hardware_stop_attempted = true;
+    _hardware_stop_attempt_tick = now;
     int measured = 0;
     if (hold_hardware_sweep(measured)) stop_motion_at_angle(measured);
 }
@@ -244,6 +255,8 @@ void Servo::requestHardwareStop(const char* reason)
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     if (_profile != Profile::HardwareSweep) return;
+    if (!_hardware_stop_requested.load() || _hardware_stop_revision.load() != getCommandRevision())
+        _hardware_stop_attempted = false;
     _hardware_stop_reason.store(reason);
     _hardware_stop_revision.store(getCommandRevision());
     _hardware_stop_requested.store(true, std::memory_order_release);
@@ -319,6 +332,7 @@ void Servo::cancel_profile(bool preserve_spring)
 {
     _command_revision.fetch_add(1, std::memory_order_relaxed);
     _hardware_stop_requested.store(false, std::memory_order_release);
+    _hardware_stop_attempted = false;
     _timed_move.Cancel();
     _tracking_replan_pending = false;
     if (preserve_spring && _profile == Profile::Spring) return;

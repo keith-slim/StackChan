@@ -116,7 +116,8 @@ int SCSerial::readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bo
 		const int64_t tick_us = static_cast<int64_t>(portTICK_PERIOD_MS) * 1000;
 		const TickType_t ticks = static_cast<TickType_t>((remaining + tick_us - 1) / tick_us);
 		const int len = uart_read_bytes(uart_num, nDat ? nDat + size : discard, count, ticks);
-		if (len <= 0) break;
+		if (len < 0) break;
+		if (len == 0) continue; // A tick-aligned timeout may end before the absolute deadline.
 		// A task preempted beyond its transaction deadline must not
 		// accept late bytes as feedback from the current command.
 		if (esp_timer_get_time() >= deadline) break;

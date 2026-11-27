@@ -111,12 +111,13 @@ public:
     bool send_position(int raw, uint16_t duration)
     {
         const auto before = _scs_bus.getWriteAckDiagnostic(_config.id).received;
-        _scs_bus.WritePos(_config.id, raw, duration, 0);
+        const bool transmitted = _scs_bus.WritePos(_config.id, raw, duration, 0) == 1;
         _feedback_position = -1;
         _last_tracking_raw = -1;
         _last_ack_raw = -1;
-        _monitor_target = raw;
-        return _scs_bus.getWriteAckDiagnostic(_config.id).received != before && _scs_bus.getState() == 0;
+        if (transmitted) _monitor_target = raw;
+        else ESP_LOGW("ScsServo", "[SERVO_TX_FAIL] id=%d raw=%d sweep_or_hold=1", _config.id, raw);
+        return transmitted && _scs_bus.getWriteAckDiagnostic(_config.id).received != before && _scs_bus.getState() == 0;
     }
     bool issue_sweep(int raw, int rate, int start)
     {
@@ -238,6 +239,15 @@ public:
         writeAngle(angle, rate);
     }
 
+    // The measured pose, rather than the last estimated setpoint, anchors
+    // the first segment after a delayed control cycle or fresh tracking entry.
+    void reanchor_tracking_impl(int measured) override
+    {
+        std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
+        _last_tracking_raw = angle_to_raw(measured);
+        _last_ack_raw = -1;
+    }
+
     void writeAngle(int angle, int rate)
     {
         if (executor::external()) {
@@ -250,8 +260,9 @@ public:
 
         // mclog::tagInfo(_tag, "id: {} mapped angle: {}", _id, mapped_angle);
 
-        _monitor_target = mapped_angle;
-        if (update_stall_protection(mapped_angle)) {
+        // Protect the previously issued physical target, not a new
+        // interpolation point which has not been sent to the actuator.
+        if (_monitor_target >= 0 && update_stall_protection(_monitor_target)) {
             return;
         }
 
@@ -278,8 +289,15 @@ public:
             duration = static_cast<uint16_t>(uitk::clamp(ms, 20, 65535));
         }
         const auto ack_before = _scs_bus.getWriteAckDiagnostic(_config.id).received;
-        _scs_bus.WritePos(_config.id, mapped_angle, duration, 0);
+        const bool transmitted = _scs_bus.WritePos(_config.id, mapped_angle, duration, 0) == 1;
         if (!_feedback_bulk) _feedback_position = -1;
+        if (!transmitted) {
+            // Do not advance the physical command baseline on a failed TX.
+            _last_ack_raw = -1;
+            ESP_LOGW("ScsServo", "[SERVO_TX_FAIL] id=%d raw=%d sweep_or_hold=0", _config.id, mapped_angle);
+            return;
+        }
+        _monitor_target = mapped_angle;
         const bool acknowledged = _scs_bus.getWriteAckDiagnostic(_config.id).received != ack_before &&
                                   _scs_bus.getState() == 0;
         _last_tracking_raw = rate > 0 ? mapped_angle : -1;
@@ -632,7 +650,9 @@ private:
         }
         _last_stall_check_tick = now;
 
-        _feedback_position = -1;
+        // A failed bulk sample does not erase a still-fresh measured
+        // position from a separate short read. Stall history is invalidated
+        // below, independently from the position cache.
         int feedback = _scs_bus.FeedBack(_config.id);
         // A single retry is useful only after an isolated lost sample.
         // Do not double bus load throughout a persistent outage.
