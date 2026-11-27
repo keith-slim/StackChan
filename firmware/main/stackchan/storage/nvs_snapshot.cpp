@@ -9,6 +9,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
+#include <memory>
+#include <esp_heap_caps.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -117,19 +119,30 @@ bool ReadValue(nvs_handle_t h, const nvs_entry_info_t& info, std::string& value)
         case NVS_TYPE_STR: {
             size_t n=0;
             err=nvs_get_str(h,key,nullptr,&n);
-            if(err!=ESP_OK || n==0 || n>kMaxValue+1)break;
-            std::vector<char> buf(n);
-            err=nvs_get_str(h,key,buf.data(),&n);
-            if(err==ESP_OK)value.assign(buf.data());
+            if(err!=ESP_OK)break;
+            if(n==0 || n>kMaxValue+1)return false;
+            // Read-only staging buffer: explicitly external, no DMA use.
+            std::unique_ptr<char, decltype(&heap_caps_free)> buf(
+                static_cast<char*>(heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+                &heap_caps_free);
+            if(!buf)return false;
+            err=nvs_get_str(h,key,buf.get(),&n);
+            if(err==ESP_OK)value.assign(buf.get());
             break;
         }
         case NVS_TYPE_BLOB: {
             size_t n=0;
             err=nvs_get_blob(h,key,nullptr,&n);
-            if(err!=ESP_OK || n>kMaxValue)break;
-            std::vector<uint8_t> buf(n);
-            err=nvs_get_blob(h,key,buf.empty()?nullptr:buf.data(),&n);
-            if(err==ESP_OK)value=Hex(buf.data(),n);
+            if(err!=ESP_OK)break;
+            if(n>kMaxValue)return false;
+            std::unique_ptr<uint8_t, decltype(&heap_caps_free)> buf(
+                n ? static_cast<uint8_t*>(heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) : nullptr,
+                &heap_caps_free);
+            if(n && !buf)return false;
+            const size_t capacity = n;
+            err=nvs_get_blob(h,key,buf.get(),&n);
+            if(err==ESP_OK && n<=capacity)value=Hex(buf.get(),n);
+            else return false;
             break;
         }
         default: return false;
