@@ -90,12 +90,12 @@ void SCS::writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun)
 
 //普通写指令
 //舵机ID，MemAddr内存表地址，写入数据，写入长度
-int SCS::genWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen)
+int SCS::genWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u16 ackTimeoutUs)
 {
 	rFlushSCS();
 	writeBuf(ID, MemAddr, nDat, nLen, INST_WRITE);
 	wFlushSCS();
-	return Ack(ID);
+	return Ack(ID, ackTimeoutUs);
 }
 
 //异步写指令
@@ -327,7 +327,7 @@ bool SCS::validAck(u8 id, const u8* body)
 	       static_cast<u8>(~(body[0] + body[1] + body[2])) == body[3];
 }
 
-int	SCS::Ack(u8 ID)
+int	SCS::Ack(u8 ID, u16 ackTimeoutUs)
 {
 	u8Error = 0;
 	u8Status = 0;
@@ -335,7 +335,7 @@ int	SCS::Ack(u8 ID)
 	if (!Level && (ID == 1 || ID == 2)) {
 		u8 frame[6];
 		auto& d = write_ack_diag[ID - 1];
-		const int received = readOptionalAck(ID, frame, sizeof(frame));
+		const int received = readOptionalAck(ID, frame, sizeof(frame), ackTimeoutUs);
 		if (received == 0) ++d.absent;
 		else if (received == sizeof(frame) && frame[0] == 0xff &&
 		         frame[1] == 0xff && validAck(ID, frame + 2)) {

@@ -16,7 +16,8 @@ public:
 	SCS();
 	SCS(u8 End);
 	SCS(u8 End, u8 Level);
-	int genWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen);//普通写指令
+	static constexpr u16 kDefaultAckTimeoutUs = 1000;
+	int genWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u16 ackTimeoutUs = kDefaultAckTimeoutUs);//普通写指令
 	int regWrite(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen);//异步写指令
 	int RegWriteAction(u8 ID = 0xfe);//异步写执行指令
 	void syncWrite(u8 ID[], u8 IDN, u8 MemAddr, u8 *nDat, u8 nLen);//同步写指令
@@ -75,13 +76,13 @@ protected:
 	virtual int writeSCS(unsigned char bDat) = 0;
 	virtual void rFlushSCS() = 0;
 	virtual void wFlushSCS() = 0;
-	virtual int readOptionalAck(u8 id, u8* data, int count) { (void)id; (void)data; (void)count; return 0; }
+	virtual int readOptionalAck(u8, u8*, int, u16) { return 0; }
 	virtual bool transmissionOk() const { return true; }
 protected:
 	void writeBuf(u8 ID, u8 MemAddr, u8 *nDat, u8 nLen, u8 Fun);
 	void Host2SCS(u8 *DataL, u8* DataH, u16 Data);//1个16位数拆分为2个8位数
 	u16	SCS2Host(u8 DataL, u8 DataH);//2个8位数组合为1个16位数
-	int	Ack(u8 ID);//返回应答
+	int	Ack(u8 ID, u16 ackTimeoutUs = kDefaultAckTimeoutUs);//返回应答
 	int checkHead();//帧头检测
 private:
 	ReadHeaderDiagnostic read_header_diag[2][2]{};

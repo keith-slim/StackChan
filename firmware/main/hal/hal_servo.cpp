@@ -289,7 +289,9 @@ public:
             duration = static_cast<uint16_t>(uitk::clamp(ms, 20, 65535));
         }
         const auto ack_before = _scs_bus.getWriteAckDiagnostic(_config.id).received;
-        const bool transmitted = _scs_bus.WritePos(_config.id, mapped_angle, duration, 0) == 1;
+        // Give streaming position writes a short margin for UART delivery under load.
+        constexpr uint16_t kPositionAckTimeoutUs = 1500;
+        const bool transmitted = _scs_bus.WritePos(_config.id, mapped_angle, duration, 0, kPositionAckTimeoutUs) == 1;
         if (!_feedback_bulk) _feedback_position = -1;
         if (!transmitted) {
             // Do not advance the physical command baseline on a failed TX.

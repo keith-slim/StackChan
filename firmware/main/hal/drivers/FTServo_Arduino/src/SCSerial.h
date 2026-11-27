@@ -39,7 +39,7 @@ private:
 	u8 _tx_frame[262]{};
 	int _tx_frame_size = 0;
 	bool _tx_frame_complete = true;
-	uint32_t _ack_echo = 0, _ack_resync = 0;
+	uint32_t _ack_echo = 0, _ack_resync = 0, _ack_echo_only = 0, _ack_after_1ms = 0;
 	void rememberTx(const u8* data, int count);
 	void drainEvents();
 	int readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bool interByteTimeout);
@@ -50,7 +50,7 @@ protected:
 	int writeSCS(unsigned char bDat);//输出1字节
 	void rFlushSCS();//
 	void wFlushSCS();//
-	int readOptionalAck(u8 id, u8* data, int count) override;
+	int readOptionalAck(u8 id, u8* data, int count, u16 timeoutUs) override;
 	bool transmissionOk() const override { return _tx_ok; }
 public:
 	unsigned long IOTimeOut;//输入输出超时
