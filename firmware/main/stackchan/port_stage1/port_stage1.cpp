@@ -20,6 +20,7 @@
 #include "speech_effects.h"
 #include <stackchan/avatar/skins/default/default.h>
 #include <stackchan/avatar/face_snapshot.h>
+#include <stackchan/avatar/decorators/decorators.h>
 #include <application.h>
 #include <stackchan/stackchan.h>
 #include <hal/hal.h>
@@ -361,9 +362,11 @@ struct Runtime {
     avatar::FaceSnapshot conversation_face;
     uint32_t conversation_at = 0, listening_nod_at = 0;
     bool listening_nod = false;
-    uint32_t eye_contact_since = 0, averted_at = 0, last_averted_at = 0;
-    int avert_direction = 1;
-    bool averted_this_listen = false;
+    uint32_t eye_contact_since = 0, last_averted_at = 0;
+    OwnedTracking gaze_yaw;
+    std::unique_ptr<avatar::ShyDecorator> gaze_blush;
+    int gaze_origin = 0;
+    bool gaze_enabled = false, averted_this_listen = false, gaze_returning = false;
     std::unique_ptr<AvatarThinkingFace> thinking_face;
     Clock schedule;
     Phase phase = Phase::Boot;
@@ -489,6 +492,7 @@ struct Runtime {
     }
     void EndConversation(StackChan& sc) {
         if (conversation_pose == ConversationPose::None) return;
+        StopListeningGlance(sc.motion().yawServo());
         thinking_face.reset();
         if (conversation_saved) conversation_face.Restore(sc.avatar());
         conversation_saved = false;
@@ -498,6 +502,7 @@ struct Runtime {
     void BeginConversation(StackChan& sc, ConversationPose pose, uint32_t now) {
         if (pose == ConversationPose::None) { EndConversation(sc); return; }
         if (conversation_pose == pose) return;
+        StopListeningGlance(sc.motion().yawServo());
         if (!conversation_saved) {
             if (phase == Phase::NightSleep || phase == Phase::NightTemporary)
                 ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] reset source=conversation_pose phase=%d pose=%d",
@@ -519,7 +524,7 @@ struct Runtime {
         if (pose == ConversationPose::Listening) {
             thinking_face.reset();
             listening_nod = false;
-            eye_contact_since = averted_at = 0;
+            eye_contact_since = 0;
             averted_this_listen = false;
         }
         conversation_pose = pose;
@@ -529,21 +534,81 @@ struct Runtime {
             listening_nod_at = now;
         }
     }
-    int ListeningGlance(uint32_t now) {
-        const uint32_t contact = eye_contact_at.load();
-        if (!contact || static_cast<int32_t>(now - contact) > 700) eye_contact_since = 0;
-        else if (!eye_contact_since) eye_contact_since = now;
-        else if (!averted_this_listen && now - eye_contact_since >= 2200 &&
-                 (!last_averted_at || now - last_averted_at >= 12000)) {
-            averted_this_listen = true;
-            averted_at = last_averted_at = now;
-            avert_direction = (esp_random() & 1) ? 1 : -1;
-            ESP_LOGI(LOG_TAG, "[GAZE] listening glance after eye contact");
+    void StopListeningGlance(motion::Servo& yaw, const char* result = "canceled") {
+        if (!gaze_yaw.commanded) return;
+        gaze_yaw.Stop(yaw);
+        gaze_blush.reset();
+        perception_looks.Invalidate();
+        ESP_LOGI(LOG_TAG, "[GAZE] phase=ended result=%s", result);
+    }
+    bool TickListeningGlance(StackChan& sc, uint32_t now, bool available) {
+        constexpr int kGlanceAngle = 80; // 8 degrees in servo angle units
+        constexpr uint32_t kTurnBackMs = 500, kGlanceTimeoutMs = 1500;
+        auto& motion = sc.motion();
+        auto& yaw = motion.yawServo();
+        if (!gaze_enabled || !available || conversation_pose != ConversationPose::Listening) {
+            eye_contact_since = 0;
+            StopListeningGlance(yaw);
+            return false;
         }
-        if (!averted_at || now - averted_at >= 1000) return 0;
-        const auto elapsed = now - averted_at;
-        const uint32_t travel = std::min<uint32_t>({elapsed, 180, 1000 - elapsed});
-        return avert_direction * static_cast<int>(60U * travel / 180U);
+        if (gaze_yaw.commanded) {
+            const auto elapsed = now - last_averted_at;
+            if (gaze_yaw.Superseded(yaw)) {
+                StopListeningGlance(yaw);
+                return false;
+            }
+            if (gaze_returning && !yaw.isTrackingCommandActive()) {
+                StopListeningGlance(yaw, "completed");
+                return false;
+            }
+            if (elapsed >= kGlanceTimeoutMs) {
+                StopListeningGlance(yaw, "timeout");
+                return false;
+            }
+            if (!gaze_returning && elapsed >= kTurnBackMs) {
+                gaze_yaw.Issue(yaw, gaze_origin, now, kFaceTrackingRate);
+                gaze_returning = true;
+            }
+            return true;
+        }
+        const uint32_t contact = eye_contact_at.load();
+        if (!contact || static_cast<int32_t>(now - contact) > 700) {
+            eye_contact_since = 0;
+            return false;
+        }
+        if (!eye_contact_since) eye_contact_since = now;
+        if (averted_this_listen || now - eye_contact_since < 2200 ||
+            (last_averted_at && now - last_averted_at < 12000)) return false;
+
+        if (!yaw.tryGetCurrentAngle(gaze_origin)) {
+            eye_contact_since = 0;
+            return false;
+        }
+        const auto limits = yaw.getAngleLimit();
+        gaze_origin = std::clamp(gaze_origin, limits.x, limits.y);
+        const bool can_turn_left = gaze_origin - limits.x >= kGlanceAngle;
+        const bool can_turn_right = limits.y - gaze_origin >= kGlanceAngle;
+        if (!can_turn_left && !can_turn_right) {
+            eye_contact_since = 0;
+            return false;
+        }
+        const bool turn_right = can_turn_right && (!can_turn_left || (esp_random() & 1));
+        const int target = gaze_origin + (turn_right ? kGlanceAngle : -kGlanceAngle);
+        // 顔追従の指示を破棄し、首が戻るまで上下左右の追従を保留する。
+        perception_looks.Invalidate();
+        perception_yaw.Stop(yaw, &gaze_origin);
+        perception_pitch.Stop(motion.pitchServo());
+        gaze_yaw.Issue(yaw, target, now, kFaceTrackingRate, &gaze_origin);
+        averted_this_listen = true;
+        last_averted_at = now;
+        gaze_returning = false;
+        const bool blush = (esp_random() & 1) != 0;
+        if (blush && sc.avatar().getEmotion() != avatar::Emotion::Happy) {
+            auto& avatar = static_cast<avatar::DefaultAvatar&>(sc.avatar());
+            gaze_blush = std::make_unique<avatar::ShyDecorator>(avatar.getPanel()->get());
+        }
+        ESP_LOGI(LOG_TAG, "[GAZE] phase=started yaw=%d target=%d blush=%d", gaze_origin, target, blush);
+        return true;
     }
     void DrawConversation(StackChan& sc, uint32_t now) {
         auto& av = sc.avatar();
@@ -566,11 +631,10 @@ struct Runtime {
         const bool blink = (now - conversation_at) % avatar_config::CONVERSATION_BLINK_PERIOD_MS >=
             avatar_config::CONVERSATION_BLINK_PERIOD_MS - avatar_config::CONVERSATION_BLINK_MS;
         const int offset = nodding ? avatar_nod::Offset(now - listening_nod_at) : -5;
-        const int glance = conversation_pose == ConversationPose::Listening ? ListeningGlance(now) : 0;
         for (auto* eye : {&av.leftEye(), &av.rightEye()}) {
-            eye->setPosition({glance, offset});
+            eye->setPosition({0, offset});
             eye->setSize(nodding ? 0 : 6);
-            eye->setWeight(blink && !nodding ? 0 : (glance ? 85 : 100));
+            eye->setWeight(blink && !nodding ? 0 : 100);
         }
         av.mouth().setPosition({0, nodding ? offset : 0});
         av.mouth().setWeight(0);
@@ -1258,6 +1322,9 @@ void Start() {
     CancelDreamRemark();
     weather_changes = weather::Changes{};
     r = Runtime{};
+    static const bool gaze_enabled_at_boot = (esp_random() & 1) != 0;
+    r.gaze_enabled = gaze_enabled_at_boot;
+    ESP_LOGI(LOG_TAG, "[GAZE] boot neck glance=%s", r.gaze_enabled ? "enabled" : "disabled");
     speech_effects = SpeechEffectsRuntime{};
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
@@ -1317,6 +1384,7 @@ void Stop() {
     weather_changes = weather::Changes{};
     r.RestoreNightBacklight();
     r.ClearVisuals();
+    r.StopListeningGlance(GetStackChan().motion().yawServo());
     r = Runtime{};
     speech_effects = SpeechEffectsRuntime{};
     speech_tracking_paused.store(false);
@@ -1757,7 +1825,8 @@ void Update(StackChan& sc) {
                                 r.schedule.RequestWake(requested, now);
     if (requested != WakeReason::None) dream_remark_cancel_requested.store(true);
     if (accepted_wake || wake_sequence_active.load()) event = false;
-    if (manual_motion.exchange(false)) {
+    const bool motion_interrupted = manual_motion.exchange(false);
+    if (motion_interrupted) {
         r.motion_held = true;
         // A newer manual command takes precedence over ongoing animations.
         if (r.cue_active) r.restore_neck_on_release = false;
@@ -1794,6 +1863,10 @@ void Update(StackChan& sc) {
     const bool search_blocked = device_state == kDeviceStateSpeaking || speech_tracking_paused.load() ||
         r.cue_active || r.own_neck || IsWakeSequenceActive() || Runtime::Sleeping(r.phase) ||
         Runtime::SleepPreparing(r.phase) || search_motion.isModifyLocked() || sc.avatar().isModifyLocked();
+    const bool can_glance = device_state == kDeviceStateListening && !search_blocked &&
+        !motion_interrupted && !ps.running && !search_start.load() && !search_cancel.load() &&
+        !face_pitch_requested.load() && !face_pitch_search.commanded && !wake_pitch_pending.load();
+    const bool gaze_moving = r.TickListeningGlance(sc, now, can_glance);
     if (search_cancel.load()) {
         perception_looks.Invalidate();
         if (ps.End(sc, true)) {
@@ -1803,13 +1876,13 @@ void Update(StackChan& sc) {
             search_cancel.store(false);
         }
     }
-    if (!search_blocked && wake_pitch_pending.exchange(false)) {
+    if (!search_blocked && !gaze_moving && wake_pitch_pending.exchange(false)) {
         const auto pitch_limits = search_motion.pitchServo().getAngleLimit();
         const int target = std::clamp(100, pitch_limits.x, pitch_limits.y);
         search_motion.movePitchWithSpeed(target, 150);
         ESP_LOGI(LOG_TAG, "[PERSON_SEARCH] wake pitch=%d", target);
     }
-    const int start = (search_blocked || search_cancel.load()) ? 0 : search_start.exchange(0);
+    const int start = (search_blocked || gaze_moving || search_cancel.load()) ? 0 : search_start.exchange(0);
     if (start != 0 && !ps.End(sc, true)) search_start.store(start);
     else if (start != 0) {
         perception_yaw.Stop(search_yaw);
@@ -1932,7 +2005,7 @@ void Update(StackChan& sc) {
         }
         fps = FacePitchSearch{};
         if (face_pitch_epoch.load() != speech_motion_epoch.load()) face_pitch_requested.store(false);
-    } else if (search_blocked || ps.running || search_cancel.load()) {
+    } else if (search_blocked || gaze_moving || ps.running || search_cancel.load()) {
         fps.Pause(sc);
     } else {
         if (fps.Superseded(search_pitch)) {
@@ -1991,7 +2064,7 @@ void Update(StackChan& sc) {
         perception_yaw.Stop(search_yaw);
         perception_pitch.Stop(search_pitch);
     }
-    {
+    if (!gaze_moving) {
         PerceptionLook look;
         const bool motion_available = !search_blocked && !ps.running && !search_cancel.load() && !face_pitch_requested.load();
         const auto result = perception_looks.Take(GetHAL().millis(), motion_available, look);

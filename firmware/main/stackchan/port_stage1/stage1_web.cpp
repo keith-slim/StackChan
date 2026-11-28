@@ -986,7 +986,7 @@ function logGroupRow(event,label='',kind=''){
 }
 function groupNormalLogs(events){
  const groups=[],finishedSpeech=new Map();
- let active=null,theatre=null,scheduled=null,boot=null,tail=null,nap=null;
+ let active=null,theatre=null,scheduled=null,boot=null,tail=null,nap=null,gaze=null;
  const push=(event,label,kind)=>{const group=logGroupRow(event,label,kind);groups.push(group);return group;};
  const merge=(from,into)=>{into.events.unshift(...from.events);from.merged=true;};
  const closeAt=(group,eventTime)=>{group.closedAt=eventTime;tail=group;};
@@ -1004,8 +1004,22 @@ function groupNormalLogs(events){
   const text=event.message;
   if(event.category==='起動'){
    if(nap){nap.result='終了記録なし';nap=null;}
+   if(gaze){gaze.result='終了記録なし';gaze=null;}
    finish('終了',event.uptime_ms);
    boot=active=push(event,'起動','boot');
+   continue;
+  }
+  const gazePhase=text.match(/^\[GAZE\] phase=(started|ended)\b/)?.[1];
+  if(gazePhase){
+   if(gazePhase==='started'){
+    if(gaze)gaze.result='終了記録なし';
+    gaze=push(event,'目そらし','gaze');
+   }else{
+    if(gaze)gaze.events.push(event);
+    else gaze=push(event,'目そらし','gaze');
+    gaze.result=text.includes(' result=completed')?'完了':text.includes(' result=timeout')?'タイムアウト':'中断';
+    gaze=null;
+   }
    continue;
   }
   const napPhase=text.match(/^\[NAP\] phase=(\w+)/)?.[1];
