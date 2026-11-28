@@ -159,6 +159,13 @@ void StackChanPerception::WorkerEntry(void* context)
 
 void StackChanPerception::RunWorker(uint64_t snapshot_end)
 {
+    const char* log_phase = "";
+    const auto set_log_phase = [&](const char* phase) {
+        if (std::strcmp(log_phase, phase) == 0) return;
+        log_phase = phase;
+        ESP_LOGI(kTag, "[TRACK_PHASE] phase=%s", phase);
+    };
+    set_log_phase("started");
     const size_t available = static_cast<size_t>(std::min<uint64_t>(snapshot_end, kSnapshotFrames));
     int16_t* snapshot      = nullptr;
     if (available >= 256) {
@@ -232,6 +239,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         // Keep audio transport bandwidth available during playback and
         // avoid tracking a deliberately moving expression pose.
         if (state == kDeviceStateSpeaking || stackchan::stage1::IsSpeechTrackingPaused()) {
+            set_log_phase("paused");
             stackchan::stage1::NoteEyeContact(false, 0);
             face_filter_initialized = false;
             face_center_locked = false;
@@ -285,6 +293,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         monitor_band = 0.0f;
         monitor_yaw = monitor_pitch = 0;
         if (stackchan::stage1::IsPersonSearchActive()) {
+            set_log_phase("search");
             stackchan::stage1::NoteEyeContact(false, 0);
             face_pitch.Reset();
             if (valid_frame && ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore)) {
@@ -308,6 +317,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             continue;
         }
         if (was_searching || stackchan::stage1::IsPersonSearchStopping()) {
+            set_log_phase("search");
             stackchan::stage1::NoteEyeContact(false, 0);
             face_pitch.Reset();
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
@@ -324,6 +334,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             face_pitch.ResetMotion();
         }
         if (tracking_face) {
+            set_log_phase("face");
             if (stackchan::stage1::IsFacePitchSearchRequested()) {
                 stackchan::stage1::StopFacePitchSearch();
                 ESP_LOGI(kTag, "[FACE_PITCH_SEARCH] face found score=%.3f", score);
@@ -376,6 +387,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 monitor_pitch = pitch_delta;
             }
         } else if (stackchan::stage1::IsFacePitchSearchRequested()) {
+            set_log_phase("search");
             // Keep acquiring faces while pitch sweeps; don't replace the sweep
             // with a zero/deadband body correction or a transient missing frame.
         } else if (body_score >= kMinimumBodyScore) {
@@ -391,6 +403,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                 centered_frames         = 0;
             }
             if (face_missing_frames >= 4) {
+                set_log_phase("body");
                 const float error_x = body_target_x - 0.5f;
                 const float error_y = 0.5f - body_target_y;
                 const int yaw_delta = std::abs(error_x) < 0.05f ? 0
@@ -424,6 +437,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
                     Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
                     person_acquired = false; // one bounded sweep per loss, not endless retries
                     person_missing_frames = 0;
+                    set_log_phase("search");
                     ESP_LOGI(kTag, "[PERSON_SEARCH] restart: person lost");
                     stackchan::stage1::ResumePersonSearch();
                 }
@@ -438,6 +452,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
     }
     stackchan::stage1::NoteEyeContact(false, 0);
     stackchan::stage1::StopPersonSearch();
+    set_log_phase("stopped");
     ESP_LOGI(kTag, "Realtime face tracking stopped");
 }
 

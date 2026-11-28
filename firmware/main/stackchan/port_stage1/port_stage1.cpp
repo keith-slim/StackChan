@@ -583,7 +583,22 @@ struct Runtime {
         rest.reset();
         avatar_dream::End();
     }
+    static void LogTheatre(const char* phase, Kind kind) {
+        const char* name = "小芝居";
+        switch (kind) {
+            case Kind::Sneeze: name = "くしゃみ"; break;
+            case Kind::Hiccup: name = "しゃっくり"; break;
+            case Kind::Hungry: name = "おなかがすいた"; break;
+            case Kind::Stretch: name = "伸び"; break;
+            case Kind::Idea: name = "ひらめき"; break;
+            case Kind::Shy: name = "てれ"; break;
+            case Kind::Yawn: name = "あくび"; break;
+            case Kind::None: break;
+        }
+        ESP_LOGI(LOG_TAG, "[THEATRE] phase=%s name=%s", phase, name);
+    }
     void Release(StackChan& sc, bool restore) {
+        if (phase == Phase::Theatre && own_face) LogTheatre("ended", kind);
         // Releasing a sleep scene must restore other LED owners as well.
         GetHAL().setSleepRgbBlackout(false);
         // Also covers explicit activity/gesture interruptions which do not
@@ -627,8 +642,10 @@ struct Runtime {
         const bool continuing = own_face && Auto(next);
         if (!continuing && Auto(next)) sc.prepareFaceTakeover();
         if (own_speech) { sc.avatar().clearSpeech(); own_speech = false; }
-        if (continuing) ClearVisuals();
-        else Release(sc, true);
+        if (continuing) {
+            if (phase == Phase::Theatre) LogTheatre("ended", kind);
+            ClearVisuals();
+        } else Release(sc, true);
         if (next == Phase::NapWake || next == Phase::NightWake) {
             waking_from_sleep = Sleeping(phase);
             last_sleep_elapsed = now - phase_at;
@@ -689,6 +706,7 @@ struct Runtime {
             sc.rightNeonLight().setColor(r,g,b);
         };
         if (next == Phase::Theatre) {
+            LogTheatre("started", next_kind);
             switch(next_kind) {
             case Kind::Sneeze: av.setEmotion(avatar::Emotion::Doubt); move_relative(0,-90,250); color(55,55,75); break;
             case Kind::Hiccup: av.setEmotion(avatar::Emotion::Doubt); move_relative(0,30,200); color(60,50,30); break;

@@ -83,6 +83,9 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 .log-table{width:100%;border-collapse:collapse;text-align:left}.log-table th,.log-table td{padding:6px 8px;vertical-align:top;border-bottom:1px solid #e6eaf0}
 .log-table th{position:sticky;top:0;background:#edf2f8}.log-table td:first-child,.log-table td:nth-child(2){white-space:nowrap}
 .log-table td:last-child{width:100%;overflow-wrap:anywhere}
+.log-table summary{cursor:pointer;font-weight:600}.log-line{padding:4px 0;margin-left:1em;color:#465976}
+.log-line+.log-line{border-top:1px solid #e6eaf0}.log-line time{color:#68758a}
+.log-phase{margin:10px 0 3px 1em;color:#314765;font-weight:600}
 @media(max-width:740px){
  .app{display:block}.sidebar{position:static;height:auto;padding:10px 12px}
  .brand{display:inline-block;font-size:16px;padding:3px 10px 8px}
@@ -268,7 +271,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </div>
 <small>起動後の直近200件を新しい順に表示します。SDにはそれぞれ最大1万件を保存します。ダウンロードは発話・会話が終わってから実行してください。</small>
 <p id="logStorage" class="status" role="status"></p>
-<div class="log-scroll" tabindex="0" role="region" aria-label="動作履歴の一覧"><table class="log-table">
+<div id="logScroll" class="log-scroll" tabindex="0" role="region" aria-label="動作履歴の一覧"><table class="log-table">
 <thead><tr><th scope="col">日時</th><th scope="col">分類</th><th scope="col">内容</th></tr></thead><tbody id="logEntries"></tbody>
 </table></div><p id="logStatus" class="status" role="status"></p>
 </section></div>
@@ -958,10 +961,183 @@ async function setupLoad(){
 }
 document.getElementById('setupReload').addEventListener('click',setupLoad);
 const logPage=document.getElementById('logPage'),logEntries=document.getElementById('logEntries');
+const logScroll=document.getElementById('logScroll');
 const logStatus=document.getElementById('logStatus'),logStorage=document.getElementById('logStorage');
 const logDownload=document.getElementById('logDownload');
 const logGroups=[...logPage.querySelectorAll('[data-log-group]')];
-let logGroup='events',logReading=null,logDownloading=false;
+const speechNames={monologue:'自動発話',sleep_talk:'寝言',snore:'いびき',startup:'起動時の案内',test:'読み上げテスト',
+ morning:'起床時の挨拶',bedtime:'就寝時の挨拶',wake_word:'ウェイク時の挨拶',touch:'操作時の発話',timer:'タイマー',
+ dream_remark:'夢の話',conversation_remark:'さっきの話のひと言',drowsy_reply:'昼寝前の発話',
+ interrupt_reply:'割り込み時の発話',low_battery:'電池残量の案内'};
+const speechResults={playback_completed:'完了',transport_closed:'切断',error:'失敗',server_error:'失敗',
+ timeout:'タイムアウト',send_failed:'失敗',queue_failed:'失敗',greeting_retry_timeout:'タイムアウト'};
+const skippedSpeech=new Set(['skipped_overlap','suppressed_quiet','busy_or_unavailable','timed_out_waiting_for_idle']);
+const sessionCategories=new Set(['会話','発話・表情','接続','音声','メモリ']);
+const liveStates=new Set(['connecting','listening','speaking','notifying']);
+const trackingNames={search:'音源・人物探索',body:'身体追従',face:'顔追従',paused:'一時停止'};
+let logGroup='events',logReading=null,logDownloading=false,logPrevious='';
+function logTime(event){
+ return event.timestamp?new Date(event.timestamp*1000).toLocaleString('ja-JP'):'起動から '+(event.uptime_ms/1000).toFixed(1)+'秒';
+}
+function logGroupRow(event,label='',kind=''){
+ return {events:[event],label,kind,result:'',turns:0};
+}
+function groupNormalLogs(events){
+ const groups=[],finishedSpeech=new Map();
+ let active=null,theatre=null,scheduled=null,boot=null;
+ const push=(event,label,kind)=>{const group=logGroupRow(event,label,kind);groups.push(group);return group;};
+ const merge=(from,into)=>{into.events.unshift(...from.events);from.merged=true;};
+ const finish=result=>{
+  if(!active)return;
+  active.result=active.result||result;
+  if(active.kind!=='conversation')finishedSpeech.set(active.kind,active);
+  active=null;
+ };
+ for(const event of events){
+  if(active?.endedAt!==undefined&&event.uptime_ms-active.endedAt>3000)finish('終了');
+  const text=event.message;
+  const skit=text.match(/^\[THEATRE\] phase=(started|ended) name=(.*)$/);
+  if(skit){
+   if(skit[1]==='ended'&&theatre&&theatre.label===skit[2]){
+    theatre.events.push(event);theatre.result='終了';theatre=null;
+   }else{
+    if(theatre)theatre.result='終了';
+    const scene=push(event,skit[2],'theatre');
+    if(skit[1]==='started')theatre=scene;
+    else{scene.result='終了';theatre=null;}
+   }
+   continue;
+  }
+  const speech=text.match(/^\[SPEECH\] kind=(\w+) phase=(\w+)/);
+  if(speech){
+   const [,kind,phase]=speech;
+   const manual=text.includes(' trigger=manual');
+   const label=kind==='monologue'&&manual?'独り言テスト':speechNames[kind]||'発話';
+   if(kind==='monologue'&&phase==='scheduled'){
+    scheduled=push(event,label,kind);scheduled.result='予定';continue;
+   }
+   if(skippedSpeech.has(phase)){
+    const skipped=push(event,label,kind);skipped.result='見送り';
+    if(kind==='monologue'&&!manual&&scheduled){merge(scheduled,skipped);scheduled=null;}
+    continue;
+   }
+   if(active?.kind==='conversation'&&(kind==='wake_word'||kind==='interrupt_reply')){
+    active.events.push(event);continue;
+   }
+   const previous=finishedSpeech.get(kind);
+   if(phase==='server_stream_completed'&&active?.kind!==kind&&previous&&event.uptime_ms-previous.events.at(-1).uptime_ms<=3000){
+    previous.events.push(event);continue;
+   }
+   if(active?.kind!==kind||(phase==='queued'&&(active.queued||active.result))){
+    finish('中断');active=push(event,label,kind);
+    if(kind==='startup'&&boot){merge(boot,active);boot=null;}
+   }else active.events.push(event);
+   if(phase==='queued')active.queued=true;
+   if(kind==='monologue'&&phase==='requested'){
+    if(manual)active.label=label;
+    else if(scheduled){merge(scheduled,active);scheduled=null;}
+   }
+   const outcome=speechResults[phase]||(phase.startsWith('canceled')?'中断':'');
+   if(outcome){active.result=outcome;active.endedAt=event.uptime_ms;}
+   continue;
+  }
+  if(text.startsWith('Wake word detected:')){
+   if(active?.kind==='conversation')active.events.push(event);
+   else{finish('中断');active=push(event,'会話','conversation');}
+   continue;
+  }
+  const transition=text.match(/^State: (\w+) -> (\w+)/);
+  if(transition){
+   const [,from,to]=transition;
+   if(!active&&liveStates.has(to)&&(from==='idle'||liveStates.has(from))){
+    active=push(event,'会話','conversation');
+   }else if(active)active.events.push(event);
+   else{push(event);continue;}
+   if(active.kind==='conversation'&&to==='speaking')++active.turns;
+   if(to==='idle'||to==='wifi_configuring')finish('終了');
+   continue;
+  }
+  if(active&&sessionCategories.has(event.category))active.events.push(event);
+  else{
+   const entry=push(event);
+   if(event.category==='起動')boot=entry;
+  }
+ }
+ return groups.filter(group=>!group.merged);
+}
+function groupServoLogs(events){
+ const groups=[];
+ let active=null;
+ for(const event of events){
+  const text=event.message;
+  const marker=text.match(/^\[TRACK_PHASE\] phase=(\w+)/)?.[1];
+  const inferred=text.startsWith('Track face=')?'face':text.startsWith('Track body ')?'body':
+   /^(DOA angle=|\[PERSON_SEARCH\] restart:|\[SWEEP_START\])/.test(text)?'search':'';
+  const phase=marker==='started'?'search':marker||(!active?.hasMarker?inferred:'');
+  if(marker==='started'&&active){active.result='終了';active=null;}
+  if(!active){
+   if(!trackingNames[phase]){groups.push(logGroupRow(event));continue;}
+   active=logGroupRow(event,marker==='started'?'人物追従':'人物追従（表示分）','tracking');
+   active.sections=[];groups.push(active);
+  }else active.events.push(event);
+  if(marker)active.hasMarker=true;
+  if(trackingNames[phase]&&active.sections.at(-1)?.phase!==phase){
+   active.sections.push({phase,events:[]});
+  }
+  active.sections.at(-1).events.push(event);
+  if(marker==='stopped'){active.result='終了';active=null;}
+ }
+ return groups;
+}
+function logDetail(entry){
+ const line=document.createElement('div'),time=document.createElement('time');line.className='log-line';
+ time.textContent=logTime(entry);line.append(time,'　'+entry.category+'　'+entry.message);
+ return line;
+}
+function renderLogEntries(events,group){
+ const signature=group+':'+JSON.stringify(events);
+ if(signature===logPrevious)return;
+ logPrevious=signature;
+ const open=new Map([...logEntries.querySelectorAll('details[data-key]')].map(row=>[row.dataset.key,row.open]));
+ const atTop=logScroll.scrollTop<=2;
+ const anchor=atTop?null:[...logEntries.rows].find(row=>row.getBoundingClientRect().bottom>logScroll.getBoundingClientRect().top+24);
+ const anchorTop=anchor?.getBoundingClientRect().top;
+ const groups=group==='servo'?groupServoLogs(events):groupNormalLogs(events);
+ const rows=document.createDocumentFragment();
+ groups.sort((a,b)=>b.events.at(-1).sequence-a.events.at(-1).sequence);
+ for(const item of groups){
+  const first=item.events[0];
+  const row=document.createElement('tr'),content=document.createElement('td');
+  row.dataset.key=String(first.sequence);
+  const category=item.kind==='theatre'?'小芝居':item.label||first.category;
+  for(const value of [logTime(first),category]){
+   const cell=document.createElement('td');cell.textContent=value;row.append(cell);
+  }
+  if(item.label){
+   const details=document.createElement('details'),summary=document.createElement('summary');
+   details.dataset.key=row.dataset.key;details.open=open.get(details.dataset.key)??!item.result;
+   const next=first.message.match(/phase=scheduled delay_minutes=(\d+)/)?.[1];
+   summary.textContent=[item.label,next?'予定 '+next+'分後':'',item.turns?item.turns+'ターン':'',
+    item.result||'進行中',item.events.length+'件'].filter(Boolean).join(' ／ ');
+   details.append(summary);
+   if(item.sections){
+    for(const section of item.sections){
+     const heading=document.createElement('div');heading.className='log-phase';
+     heading.textContent=trackingNames[section.phase]+'　'+logTime(section.events[0]);details.append(heading);
+     for(const entry of section.events)details.append(logDetail(entry));
+    }
+   }else for(const entry of item.events)details.append(logDetail(entry));
+   content.append(details);
+  }else content.textContent=first.message;
+  row.append(content);rows.append(row);
+ }
+ logEntries.replaceChildren(rows);
+ if(atTop)logScroll.scrollTop=0;
+ else if(anchor){
+  const next=[...logEntries.rows].find(row=>row.dataset.key===anchor.dataset.key);
+  if(next)logScroll.scrollTop+=next.getBoundingClientRect().top-anchorTop;
+ }
+}
 async function readLogs(){
  if(logPage.hidden||document.hidden||logReading||logDownloading)return;
  const group=logGroup,controller=new AbortController();
@@ -971,16 +1147,7 @@ async function readLogs(){
   if(!response.ok)throw Error('HTTP '+response.status);
   const data=await response.json();
   if(group!==logGroup||logPage.hidden)return;
-  const items=document.createDocumentFragment();
-  for(const item of [...data.events].reverse()){
-   const row=document.createElement('tr');
-   const date=item.timestamp?new Date(item.timestamp*1000).toLocaleString('ja-JP'):'起動から '+(item.uptime_ms/1000).toFixed(1)+'秒';
-   for(const cell of [date,item.category,item.message]){
-    const td=document.createElement('td');td.textContent=cell;row.append(td);
-   }
-   items.append(row);
-  }
-  logEntries.replaceChildren(items);
+  renderLogEntries(data.events,group);
   const sd={saved:'SD保存済み',waiting:'SD保存待ち',unavailable:'SDにアクセスできません'}[data.storage];
   logStorage.textContent=sd+(data.pending?'　未保存 '+data.pending+'件':'')+(data.dropped?'　取りこぼし '+data.dropped+'件':'');
   logStatus.textContent=data.events.length?'':'表示するログがありません。';
@@ -991,7 +1158,7 @@ function stopLogRefresh(){if(logReading){logReading.abort();logReading=null;}}
 for(const button of logGroups)button.addEventListener('click',()=>{
  logGroup=button.dataset.logGroup;
  for(const option of logGroups)option.setAttribute('aria-pressed',String(option===button));
- logEntries.replaceChildren();logStorage.textContent='';logStatus.textContent='読み込み中…';
+ logPrevious='';logEntries.replaceChildren();logScroll.scrollTop=0;logStorage.textContent='';logStatus.textContent='読み込み中…';
  stopLogRefresh();readLogs();
 });
 document.getElementById('logRefresh').addEventListener('click',readLogs);

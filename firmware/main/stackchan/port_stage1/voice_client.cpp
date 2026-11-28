@@ -89,8 +89,8 @@ bool Request(const Settings& config, const char* kind, const char* text, bool ma
         return false;
     }
     const bool queued = Application::GetInstance().RequestAnnouncement(kind, text, manual);
-    ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s transport=ws12800",
-             kind, queued ? "requested" : "busy_or_unavailable");
+    ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s trigger=%s transport=ws12800",
+             kind, queued ? "requested" : "busy_or_unavailable", manual ? "manual" : "automatic");
     return queued;
 }
 void Reset() {

@@ -43,6 +43,7 @@ constexpr Rule kRules[] = {
     {"Wake word detected:", Group::Events, Category::Conversation},
     {"[SPEECH] kind=", Group::Events, Category::Speech},
     {"[SPEECH] wake_groggy=", Group::Events, Category::Speech},
+    {"[THEATRE] ", Group::Events, Category::Theatre},
     {"[EMOTION] ", Group::Events, Category::Speech},
     {"[GAZE] ", Group::Events, Category::Conversation},
     {"[IDLE_RECOVERY] ", Group::Events, Category::Conversation},
@@ -263,6 +264,7 @@ const char* CategoryName(Category category) {
         case Category::Memory: return "メモリ";
         case Category::Servo: return "サーボ";
         case Category::Tracking: return "探索・追従";
+        case Category::Theatre: return "小芝居";
     }
     return "その他";
 }

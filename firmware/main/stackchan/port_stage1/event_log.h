@@ -6,7 +6,7 @@
 namespace stackchan::stage1::event_log {
 
 enum class Group { Events, Servo };
-enum class Category : uint8_t { Boot, Conversation, Speech, Sleep, Network, Audio, Memory, Servo, Tracking };
+enum class Category : uint8_t { Boot, Conversation, Speech, Sleep, Network, Audio, Memory, Servo, Tracking, Theatre };
 
 // S3の動作履歴と同じ項目をJSON Linesに出す。文字列の保存領域は固定長。
 struct Entry {
