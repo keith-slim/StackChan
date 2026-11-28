@@ -57,7 +57,7 @@ std::atomic<int> queued_cue{-1};
 std::atomic<bool> manual_sleep_requested{false};
 std::atomic<uint32_t> manual_sleep_requested_at{0};
 PerceptionMailbox perception_looks;
-std::atomic<uint32_t> centered_face_at{0};
+std::atomic<uint32_t> eye_contact_at{0};
 std::atomic<bool> speech_tracking_paused{false};
 // Worker publishes requests/results; only the existing Stage1 update owns servos.
 std::atomic<uint32_t> search_start_epoch{0};
@@ -361,7 +361,7 @@ struct Runtime {
     avatar::FaceSnapshot conversation_face;
     uint32_t conversation_at = 0, listening_nod_at = 0;
     bool listening_nod = false;
-    uint32_t face_contact_since = 0, averted_at = 0, last_averted_at = 0;
+    uint32_t eye_contact_since = 0, averted_at = 0, last_averted_at = 0;
     int avert_direction = 1;
     bool averted_this_listen = false;
     std::unique_ptr<AvatarThinkingFace> thinking_face;
@@ -521,7 +521,7 @@ struct Runtime {
         if (pose == ConversationPose::Listening) {
             thinking_face.reset();
             listening_nod = false;
-            face_contact_since = averted_at = 0;
+            eye_contact_since = averted_at = 0;
             averted_this_listen = false;
         }
         conversation_pose = pose;
@@ -532,14 +532,15 @@ struct Runtime {
         }
     }
     int ListeningGlance(uint32_t now) {
-        const uint32_t centered = centered_face_at.load();
-        if (!centered || static_cast<int32_t>(now - centered) > 700) face_contact_since = 0;
-        else if (!face_contact_since) face_contact_since = now;
-        else if (!averted_this_listen && now - face_contact_since >= 2200 &&
+        const uint32_t contact = eye_contact_at.load();
+        if (!contact || static_cast<int32_t>(now - contact) > 700) eye_contact_since = 0;
+        else if (!eye_contact_since) eye_contact_since = now;
+        else if (!averted_this_listen && now - eye_contact_since >= 2200 &&
                  (!last_averted_at || now - last_averted_at >= 12000)) {
             averted_this_listen = true;
             averted_at = last_averted_at = now;
             avert_direction = (esp_random() & 1) ? 1 : -1;
+            ESP_LOGI(LOG_TAG, "[GAZE] listening glance after eye contact");
         }
         if (!averted_at || now - averted_at >= 1000) return 0;
         const auto elapsed = now - averted_at;
@@ -1335,8 +1336,8 @@ void OnStandby(bool ready) {
         interrupted.store(true);
     }
 }
-void NoteCenteredFace(bool centered, uint32_t captured) {
-    centered_face_at.store(centered ? captured : 0);
+void NoteEyeContact(bool contact, uint32_t captured) {
+    eye_contact_at.store(contact ? captured : 0);
 }
 void NotifyExternalSpeech() {
     // Xiaozhi owns the speech bubble once any ASR/system/TTS text arrives.

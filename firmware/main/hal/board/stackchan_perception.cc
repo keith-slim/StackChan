@@ -232,7 +232,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         // Keep audio transport bandwidth available during playback and
         // avoid tracking a deliberately moving expression pose.
         if (state == kDeviceStateSpeaking || stackchan::stage1::IsSpeechTrackingPaused()) {
-            stackchan::stage1::NoteCenteredFace(false, 0);
+            stackchan::stage1::NoteEyeContact(false, 0);
             face_filter_initialized = false;
             face_center_locked = false;
             face_pitch.Reset();
@@ -250,6 +250,8 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         float body_target_y = 0.5f;
         float body_score    = 0.0f;
         const bool was_searching = stackchan::stage1::IsPersonSearchActive();
+        const bool request_gaze = state == kDeviceStateListening && !was_searching &&
+                                  !stackchan::stage1::IsPersonSearchStopping();
         const uint32_t generation = stackchan::stage1::PerceptionGeneration();
         const uint32_t captured = static_cast<uint32_t>(frame_started_us / 1000);
         bool valid_frame = false;
@@ -259,17 +261,20 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         std::snprintf(monitor_header, sizeof(monitor_header), "%s,%lu,%lu,%lu,%s,%.4f,%d,%d",
                       monitor_device.c_str(), monitor_session, frame_number, monitor_frame,
                       monitor_phase, monitor_band, monitor_yaw, monitor_pitch);
-        const bool face_detected = PostVision(monitor_header, center_x, center_y, score, face_height,
-                                             body_target_x, body_target_y, body_score, valid_frame);
+        Gaze gaze = Gaze::Unknown;
+        const bool face_detected = PostVision(monitor_header, request_gaze, center_x, center_y, score, face_height,
+                                             body_target_x, body_target_y, body_score, valid_frame, gaze);
         // A request already in flight may complete after speech starts.
         if (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking ||
             stackchan::stage1::IsSpeechTrackingPaused()) {
+            stackchan::stage1::NoteEyeContact(false, 0);
             face_pitch.Reset();
             continue;
         }
         if (stop_requested_.load(std::memory_order_acquire)) break;
         if (generation != stackchan::stage1::PerceptionGeneration() ||
             !stackchan::stage1::IsPerceptionFresh(static_cast<uint32_t>(esp_timer_get_time() / 1000), captured) || !valid_frame) {
+            stackchan::stage1::NoteEyeContact(false, 0);
             person_missing_frames = 0;
             face_pitch.ResetMotion();
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
@@ -280,6 +285,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         monitor_band = 0.0f;
         monitor_yaw = monitor_pitch = 0;
         if (stackchan::stage1::IsPersonSearchActive()) {
+            stackchan::stage1::NoteEyeContact(false, 0);
             face_pitch.Reset();
             if (valid_frame && ((face_detected && score >= kMinimumFaceScore) || body_score >= kMinimumBodyScore)) {
                 const bool found_face = face_detected && score >= kMinimumFaceScore;
@@ -302,14 +308,20 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             continue;
         }
         if (was_searching || stackchan::stage1::IsPersonSearchStopping()) {
+            stackchan::stage1::NoteEyeContact(false, 0);
             face_pitch.Reset();
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs));
             continue;
         }
         const bool tracking_face = face_detected && score >= kMinimumFaceScore;
+        if (!tracking_face || !request_gaze || Application::GetInstance().GetDeviceState() != kDeviceStateListening) {
+            stackchan::stage1::NoteEyeContact(false, 0);
+        } else if (gaze != Gaze::Unknown) {
+            // 一時的な判定困難は直近の一致を使い、Stage1の期限が切れたら解除する。
+            stackchan::stage1::NoteEyeContact(gaze == Gaze::Contact, captured);
+        }
         if (!tracking_face) {
             face_pitch.ResetMotion();
-            stackchan::stage1::NoteCenteredFace(false, 0);
         }
         if (tracking_face) {
             if (stackchan::stage1::IsFacePitchSearchRequested()) {
@@ -337,7 +349,6 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             const float raw_x = center_x - 0.5f;
             const float raw_y = 0.5f - center_y;
             const bool face_centered = stackchan::stage1::FaceCenterEligible(raw_x, raw_y, filtered_x, filtered_y);
-            stackchan::stage1::NoteCenteredFace(face_centered, captured);
             const float error_x = stackchan::stage1::GuardedFaceError(raw_x, filtered_x, 0.025f);
             const int pitch_delta = face_pitch.UpdateDelta(raw_y, filtered_y, face_height);
             // 左右は顔が3フレーム中央にあれば固定する。上下は独立した保持条件を使う。
@@ -425,7 +436,7 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
         if (frame_elapsed_ms < kTrackingIntervalMs)
             vTaskDelay(pdMS_TO_TICKS(kTrackingIntervalMs - frame_elapsed_ms));
     }
-    stackchan::stage1::NoteCenteredFace(false, 0);
+    stackchan::stage1::NoteEyeContact(false, 0);
     stackchan::stage1::StopPersonSearch();
     ESP_LOGI(kTag, "Realtime face tracking stopped");
 }
@@ -442,8 +453,9 @@ bool StackChanPerception::PostAudio(const int16_t* pcm, size_t frames, float& an
     return ok;
 }
 
-bool StackChanPerception::PostVision(const char* monitor, float& center_x, float& center_y, float& score, float& face_height,
-                                     float& body_target_x, float& body_target_y, float& body_score, bool& valid_frame)
+bool StackChanPerception::PostVision(const char* monitor, bool request_gaze, float& center_x, float& center_y, float& score,
+                                    float& face_height, float& body_target_x, float& body_target_y, float& body_score,
+                                    bool& valid_frame, Gaze& gaze)
 {
     valid_frame = false;
     uint8_t* jpeg    = nullptr;
@@ -452,7 +464,7 @@ bool StackChanPerception::PostVision(const char* monitor, float& center_x, float
     std::string response;
     const bool posted =
         Post(Endpoint("/v1/vision/detect"), "image/jpeg", jpeg, jpeg_size, kVisionTimeoutMs,
-             {{"X-StackChan-Monitor", monitor}}, response);
+             {{"X-StackChan-Monitor", monitor}, {"X-StackChan-Gaze", request_gaze ? "1" : "0"}}, response);
     heap_caps_free(jpeg);
     if (!posted) return false;
 
@@ -485,6 +497,12 @@ bool StackChanPerception::PostVision(const char* monitor, float& center_x, float
         }
     }
     float image_height = 0.0f;
+    if (ok && request_gaze) {
+        const auto* result = cJSON_GetObjectItemCaseSensitive(best, "gaze");
+        const char* state = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(result, "state"));
+        if (state && std::strcmp(state, "contact") == 0) gaze = Gaze::Contact;
+        else if (state && std::strcmp(state, "away") == 0) gaze = Gaze::Away;
+    }
     if (ok && JsonNumber(root, "height", image_height)) {
         cJSON* box = cJSON_GetObjectItemCaseSensitive(best, "bbox");
         if (cJSON_IsArray(box)) {

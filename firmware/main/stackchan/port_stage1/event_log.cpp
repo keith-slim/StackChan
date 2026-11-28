@@ -44,6 +44,7 @@ constexpr Rule kRules[] = {
     {"[SPEECH] kind=", Group::Events, Category::Speech},
     {"[SPEECH] wake_groggy=", Group::Events, Category::Speech},
     {"[EMOTION] ", Group::Events, Category::Speech},
+    {"[GAZE] ", Group::Events, Category::Conversation},
     {"[IDLE_RECOVERY] ", Group::Events, Category::Conversation},
     {"[SLEEP_DIAG] ", Group::Events, Category::Sleep},
     {"[QUIET] ", Group::Events, Category::Sleep},

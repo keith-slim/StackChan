@@ -57,7 +57,7 @@ bool IsPersonSearchStopping();
 bool IsSpeechTrackingPaused(); // Lock-free for perception worker.
 bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking = false);  // 0.1-degree units.
 uint32_t PerceptionGeneration();
-void NoteCenteredFace(bool centered, uint32_t captured);
+void NoteEyeContact(bool contact, uint32_t captured);
 bool RequestPerceptionLook(int yaw_delta, int pitch_delta, bool face_tracking,
                            uint32_t captured, uint32_t generation);
 void Update(StackChan& stackchan);

@@ -21,6 +21,8 @@ public:
     static std::string MonitorUrl();
 
 private:
+    enum class Gaze { Unknown, Contact, Away };
+
     static constexpr size_t kSampleRate     = 16000;
     static constexpr size_t kRingFrames     = kSampleRate * 2;
     static constexpr size_t kSnapshotFrames = kSampleRate;
@@ -28,8 +30,9 @@ private:
     static void WorkerEntry(void* context);
     void RunWorker(uint64_t snapshot_end);
     bool PostAudio(const int16_t* pcm, size_t frames, float& angle_deg, float& confidence);
-    bool PostVision(const char* monitor, float& center_x, float& center_y, float& score, float& face_height,
-                    float& body_target_x, float& body_target_y, float& body_score, bool& valid_frame);
+    bool PostVision(const char* monitor, bool request_gaze, float& center_x, float& center_y, float& score,
+                    float& face_height, float& body_target_x, float& body_target_y, float& body_score,
+                    bool& valid_frame, Gaze& gaze);
 
     StackChanCamera* camera_ = nullptr;
     StackChanAvatarDisplay* display_ = nullptr;
