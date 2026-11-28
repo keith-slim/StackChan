@@ -985,7 +985,7 @@ function logGroupRow(event,label='',kind=''){
 }
 function groupNormalLogs(events){
  const groups=[],finishedSpeech=new Map();
- let active=null,theatre=null,scheduled=null,boot=null,tail=null;
+ let active=null,theatre=null,scheduled=null,boot=null,tail=null,nap=null;
  const push=(event,label,kind)=>{const group=logGroupRow(event,label,kind);groups.push(group);return group;};
  const merge=(from,into)=>{into.events.unshift(...from.events);from.merged=true;};
  const closeAt=(group,eventTime)=>{group.closedAt=eventTime;tail=group;};
@@ -1002,8 +1002,26 @@ function groupNormalLogs(events){
   if(active?.endedAt!==undefined&&event.uptime_ms-active.endedAt>3000)finish('終了',active.endedAt);
   const text=event.message;
   if(event.category==='起動'){
+   if(nap){nap.result='終了記録なし';nap=null;}
    finish('終了',event.uptime_ms);
    boot=active=push(event,'起動','boot');
+   continue;
+  }
+  const napPhase=text.match(/^\[NAP\] phase=(\w+)/)?.[1];
+  if(napPhase){
+   if(napPhase==='draw_missed'){
+    const chance=text.match(/\bchance=(\d+)/)?.[1];
+    push(event,'昼寝抽選','nap').result=chance?'外れ（確率'+chance+'%）':'外れ';
+   }else{
+    if(napPhase==='draw_won'||napPhase==='preparing'||!nap){
+     if(nap)nap.result='終了記録なし';
+     nap=push(event,'昼寝','nap');
+    }else nap.events.push(event);
+    if(napPhase==='woke'||napPhase==='canceled'){
+     nap.result=napPhase==='woke'?'起床':'中断';
+     nap=null;
+    }
+   }
    continue;
   }
   const skit=text.match(/^\[THEATRE\] phase=(started|ended) name=(.*)$/);

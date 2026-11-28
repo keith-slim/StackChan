@@ -117,13 +117,29 @@ int main()
     assert(naps.SetConfig(nap));
     assert(step(naps, 0, 500).phase == Phase::Awake);
     step(naps, 1, 500);
-    assert(step(naps, 600002, 500).phase == Phase::NapDrowsy);
-    assert(step(naps, 626502, 500).phase == Phase::NapYawn);
+    s = step(naps, 600002, 500);
+    assert(s.phase == Phase::NapDrowsy && s.nap_draw == NapDraw::Won);
+    s = step(naps, 626502, 500);
+    assert(s.phase == Phase::NapYawn && s.nap_draw == NapDraw::None);
     assert(step(naps, 630002, 500).phase == Phase::NapSleep);
     assert(step(naps, 689999, 500).phase == Phase::NapSleep);
     s = step(naps, 690002, 500);
     assert(s.phase == Phase::NapWake && s.wake_reason == WakeReason::Timer);
     assert(step(naps, 692802, 500).phase == Phase::Awake);
+
+    // A failed draw is reported once and rearms the existing idle timer.
+    Clock missed;
+    Config chance = nap;
+    chance.nap_chance = 40;
+    chance.nap_idle_min_minutes = chance.nap_idle_max_minutes = 1;
+    assert(missed.SetConfig(chance));
+    step(missed, 1, 500);
+    step(missed, 2, 500);
+    s = step(missed, 60002, 500, true, false, 40);
+    assert(s.phase == Phase::Awake && s.nap_draw == NapDraw::Missed);
+    assert(step(missed, 60003, 500).nap_draw == NapDraw::None);
+    assert(step(missed, 120002, 500).nap_draw == NapDraw::None);
+    assert(step(missed, 120003, 500, true, false, 39).nap_draw == NapDraw::Won);
 
     // Wake from daytime sleep and from the yawn with a pad/screen tap.
     naps.Reset(); step(naps, 0, 500); step(naps, 1, 500);

@@ -1671,6 +1671,38 @@ static bool TickLowBattery(StackChan& sc, uint32_t now) {
     return true;
 }
 
+static void LogNapProgress(const State& state, unsigned chance) {
+    static Phase previous = Phase::Awake;
+    if (state.nap_draw != NapDraw::None) {
+        ESP_LOGI(LOG_TAG, "[NAP] phase=%s chance=%u",
+                 state.nap_draw == NapDraw::Won ? "draw_won" : "draw_missed", chance);
+    }
+    if (state.phase == previous) return;
+    switch (state.phase) {
+        case Phase::NapDrowsy:
+            if (state.nap_draw == NapDraw::None)
+                ESP_LOGI(LOG_TAG, "[NAP] phase=preparing");
+            break;
+        case Phase::NapYawn:
+            break;
+        case Phase::NapSleep:
+            ESP_LOGI(LOG_TAG, "[NAP] phase=asleep");
+            break;
+        case Phase::NapWake: {
+            const char* cause = state.wake_reason == WakeReason::Timer ? "timer" :
+                state.wake_reason == WakeReason::Word ? "wake_word" : "touch";
+            ESP_LOGI(LOG_TAG, "[NAP] phase=woke cause=%s", cause);
+            break;
+        }
+        default:
+            if (previous == Phase::NapDrowsy || previous == Phase::NapYawn ||
+                previous == Phase::NapSleep)
+                ESP_LOGI(LOG_TAG, "[NAP] phase=canceled");
+            break;
+    }
+    previous = state.phase;
+}
+
 void Update(StackChan& sc) {
     if (!enabled.load() || !sc.hasAvatar()) return;
     const uint32_t now = GetHAL().millis();
@@ -2066,6 +2098,7 @@ void Update(StackChan& sc) {
             ESP_LOGI(LOG_TAG, "manual sleep started: phase=%d", static_cast<int>(state.phase));
         }
     }
+    LogNapProgress(state, r.schedule.GetConfig().nap_chance);
     if (!status_logged || now - last_status_log_at >= 60000) {
         ESP_LOGI(LOG_TAG, "runtime phase=%d kind=%d standby=%d clock_valid=%d minute=%u auto=%d",
                  static_cast<int>(state.phase), static_cast<int>(state.kind),

@@ -13,6 +13,7 @@ enum class Phase : uint8_t {
 enum class Kind : uint8_t { None, Sneeze, Hiccup, Hungry, Stretch, Idea, Shy, Yawn };
 // Sleep wake sources match S3 DayNap: touch/pad, wake-word, timer.
 enum class WakeReason : uint8_t { None, Touch, Word, Timer, Morning };
+enum class NapDraw : uint8_t { None, Missed, Won };
 struct Config {
     uint16_t wake_minute = 6 * 60;
     uint16_t sleep_minute = 23 * 60;
@@ -45,6 +46,7 @@ struct State {
     uint32_t phase_elapsed_ms = 0;
     bool day = true;
     WakeReason wake_reason = WakeReason::None;
+    NapDraw nap_draw = NapDraw::None;
 };
 
 // Shared sleep preparation; preserve the automatic nap and night timings.
@@ -253,7 +255,9 @@ public:
                     if ((in.random % 100) < cfg_.nap_chance) {
                         manual_nap_ = false;
                         Enter(Phase::NapDrowsy, in.ms);
+                        return Snapshot(in.ms, day, NapDraw::Won);
                     }
+                    return Snapshot(in.ms, day, NapDraw::Missed);
                 }
             }
             break;
@@ -304,8 +308,8 @@ private:
         }
     }
     uint32_t Elapsed(uint32_t now) const { return now - phase_at_; }
-    State Snapshot(uint32_t now, bool day) const {
-        return {phase_, kind_, dream_, now - phase_at_, day, wake_reason_};
+    State Snapshot(uint32_t now, bool day, NapDraw draw = NapDraw::None) const {
+        return {phase_, kind_, dream_, now - phase_at_, day, wake_reason_, draw};
     }
     Config cfg_{};
     Phase phase_ = Phase::Boot;
