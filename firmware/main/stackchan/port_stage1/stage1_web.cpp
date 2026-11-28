@@ -75,6 +75,8 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 .buttons{display:flex;flex-wrap:wrap;gap:8px}
 .status{min-height:1.6em;white-space:pre-wrap;overflow-wrap:anywhere;color:#465976;margin:8px 0 0}
 .save{margin:0 0 16px}.save button{font-weight:600}
+.face-monitor{container-type:inline-size}
+.face-monitor iframe{display:block;width:100%;height:max(calc(100dvh - 36px),calc(75cqw + 130px));border:0;border-radius:8px;background:#12171c}
 @media(max-width:740px){
  .app{display:block}.sidebar{position:static;height:auto;padding:10px 12px}
  .brand{display:inline-block;font-size:16px;padding:3px 10px 8px}
@@ -85,7 +87,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily" data-page="daily">日常・睡眠</a><a href="#voice" data-page="voice">音声・文言</a><a href="#conversation" data-page="conversation">会話・音声入力</a><a href="#quiet" data-page="quiet">お黙り</a><a href="#environment" data-page="environment">天気・位置</a><a href="#actions" data-page="actions">実機テスト</a><a href="/face-monitor" target="_blank" rel="noopener">顔追従モニター ↗</a><a href="#wifi" data-page="wifi">ネットワーク</a><a href="#device" data-page="device">デバイス・AI</a><a href="#deviceInfo" data-page="deviceInfo">端末情報</a>
+<a href="#daily" data-page="daily">日常・睡眠</a><a href="#voice" data-page="voice">音声・文言</a><a href="#conversation" data-page="conversation">会話・音声入力</a><a href="#quiet" data-page="quiet">お黙り</a><a href="#environment" data-page="environment">天気・位置</a><a href="#actions" data-page="actions">実機テスト</a><a href="#face-monitor" data-page="face-monitor">顔追従モニター</a><a href="#wifi" data-page="wifi">ネットワーク</a><a href="#device" data-page="device">デバイス・AI</a><a href="#deviceInfo" data-page="deviceInfo">端末情報</a>
 </nav></aside><main>
 <h1 id="pageTitle">日常・睡眠</h1>
 <div class="settings-page" data-settings-page="daily">
@@ -251,6 +253,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <button type="button" data-rgb="Off" style="background:#303030">消灯</button>
 </div><p id="rgbStatus" class="status" role="status">待機中</p></section>
 </div>
+<div class="settings-page face-monitor" id="faceMonitor" data-settings-page="face-monitor" hidden></div>
 <div class="settings-page" data-settings-page="wifi" hidden>
 <section id="wifi" class="card"><h2>Wi-Fi接続設定</h2>
 <p id="wifiCurrent" class="status">接続情報を読み込み中…</p>
@@ -309,13 +312,27 @@ Webとの接続が切れた場合は新しいIPアドレスから開き直して
 const pageLinks=[...document.querySelectorAll('nav a[data-page]')];
 const pages=[...document.querySelectorAll('[data-settings-page]')];
 const pageAliases={theatre:'daily',nap:'daily',aiSetup:'device',appsSetup:'device'};
+const pageTitle=document.getElementById('pageTitle');
+const faceMonitor=document.getElementById('faceMonitor');
 function showSettingsPage(){
  const hash=location.hash.slice(1),requested=pageAliases[hash]||hash;
  const selected=pageLinks.find(a=>a.dataset.page===requested)||pageLinks[0];
  const key=selected.dataset.page;
  pages.forEach(p=>{p.hidden=p.dataset.settingsPage!==key;});
  pageLinks.forEach(a=>{if(a===selected)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
- document.getElementById('pageTitle').textContent=selected.textContent;
+ const monitorSelected=key==='face-monitor';
+ pageTitle.textContent=selected.textContent;
+ pageTitle.hidden=monitorSelected;
+ if(monitorSelected){
+  if(!faceMonitor.firstElementChild){
+   const frame=document.createElement('iframe');
+   frame.title=selected.textContent;
+   frame.src='/face-monitor';
+   faceMonitor.append(frame);
+  }
+ }else{
+  faceMonitor.replaceChildren();
+ }
  document.getElementById('setupSharedStatus').hidden=!['conversation','wifi','device','deviceInfo'].includes(key);
  window.scrollTo(0,0);
 }
