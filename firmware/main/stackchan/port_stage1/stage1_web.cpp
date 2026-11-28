@@ -1,5 +1,6 @@
 // Local Stage-1 settings page; independent of the Xiaozhi WebSocket.
 #include "stage1_web.h"
+#include "event_log.h"
 #include "port_stage1.h"
 #include "voice_settings.h"
 #include "voice_client.h"
@@ -77,6 +78,11 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 .save{margin:0 0 16px}.save button{font-weight:600}
 .face-monitor{container-type:inline-size}
 .face-monitor iframe{display:block;width:100%;height:max(calc(100dvh - 36px),calc(75cqw + 130px));border:0;border-radius:8px;background:#12171c}
+.log-controls{margin-bottom:10px}.log-controls button[aria-pressed=false]{background:#62738d}
+.log-scroll{overflow:auto;max-height:65vh;border:1px solid #d6dce7;border-radius:6px}
+.log-table{width:100%;border-collapse:collapse;text-align:left}.log-table th,.log-table td{padding:6px 8px;vertical-align:top;border-bottom:1px solid #e6eaf0}
+.log-table th{position:sticky;top:0;background:#edf2f8}.log-table td:first-child,.log-table td:nth-child(2){white-space:nowrap}
+.log-table td:last-child{width:100%;overflow-wrap:anywhere}
 @media(max-width:740px){
  .app{display:block}.sidebar{position:static;height:auto;padding:10px 12px}
  .brand{display:inline-block;font-size:16px;padding:3px 10px 8px}
@@ -87,7 +93,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div class="app"><aside class="sidebar"><strong class="brand">StackChan</strong>
 <nav aria-label="設定メニュー">
-<a href="#daily" data-page="daily">日常・睡眠</a><a href="#voice" data-page="voice">音声・文言</a><a href="#conversation" data-page="conversation">会話・音声入力</a><a href="#quiet" data-page="quiet">お黙り</a><a href="#environment" data-page="environment">天気・位置</a><a href="#actions" data-page="actions">実機テスト</a><a href="#face-monitor" data-page="face-monitor">顔追従モニター</a><a href="#wifi" data-page="wifi">ネットワーク</a><a href="#device" data-page="device">デバイス・AI</a><a href="#deviceInfo" data-page="deviceInfo">端末情報</a>
+<a href="#daily" data-page="daily">日常・睡眠</a><a href="#voice" data-page="voice">音声・文言</a><a href="#conversation" data-page="conversation">会話・音声入力</a><a href="#quiet" data-page="quiet">お黙り</a><a href="#environment" data-page="environment">天気・位置</a><a href="#actions" data-page="actions">実機テスト</a><a href="#face-monitor" data-page="face-monitor">顔追従モニター</a><a href="#logs" data-page="logs">動作履歴</a><a href="#wifi" data-page="wifi">ネットワーク</a><a href="#device" data-page="device">デバイス・AI</a><a href="#deviceInfo" data-page="deviceInfo">端末情報</a>
 </nav></aside><main>
 <h1 id="pageTitle">日常・睡眠</h1>
 <div class="settings-page" data-settings-page="daily">
@@ -255,6 +261,17 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 </div><p id="rgbStatus" class="status" role="status">待機中</p></section>
 </div>
 <div class="settings-page face-monitor" id="faceMonitor" data-settings-page="face-monitor" hidden></div>
+<div class="settings-page" id="logPage" data-settings-page="logs" hidden><section class="card">
+<div class="buttons log-controls" role="group" aria-label="ログの種類">
+<button type="button" data-log-group="events" aria-pressed="true">通常ログ</button><button type="button" data-log-group="servo" aria-pressed="false">サーボログ</button>
+<button type="button" id="logRefresh">更新</button><button type="button" id="logDownload">SD履歴をダウンロード</button>
+</div>
+<small>起動後の直近200件を新しい順に表示します。SDにはそれぞれ最大1万件を保存します。ダウンロードは発話・会話が終わってから実行してください。</small>
+<p id="logStorage" class="status" role="status"></p>
+<div class="log-scroll" tabindex="0" role="region" aria-label="動作履歴の一覧"><table class="log-table">
+<thead><tr><th scope="col">日時</th><th scope="col">分類</th><th scope="col">内容</th></tr></thead><tbody id="logEntries"></tbody>
+</table></div><p id="logStatus" class="status" role="status"></p>
+</section></div>
 <div class="settings-page" data-settings-page="wifi" hidden>
 <section id="wifi" class="card"><h2>Wi-Fi接続設定</h2>
 <p id="wifiCurrent" class="status">接続情報を読み込み中…</p>
@@ -940,8 +957,63 @@ async function setupLoad(){
  }catch(e){setupStatus.textContent='読込失敗: '+e.message;return false;}
 }
 document.getElementById('setupReload').addEventListener('click',setupLoad);
+const logPage=document.getElementById('logPage'),logEntries=document.getElementById('logEntries');
+const logStatus=document.getElementById('logStatus'),logStorage=document.getElementById('logStorage');
+const logDownload=document.getElementById('logDownload');
+const logGroups=[...logPage.querySelectorAll('[data-log-group]')];
+let logGroup='events',logReading=null,logDownloading=false;
+async function readLogs(){
+ if(logPage.hidden||document.hidden||logReading||logDownloading)return;
+ const group=logGroup,controller=new AbortController();
+ logReading=controller;
+ try{
+  const response=await fetch('/api/stage1/logs?group='+group,{cache:'no-store',signal:controller.signal});
+  if(!response.ok)throw Error('HTTP '+response.status);
+  const data=await response.json();
+  if(group!==logGroup||logPage.hidden)return;
+  const items=document.createDocumentFragment();
+  for(const item of [...data.events].reverse()){
+   const row=document.createElement('tr');
+   const date=item.timestamp?new Date(item.timestamp*1000).toLocaleString('ja-JP'):'起動から '+(item.uptime_ms/1000).toFixed(1)+'秒';
+   for(const cell of [date,item.category,item.message]){
+    const td=document.createElement('td');td.textContent=cell;row.append(td);
+   }
+   items.append(row);
+  }
+  logEntries.replaceChildren(items);
+  const sd={saved:'SD保存済み',waiting:'SD保存待ち',unavailable:'SDにアクセスできません'}[data.storage];
+  logStorage.textContent=sd+(data.pending?'　未保存 '+data.pending+'件':'')+(data.dropped?'　取りこぼし '+data.dropped+'件':'');
+  logStatus.textContent=data.events.length?'':'表示するログがありません。';
+ }catch(e){if(e.name!=='AbortError')logStatus.textContent='ログを取得できません: '+e.message;}
+ finally{if(logReading===controller)logReading=null;}
+}
+function stopLogRefresh(){if(logReading){logReading.abort();logReading=null;}}
+for(const button of logGroups)button.addEventListener('click',()=>{
+ logGroup=button.dataset.logGroup;
+ for(const option of logGroups)option.setAttribute('aria-pressed',String(option===button));
+ logEntries.replaceChildren();logStorage.textContent='';logStatus.textContent='読み込み中…';
+ stopLogRefresh();readLogs();
+});
+document.getElementById('logRefresh').addEventListener('click',readLogs);
+logDownload.addEventListener('click',async()=>{
+ const group=logGroup;
+ logDownloading=true;logDownload.disabled=true;stopLogRefresh();
+ logStatus.textContent='SD履歴を取得中…';
+ try{
+  const response=await fetch('/api/stage1/logs?group='+group+'&download=1',{cache:'no-store'});
+  if(!response.ok)throw Error(await response.text());
+  const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');
+  link.href=url;link.download='stackchan-'+group+'.jsonl';link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  logStatus.textContent='ダウンロードを開始しました。';
+ }catch(e){logStatus.textContent=e.message;}
+ finally{logDownloading=false;logDownload.disabled=false;}
+});
+window.addEventListener('hashchange',()=>{if(logPage.hidden)stopLogRefresh();else readLogs();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopLogRefresh();else readLogs();});
+setInterval(readLogs,5000);
 // Avoid concurrent large JSON responses on the memory-constrained server.
-Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(loadEnvironment).then(wifiLoad).then(setupLoad).then(loadConversation).then(loadCharge);
+Promise.resolve().then(load).then(loadVoice).then(loadQuiet).then(loadEnvironment).then(wifiLoad).then(setupLoad).then(loadConversation).then(loadCharge).then(readLogs);
 </script></body></html>)STAGE1PAGE";
 
 void Reply(httpd_req_t* req, const char* status, const char* body) {
@@ -1037,6 +1109,75 @@ bool JsonEscape(const char* source, char* output, size_t capacity) {
     output[used] = '\0';
     return true;
 }
+esp_err_t SendLog(httpd_req_t* req, const event_log::Snapshot& snapshot, bool download) {
+    struct Scratch { char escaped[6 * 193 + 1]; char row[1400]; char chunk[4096]; };
+    std::unique_ptr<Scratch, decltype(&heap_caps_free)> out(
+        static_cast<Scratch*>(heap_caps_malloc(sizeof(Scratch), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+        heap_caps_free);
+    if (!out) return httpd_resp_send_500(req);
+    size_t used = 0;
+    for (unsigned i = 0; i < snapshot.count; ++i) {
+        const auto& entry = snapshot.entries.get()[i];
+        if (!JsonEscape(entry.message, out->escaped, sizeof(out->escaped))) return ESP_FAIL;
+        const int length = std::snprintf(out->row, sizeof(out->row),
+            "%s{\"sequence\":%llu,\"uptime_ms\":%llu,\"timestamp\":%lld,\"category\":\"%s\",\"message\":\"%s\"}%s",
+            !download && i ? "," : "", static_cast<unsigned long long>(entry.sequence),
+            static_cast<unsigned long long>(entry.uptime_ms), static_cast<long long>(entry.timestamp),
+            event_log::CategoryName(entry.category), out->escaped, download ? "\n" : "");
+        if (length < 0 || static_cast<size_t>(length) >= sizeof(out->row)) return ESP_FAIL;
+        if (used + length > sizeof(out->chunk)) {
+            if (httpd_resp_send_chunk(req, out->chunk, used) != ESP_OK) return ESP_FAIL;
+            used = 0;
+        }
+        std::memcpy(out->chunk + used, out->row, length);
+        used += length;
+    }
+    return used ? httpd_resp_send_chunk(req, out->chunk, used) : ESP_OK;
+}
+
+esp_err_t ReadLogs(httpd_req_t* req) {
+    using namespace event_log;
+    char query[80]{};
+    char group_value[12]{};
+    char download_value[4]{};
+    const size_t length = httpd_req_get_url_query_len(req);
+    if (length && (length >= sizeof(query) || httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid log query");
+    const auto group_result = httpd_query_key_value(query, "group", group_value, sizeof(group_value));
+    const bool servo = std::strcmp(group_value, "servo") == 0;
+    if (group_result != ESP_ERR_NOT_FOUND &&
+        (group_result != ESP_OK || (!servo && std::strcmp(group_value, "events") != 0)))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid log group");
+    const auto group = servo ? Group::Servo : Group::Events;
+    const bool download = httpd_query_key_value(query, "download", download_value, sizeof(download_value)) == ESP_OK &&
+                          std::strcmp(download_value, "1") == 0;
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    Snapshot snapshot;
+    if (download) {
+        if (!ReadArchive(group, snapshot)) {
+            httpd_resp_set_type(req, "text/plain; charset=utf-8");
+            httpd_resp_set_status(req, "503 Service Unavailable");
+            return httpd_resp_sendstr(req, "SD履歴を取得できません。待機時にSDカードを確認して再試行してください。");
+        }
+        httpd_resp_set_type(req, "application/x-ndjson; charset=utf-8");
+        httpd_resp_set_hdr(req, "Content-Disposition", servo ? "attachment; filename=stackchan-servo.jsonl" :
+                           "attachment; filename=stackchan-events.jsonl");
+    } else {
+        snapshot = Recent(group);
+        const auto status = GetStatus(group);
+        const char* sd = status.storage == Storage::Saved ? "saved" :
+                         status.storage == Storage::Unavailable ? "unavailable" : "waiting";
+        char prefix[112];
+        std::snprintf(prefix, sizeof(prefix), "{\"storage\":\"%s\",\"pending\":%u,\"dropped\":%u,\"events\":[",
+                      sd, status.pending, status.dropped);
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
+        if (httpd_resp_sendstr_chunk(req, prefix) != ESP_OK) return ESP_FAIL;
+    }
+    if (SendLog(req, snapshot, download) != ESP_OK) return ESP_FAIL;
+    if (!download && httpd_resp_sendstr_chunk(req, "]}") != ESP_OK) return ESP_FAIL;
+    return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
 esp_err_t ReadEnvironment(httpd_req_t* req) {
     // Snapshot, escaped strings and the serialized response exceed half of the
     // 4 KiB HTTPD stack. Keep the complete scratch area in PSRAM so it cannot
@@ -1545,7 +1686,7 @@ bool Start() {
     // IDF 6.1 supports allocating the HTTP server task stack from PSRAM.
     // Keep the HTTPD/lwIP kernel and DMA-only allocations on their default heaps.
     config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 17;
     config.max_open_sockets = 4;
     const esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -1573,6 +1714,8 @@ bool Start() {
     page.uri = "/"; page.method = HTTP_GET; page.handler = Page;
     httpd_uri_t face_monitor{};
     face_monitor.uri = "/face-monitor"; face_monitor.method = HTTP_GET; face_monitor.handler = FaceMonitor;
+    httpd_uri_t logs{};
+    logs.uri = "/api/stage1/logs"; logs.method = HTTP_GET; logs.handler = ReadLogs;
     httpd_uri_t read{};
     read.uri = "/api/stage1"; read.method = HTTP_GET; read.handler = ReadConfig;
     httpd_uri_t write{};
@@ -1609,6 +1752,7 @@ bool Start() {
     setup_write.handler = MonitorPost; setup_write.user_ctx = &posts[7];
     if (httpd_register_uri_handler(server, &page) != ESP_OK ||
         httpd_register_uri_handler(server, &face_monitor) != ESP_OK ||
+        httpd_register_uri_handler(server, &logs) != ESP_OK ||
         httpd_register_uri_handler(server, &read) != ESP_OK ||
         httpd_register_uri_handler(server, &write) != ESP_OK ||
         httpd_register_uri_handler(server, &action) != ESP_OK ||

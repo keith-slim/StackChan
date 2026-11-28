@@ -16,6 +16,7 @@
 #include "board/hal_bridge.h"
 #include "stackchan/storage/nvs_snapshot.h"
 #include "stackchan/storage/factory_reset.h"
+#include "stackchan/port_stage1/event_log.h"
 #include "stackchan/config/server_boot_policy.h"
 #include <stackchan/config/low_battery.h>
 #include "stackchan/speech_mouth.h"
@@ -253,6 +254,7 @@ static void _stackchan_update_task(void* param)
         const uint32_t now = GetHAL().millis();
         if (now - last_sd_backup_check >= 1000) {
             last_sd_backup_check = now;
+            stackchan::stage1::event_log::Poll();
             // Retry a pending NVS-save event outside the LVGL lock. No
             // periodic SD snapshot is made without a committed NVS change.
             if (_sd_nvs_revision.load(std::memory_order_acquire) !=

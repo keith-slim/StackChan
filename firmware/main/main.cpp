@@ -13,6 +13,7 @@
 #include <cJSON.h>
 #include <esp_heap_caps.h>
 #include <esp_flash_dispatcher.h>
+#include <stackchan/port_stage1/event_log.h>
 #include <cstdlib>
 
 using namespace mooncake;
@@ -23,6 +24,7 @@ extern "C" void app_main(void)
     // Setup logger
     mclog::set_level(mclog::level_info);
     mclog::set_time_format(mclog::time_format_unix_milliseconds);
+    stackchan::stage1::event_log::Start();
 
     // Run cache-disabling flash operations on the smallest dedicated internal
     // stack while keeping HTTP and other eligible task stacks in PSRAM.

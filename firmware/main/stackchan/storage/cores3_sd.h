@@ -14,6 +14,8 @@ struct Config {
     bool (*set_power)(void*, bool) = nullptr;
 };
 void Configure(const Config& config);
+// Run one local file operation while the shared bus is mounted.
+bool WithMountedCard(bool (*operation)(const char* root, void*), void* context);
 // Execute the final PMIC command only when no SD transaction owns the bus.
 bool TryWhenIdle(bool (*callback)(void*), void* context);
 // Relative paths only; no absolute paths, traversal, or arbitrary mounts.

@@ -326,6 +326,13 @@ void Configure(const Config& next) {
     config = next;
 }
 
+bool WithMountedCard(bool (*operation)(const char*, void*), void* context) {
+    Access access;
+    if (!access.ready()) return false;
+    const bool success = operation(kMount, context);
+    return access.Close() && success;
+}
+
 bool ReadFile(const char* relative, std::string& data) {
     data.clear();
     if (!safe_name(relative)) return false;
