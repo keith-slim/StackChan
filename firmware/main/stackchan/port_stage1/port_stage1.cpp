@@ -366,7 +366,7 @@ struct Runtime {
     OwnedTracking gaze_yaw;
     std::unique_ptr<avatar::ShyDecorator> gaze_blush;
     int gaze_origin = 0;
-    bool gaze_enabled = false, averted_this_listen = false, gaze_returning = false;
+    bool averted_this_listen = false, gaze_returning = false;
     std::unique_ptr<AvatarThinkingFace> thinking_face;
     Clock schedule;
     Phase phase = Phase::Boot;
@@ -547,7 +547,7 @@ struct Runtime {
         constexpr uint32_t kTurnBackMs = 500, kGlanceTimeoutMs = 1500;
         auto& motion = sc.motion();
         auto& yaw = motion.yawServo();
-        if (!gaze_enabled || !available || conversation_pose != ConversationPose::Listening) {
+        if (!available || conversation_pose != ConversationPose::Listening) {
             eye_contact_since = 0;
             StopListeningGlance(yaw);
             return false;
@@ -1327,9 +1327,7 @@ void Start() {
     CancelDreamRemark();
     weather_changes = weather::Changes{};
     r = Runtime{};
-    static const bool gaze_enabled_at_boot = (esp_random() & 1) != 0;
-    r.gaze_enabled = gaze_enabled_at_boot;
-    ESP_LOGI(LOG_TAG, "[GAZE] boot neck glance=%s", r.gaze_enabled ? "enabled" : "disabled");
+    ESP_LOGI(LOG_TAG, "[GAZE] boot neck glance=enabled");
     speech_effects = SpeechEffectsRuntime{};
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
