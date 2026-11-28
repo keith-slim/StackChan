@@ -366,7 +366,7 @@ struct Runtime {
     OwnedTracking gaze_yaw;
     std::unique_ptr<avatar::ShyDecorator> gaze_blush;
     int gaze_origin = 0;
-    bool averted_this_listen = false, gaze_returning = false;
+    bool gaze_listening = false, averted_this_listen = false, gaze_returning = false;
     std::unique_ptr<AvatarThinkingFace> thinking_face;
     Clock schedule;
     Phase phase = Phase::Boot;
@@ -491,8 +491,9 @@ struct Runtime {
                p == Phase::NightWake || p == Phase::MorningWake;
     }
     void EndConversation(StackChan& sc) {
+        if (Application::GetInstance().GetDeviceState() != kDeviceStateListening)
+            StopListeningGlance(sc.motion().yawServo());
         if (conversation_pose == ConversationPose::None) return;
-        StopListeningGlance(sc.motion().yawServo());
         thinking_face.reset();
         if (conversation_saved) conversation_face.Restore(sc.avatar());
         conversation_saved = false;
@@ -502,7 +503,6 @@ struct Runtime {
     void BeginConversation(StackChan& sc, ConversationPose pose, uint32_t now) {
         if (pose == ConversationPose::None) { EndConversation(sc); return; }
         if (conversation_pose == pose) return;
-        StopListeningGlance(sc.motion().yawServo());
         if (!conversation_saved) {
             if (phase == Phase::NightSleep || phase == Phase::NightTemporary)
                 ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] reset source=conversation_pose phase=%d pose=%d",
@@ -524,8 +524,6 @@ struct Runtime {
         if (pose == ConversationPose::Listening) {
             thinking_face.reset();
             listening_nod = false;
-            eye_contact_since = 0;
-            averted_this_listen = false;
         }
         conversation_pose = pose;
         conversation_at = now;
@@ -547,7 +545,7 @@ struct Runtime {
         constexpr uint32_t kTurnBackMs = 500, kGlanceTimeoutMs = 1500;
         auto& motion = sc.motion();
         auto& yaw = motion.yawServo();
-        if (!available || conversation_pose != ConversationPose::Listening) {
+        if (!available || !gaze_listening) {
             eye_contact_since = 0;
             StopListeningGlance(yaw);
             return false;
@@ -1505,8 +1503,16 @@ void PrepareSpeechExpression(StackChan& sc, const char* source) {
     }
     CancelForExternalChange(sc, source);
 }
-void BeginSpeechTurn(StackChan& sc) { speech_effects.Arm(sc); }
+void BeginSpeechTurn(StackChan& sc) {
+    // 表情の切り替えとは別に、聞き取り開始ごとに首そらしを1回許可する。
+    r.gaze_listening = true;
+    r.eye_contact_since = 0;
+    r.averted_this_listen = false;
+    speech_effects.Arm(sc);
+}
 void StartSpeechEffects(StackChan& sc, avatar::Emotion emotion) {
+    r.gaze_listening = false;
+    r.StopListeningGlance(sc.motion().yawServo());
     if (speech_effects.active) return;
     perception_looks.Invalidate();
     person_search.Pause(sc);
@@ -1528,8 +1534,10 @@ void SetConversationPose(StackChan& sc, ConversationPose pose) {
     r.BeginConversation(sc, pose, GetHAL().millis());
 }
 void BeginListeningComplete(StackChan& sc) {
-    if (!enabled.load() || !sc.hasAvatar() ||
-        r.conversation_pose != ConversationPose::Listening) return;
+    if (!enabled.load() || !sc.hasAvatar()) return;
+    r.gaze_listening = false;
+    r.StopListeningGlance(sc.motion().yawServo());
+    if (r.conversation_pose != ConversationPose::Listening) return;
     r.BeginConversation(sc, ConversationPose::Thinking, GetHAL().millis());
     ESP_LOGI(LOG_TAG, "S3 face: listening nod -> thinking");
 }
@@ -1675,6 +1683,8 @@ static bool TickLowBattery(StackChan& sc, uint32_t now) {
         r.restore_neck_on_release = false;
         speech_effects.owns_neck = false;
         speech_effects.End(sc);
+        r.gaze_listening = false;
+        r.StopListeningGlance(sc.motion().yawServo());
         CancelForExternalChange(sc, "low_battery");
         StopPersonSearch();
         face_pitch_search.Pause(sc);
