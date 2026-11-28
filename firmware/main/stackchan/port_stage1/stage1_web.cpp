@@ -971,7 +971,8 @@ const speechNames={monologue:'自動発話',sleep_talk:'寝言',snore:'いびき
  dream_remark:'夢の話',conversation_remark:'さっきの話のひと言',drowsy_reply:'昼寝前の発話',
  interrupt_reply:'割り込み時の発話',low_battery:'電池残量の案内'};
 const speechResults={playback_completed:'完了',transport_closed:'切断',error:'失敗',server_error:'失敗',
- timeout:'タイムアウト',send_failed:'失敗',queue_failed:'失敗',greeting_retry_timeout:'タイムアウト'};
+ timeout:'タイムアウト',send_failed:'失敗',queue_failed:'失敗',greeting_retry_timeout:'タイムアウト',
+ skipped_no_recent_conversation:'見送り（会話データなし）'};
 const skippedSpeech=new Set(['skipped_overlap','suppressed_quiet','busy_or_unavailable','timed_out_waiting_for_idle']);
 const sessionCategories=new Set(['会話','発話・表情','接続','音声']);
 const liveStates=new Set(['connecting','listening','speaking','notifying']);

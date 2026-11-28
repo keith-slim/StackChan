@@ -375,8 +375,6 @@ struct Runtime {
     bool sleep_yawn_return_started = false;
     uint8_t nap_doze_step = 0;
     int nap_doze_pitch = 0;
-    bool conversation_idle = true, conversation_replied = false;
-    uint32_t conversation_remark_at = 0;
     // S3 night sleep keeps its face visible for 3 s, then turns off only the
     // backlight. Never persist this transient brightness to NVS.
     bool night_light_armed = false, night_light_off = false;
@@ -1793,16 +1791,6 @@ void Update(StackChan& sc) {
     const int sweep_left = search_limits.x + search_margin;
     const int sweep_right = search_limits.y - search_margin;
     const auto device_state = Application::GetInstance().GetDeviceState();
-    if (!Application::GetInstance().IsAnnouncementActive()) {
-        const bool was_idle = r.conversation_idle;
-        r.conversation_idle = device_state == kDeviceStateIdle;
-        if (was_idle && !r.conversation_idle) r.conversation_remark_at = 0;
-        if (device_state == kDeviceStateSpeaking) r.conversation_replied = true;
-        if (r.conversation_idle && r.conversation_replied) {
-            r.conversation_replied = false;
-            r.conversation_remark_at = now + 45000 + esp_random() % 30001;
-        }
-    }
     const bool search_blocked = device_state == kDeviceStateSpeaking || speech_tracking_paused.load() ||
         r.cue_active || r.own_neck || IsWakeSequenceActive() || Runtime::Sleeping(r.phase) ||
         Runtime::SleepPreparing(r.phase) || search_motion.isModifyLocked() || sc.avatar().isModifyLocked();
@@ -2145,15 +2133,13 @@ void Update(StackChan& sc) {
         !accepted_wake && !wake_sequence_active.load() && !manual_sleep_requested.load();
     const bool weather_announced = poll_weather_change(weather_active, monologue_eligible);
     bool conversation_remarked = false;
-    if (r.conversation_remark_at && static_cast<int32_t>(now - r.conversation_remark_at) >= 0) {
-        if (now - r.conversation_remark_at >= 45000 || quiet_mode::Active()) {
-            r.conversation_remark_at = 0;
-        } else if (monologue_eligible && !weather_announced) {
-            r.conversation_remark_at = 0;
-            if (const auto* config = voice::Current(); config && config->monologue_enabled)
-                conversation_remarked = voice::Request(*config, "conversation_remark", "recent conversation");
-        }
-    }
+    // Only Application's server-authorized ordinary PCM completion can
+    // provide this one-shot session ID; never infer from Speaking/Idle.
+    const auto* remark_config = voice::Current();
+    const auto remark_session = Application::GetInstance().TakeDueConversationRemark(
+        monologue_eligible && !weather_announced, quiet_mode::Active());
+    if (!remark_session.empty() && remark_config && remark_config->monologue_enabled)
+        conversation_remarked = voice::Request(*remark_config, "conversation_remark", remark_session.c_str());
     tick_monologue(state.phase, monologue_eligible && !weather_announced && !conversation_remarked);
     DreamRemarkTick(sc, state, now, event && !Application::GetInstance().IsAnnouncementActive());
     r.TickNightBacklight(now);
