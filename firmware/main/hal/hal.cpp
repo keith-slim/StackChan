@@ -278,7 +278,9 @@ static void _stackchan_update_task(void* param)
 
         LvglLockGuard lock;
         GetStackChan().update();
-        if (stackchan::low_battery::Active()) continue;
+        const bool shutdown = stackchan::low_battery::Active();
+        GetHAL().updateRandomRgb(!shutdown && stackchan::stage1::CanRunRgbTest(), shutdown);
+        if (shutdown) continue;
 
         if (!hal_bridge::is_xiaozhi_ready()) {
             continue;

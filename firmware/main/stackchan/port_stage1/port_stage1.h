@@ -39,6 +39,7 @@ void CancelForExternalChange(StackChan& stackchan, const char* source = "unknown
 void NotifyManualMotion();  // External commands take ownership of the neck.
 void NotifyManualLed();     // External commands take ownership of the LEDs.
 bool IsAutonomousSceneActive();
+bool CanRunRgbTest(); // existing Web test admission and resume policy; under LVGL lock
 bool IsIdleServoMotionBlocked(); // Under LVGL lock: active scenes + first 3s of each skit.
 bool RequestCue(const char* id); // Validated named action; future Live integration.
 bool RequestSleep(); // Queue manual sleep until active speech/conversation drains.

@@ -1092,8 +1092,12 @@ struct SpeechEffectsRuntime {
         preset = SpeechEffectFor(next);
         changed_at = now;
         nod_step = 0;
-        if (speech_led_epoch.load() == led_epoch && SceneAvailable())
-            GetHAL().setConversationRgbColor(preset.red, preset.green, preset.blue);
+        if (speech_led_epoch.load() == led_epoch && SceneAvailable()) {
+            if (next == avatar::Emotion::Happy || next == avatar::Emotion::Fun)
+                GetHAL().setConversationRandomRgb();
+            else
+                GetHAL().setConversationRgbColor(preset.red, preset.green, preset.blue);
+        }
         if (MotionAvailable(sc)) {
             auto& motion = sc.motion();
             if (preset.speed == 0) {
@@ -1284,6 +1288,7 @@ void Start() {
     ESP_LOGI(LOG_TAG, "runtime started enabled=true");
 }
 void Stop() {
+    GetHAL().cancelRandomRgb();
     enabled.store(false);
     perception_looks.Invalidate();
     environment::SetIdle(false);
@@ -1398,6 +1403,7 @@ void NotifyManualMotion() {
     manual_motion.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true);
 }
 void NotifyManualLed() {
+    GetHAL().cancelRandomRgb();
     speech_led_epoch.fetch_add(1);
     if (owns_auto.load()) ESP_LOGW(LOG_TAG, "[SLEEP_DIAG] interrupt source=manual_led");
     manual_led.store(true); dream_remark_cancel_requested.store(true); interrupted.store(true);
@@ -1443,6 +1449,13 @@ bool IsConversationFaceActive() {
     return r.conversation_pose != ConversationPose::None;
 }
 bool IsAutonomousSceneActive() { return owns_auto.load(); }
+bool CanRunRgbTest() {
+    auto& app = Application::GetInstance();
+    return !low_battery::Active() && app.GetDeviceState() == kDeviceStateIdle &&
+           !app.IsAnnouncementActive() && !voice::IsBusy() &&
+           !IsAutonomousSceneActive() && !IsSleepSceneActive() &&
+           !IsWakeSequenceActive() && GetStackChan().hasAvatar();
+}
 bool IsIdleServoMotionBlocked() {
     if (low_battery::Active()) return true;
     // Suppress ordinary random head movement for the entire scene and

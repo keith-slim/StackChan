@@ -241,7 +241,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <p>サーボの動作確認は上の実機テストから実行できます。
 マイク・Wi-Fi接続テストは本体のSETUPアプリで行えます。</p>
 <h3>RGB LEDの実機テスト</h3>
-<small>本体SETUPと同じ左右のLEDを点灯します。会話・発話・睡眠・自動演出中は実行できません。終了時は消灯を選んでください。設定は保存しません。</small>
+<small>本体SETUPと同じ左右のLEDを点灯します。会話・発話・睡眠・自動演出中は実行できません。ランダム点灯は12個が別々の色へ滑らかに変化します。会話・睡眠中は一時停止し、待機中に再開します。終了時は消灯を選んでください。設定は保存しません。</small>
 <div id="rgbActions" class="buttons">
 <button type="button" data-rgb="Red" style="background:#ed3333">赤</button>
 <button type="button" data-rgb="Green" style="background:#24b64b">緑</button>
@@ -250,6 +250,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <button type="button" data-rgb="Cyan" style="background:#25d5df;color:#242424">シアン</button>
 <button type="button" data-rgb="Magenta" style="background:#d633bb">マゼンタ</button>
 <button type="button" data-rgb="White" style="background:#fff;color:#242424;border:1px solid #bac5d6">白</button>
+<button type="button" data-rgb="Random" style="background:#6355bb">ランダム点灯</button>
 <button type="button" data-rgb="Off" style="background:#303030">消灯</button>
 </div><p id="rgbStatus" class="status" role="status">待機中</p></section>
 </div>
@@ -1421,17 +1422,17 @@ esp_err_t TriggerAction(httpd_req_t* req) {
         const char* name = action->valuestring;
         if (std::strncmp(name, "rgb:", 4) == 0) {
             const auto* color = stackchan::rgb_test::Find(name + 4);
-            if (color) {
-                // Serialize NeonLight writes with StackChan::update(), just like SETUP.
+            const bool random = std::strcmp(name + 4, "Random") == 0;
+            if (color || random) {
+                // Same admission for starting and automatically resuming the test.
                 LvglLockGuard lock;
-                auto& app = Application::GetInstance();
-                if (app.GetDeviceState() == kDeviceStateIdle &&
-                    !app.IsAnnouncementActive() && !voice::IsBusy() &&
-                    !IsAutonomousSceneActive() && !IsSleepSceneActive() &&
-                    !IsWakeSequenceActive() && GetStackChan().hasAvatar()) {
-                    stackchan::rgb_test::Apply(*color);
-                    accepted = true;
-                    ESP_LOGI(TAG, "RGB test: %s", color->name);
+                if (CanRunRgbTest()) {
+                    if (random) accepted = GetHAL().startRandomRgbTest();
+                    else {
+                        stackchan::rgb_test::Apply(*color);
+                        accepted = true;
+                    }
+                    if (accepted) ESP_LOGI(TAG, "RGB test: %s", name + 4);
                 }
             }
         } else {

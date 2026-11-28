@@ -223,6 +223,10 @@ public:
     // Conversation LEDs and sleep blackout are layers of the shared RGB controller.
     void setConversationRgbColor(uint8_t r, uint8_t g, uint8_t b);
     void releaseConversationRgbColor();
+    void setConversationRandomRgb();
+    bool startRandomRgbTest();
+    void cancelRandomRgb();
+    void updateRandomRgb(bool test_allowed, bool shutdown);
     void setSleepRgbBlackout(bool enabled);
 
     /* ---------------------------------- Power --------------------------------- */
