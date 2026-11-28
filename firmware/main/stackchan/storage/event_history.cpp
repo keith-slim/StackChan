@@ -81,8 +81,10 @@ bool EnsureDirectory(const char* root) {
     return errno == EEXIST && stat(path, &info) == 0 && S_ISDIR(info.st_mode);
 }
 
-bool Append(const char* root, Group group, const Snapshot& snapshot) {
-    if (!snapshot.count) return true;
+bool Append(const char* root, Group group, const Snapshot& snapshot, const Snapshot* sd_only) {
+    const unsigned diagnostic_count = sd_only ? sd_only->count : 0;
+    const unsigned count = snapshot.count + diagnostic_count;
+    if (!count) return true;
     char path[48];
     FilePath(path, root, group);
     FILE* file = std::fopen(path, "r+b");
@@ -100,17 +102,23 @@ bool Append(const char* root, Group group, const Snapshot& snapshot) {
             ok = CommitHeader(file, header, slot);
         }
     }
-    for (unsigned i = 0; ok && i < snapshot.count; ++i) {
+    unsigned visible = 0, diagnostic = 0;
+    for (unsigned i = 0; ok && i < count; ++i) {
         const auto index = header.total + i;
         Record record{};
         record.position = index;
-        record.entry = snapshot.entries.get()[i];
+        // Each stream is already ordered by the shared capture sequence.
+        const bool use_diagnostic = diagnostic < diagnostic_count &&
+            (visible == snapshot.count ||
+             sd_only->entries.get()[diagnostic].sequence < snapshot.entries.get()[visible].sequence);
+        record.entry = use_diagnostic ? sd_only->entries.get()[diagnostic++] :
+                                        snapshot.entries.get()[visible++];
         record.crc = Checksum(&record, offsetof(Record, crc));
         if (!i || index % kArchiveCapacity == 0) ok = std::fseek(file, Offset(index), SEEK_SET) == 0;
         ok = ok && std::fwrite(&record, sizeof(record), 1, file) == 1;
     }
     if (ok && std::fflush(file) == 0 && fsync(fileno(file)) == 0) {
-        header.total += snapshot.count;
+        header.total += count;
         ok = CommitHeader(file, header, 1 - slot);
     } else {
         ok = false;

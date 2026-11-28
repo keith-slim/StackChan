@@ -29,7 +29,13 @@ constexpr unsigned kQueueCapacity = kRecentCapacity;
 constexpr int64_t kWritePeriodUs = 30000000;
 constexpr int64_t kRetryPeriodUs = 60000000;
 constexpr auto kPsram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-constexpr Group kGroups[] = {Group::Events, Group::Servo};
+// SD-only diagnostics must never evict a visible event from its ring.
+enum class Queue : size_t { Events, Servo, SdOnly, Count };
+constexpr size_t kQueueCount = static_cast<size_t>(Queue::Count);
+constexpr size_t Index(Queue queue) { return static_cast<size_t>(queue); }
+constexpr Queue VisibleQueue(Group group) {
+    return group == Group::Servo ? Queue::Servo : Queue::Events;
+}
 
 struct Rule {
     const char* prefix;
@@ -73,7 +79,8 @@ struct Ring {
     std::atomic<unsigned> dropped{0};
 };
 
-std::array<Ring, 2> rings;
+std::array<Ring, kQueueCount> rings;
+uint64_t event_sequence = 0; // shared ordering of visible and SD-only events, under ring_mutex
 std::mutex ring_mutex;
 std::mutex storage_mutex;
 std::atomic<vprintf_like_t> console{std::vprintf};
@@ -81,18 +88,25 @@ std::atomic<Storage> storage{Storage::Waiting};
 std::atomic<bool> worker_running{false};
 std::atomic<int64_t> next_write_us{kWritePeriodUs};
 
-Ring& GetRing(Group group) { return rings[static_cast<size_t>(group)]; }
+Ring& GetRing(Queue queue) { return rings[Index(queue)]; }
 
 void Record(Group group, Category category, const char* message) {
-    auto& ring = GetRing(group);
-    if (!ring.buffer) return;
+    // WS_MEM_DIAG is the only Memory rule. Keep it in the SD export, not the
+    // visible event ring. Servo events continue using their independent ring.
+    const auto queue = category == Category::Memory ? Queue::SdOnly : VisibleQueue(group);
+    auto& ring = GetRing(queue);
+    if (!ring.buffer) {
+        ring.dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     std::unique_lock<std::mutex> lock(ring_mutex, std::try_to_lock);
     if (!lock.owns_lock()) {
         ring.dropped.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     auto& entry = ring.buffer.get()[ring.sequence % kQueueCapacity];
-    entry.sequence = ++ring.sequence;
+    ++ring.sequence;
+    entry.sequence = queue == Queue::Servo ? ring.sequence : ++event_sequence;
     entry.uptime_ms = esp_timer_get_time() / 1000;
     const auto now = std::time(nullptr);
     entry.timestamp = now >= 1704067200 ? static_cast<int64_t>(now) : 0;
@@ -133,9 +147,9 @@ int CaptureLog(const char* format, va_list args) {
     return console.load(std::memory_order_relaxed)(format, args);
 }
 
-bool Copy(Group group, bool pending, Snapshot& snapshot) {
-    std::lock_guard<std::mutex> lock(ring_mutex);
-    const auto& ring = GetRing(group);
+// Caller holds ring_mutex.
+bool Copy(Queue queue, bool pending, Snapshot& snapshot) {
+    const auto& ring = GetRing(queue);
     const auto count = static_cast<unsigned>(pending ?
         std::min<uint64_t>(ring.sequence - ring.saved, kQueueCapacity) :
         std::min<uint64_t>(ring.sequence, kRecentCapacity));
@@ -146,6 +160,7 @@ bool Copy(Group group, bool pending, Snapshot& snapshot) {
         snapshot.entries.get()[i] = ring.buffer.get()[(ring.sequence - count + i) % kQueueCapacity];
     }
     snapshot.count = count;
+    snapshot.end_cursor = ring.sequence;
     return true;
 }
 
@@ -158,8 +173,8 @@ bool MayAccessSd() {
 }
 
 struct StorageWork {
-    Snapshot pending[2];
-    bool written[2]{};
+    std::array<Snapshot, kQueueCount> pending;
+    std::array<bool, kQueueCount> written{};
     Group group;
     Snapshot* archive;
 };
@@ -168,12 +183,16 @@ bool ProcessCard(const char* root, void* arg) {
     auto& work = *static_cast<StorageWork*>(arg);
     if (!MayAccessSd()) return false;
     if (!history::EnsureDirectory(root)) return false;
-    bool success = true;
-    for (size_t i = 0; i < std::size(kGroups); ++i) {
-        if (!work.pending[i].count) continue;
-        work.written[i] = history::Append(root, kGroups[i], work.pending[i]);
-        if (!work.written[i] && (!work.archive || kGroups[i] == work.group)) success = false;
-    }
+    const auto events = Index(Queue::Events);
+    const auto servo = Index(Queue::Servo);
+    const auto sd_only = Index(Queue::SdOnly);
+    // Merge both event streams into the existing archive in capture order,
+    // using the existing transaction and without another large PSRAM copy.
+    const bool events_ok = history::Append(root, Group::Events, work.pending[events], &work.pending[sd_only]);
+    work.written[events] = work.written[sd_only] = events_ok;
+    const bool servo_ok = history::Append(root, Group::Servo, work.pending[servo]);
+    work.written[servo] = servo_ok;
+    const bool success = work.archive ? (work.group == Group::Servo ? servo_ok : events_ok) : events_ok && servo_ok;
     return success && (!work.archive || history::Read(root, work.group, *work.archive));
 }
 
@@ -181,21 +200,30 @@ bool Save(Group group, Snapshot* archive) {
     std::unique_lock<std::mutex> lock(storage_mutex, std::try_to_lock);
     if (!lock.owns_lock() || !MayAccessSd()) return false;
     StorageWork work{{}, {}, group, archive};
-    for (size_t i = 0; i < std::size(kGroups); ++i) {
-        if (!Copy(kGroups[i], true, work.pending[i])) return false;
+    // Capture both event queues under one lock, so a diagnostic arriving
+    // during snapshot creation cannot be saved ahead of an earlier event.
+    // Copy() is also used for Web snapshots; its shared implementation
+    // remains the same, with the lock owned by the caller.
+    {
+        std::lock_guard<std::mutex> ring_lock(ring_mutex);
+        for (size_t i = 0; i < kQueueCount; ++i) {
+            if (!Copy(static_cast<Queue>(i), true, work.pending[i])) return false;
+        }
     }
-    if (!archive && !work.pending[0].count && !work.pending[1].count) return true;
+    if (!archive && std::none_of(work.pending.begin(), work.pending.end(),
+                                 [](const Snapshot& s) { return s.count != 0; })) return true;
     const bool ok = sd::WithMountedCard(ProcessCard, &work);
     {
         std::lock_guard<std::mutex> ring_lock(ring_mutex);
-        for (size_t i = 0; i < std::size(kGroups); ++i) {
+        for (size_t i = 0; i < kQueueCount; ++i) {
             const auto& snapshot = work.pending[i];
-            if (!work.written[i]) continue;
+            if (!work.written[i] || !snapshot.count) continue;
             auto& ring = rings[i];
-            const auto* entries = snapshot.entries.get();
-            ring.dropped.fetch_add(static_cast<unsigned>(entries[0].sequence - ring.saved - 1),
+            // The shared event sequence can contain gaps. A ring's local
+            // cursor alone determines overwrite loss and saved progress.
+            ring.dropped.fetch_add(static_cast<unsigned>(snapshot.end_cursor - snapshot.count - ring.saved),
                                    std::memory_order_relaxed);
-            ring.saved = entries[snapshot.count - 1].sequence;
+            ring.saved = snapshot.end_cursor;
         }
     }
     storage.store(ok ? Storage::Saved : Storage::Unavailable, std::memory_order_relaxed);
@@ -228,7 +256,8 @@ void Poll() {
     if (worker_running.load() || esp_timer_get_time() < next_write_us.load() || !MayAccessSd()) return;
     {
         std::lock_guard<std::mutex> lock(ring_mutex);
-        if (rings[0].sequence == rings[0].saved && rings[1].sequence == rings[1].saved) return;
+        if (std::all_of(rings.begin(), rings.end(),
+                        [](const Ring& ring) { return ring.sequence == ring.saved; })) return;
     }
     worker_running.store(true);
     if (xTaskCreateWithCaps(SaveWorker, "event_log_sd", 6144, nullptr, 1, nullptr, kPsram) != pdPASS) {
@@ -239,17 +268,26 @@ void Poll() {
 
 Snapshot Recent(Group group) {
     Snapshot snapshot;
-    Copy(group, false, snapshot);
+    std::lock_guard<std::mutex> lock(ring_mutex);
+    Copy(VisibleQueue(group), false, snapshot);
     return snapshot;
 }
 
 Status GetStatus(Group group) {
     std::lock_guard<std::mutex> lock(ring_mutex);
-    const auto& ring = GetRing(group);
-    const uint64_t unsaved = ring.sequence - ring.saved;
-    const auto pending = static_cast<unsigned>(std::min<uint64_t>(unsaved, kQueueCapacity));
-    return {storage.load(std::memory_order_relaxed), pending,
-            ring.dropped.load(std::memory_order_relaxed) + static_cast<unsigned>(unsaved - pending)};
+    Status status{storage.load(std::memory_order_relaxed), 0, 0};
+    auto accumulate = [&](Queue queue) {
+        const auto& ring = GetRing(queue);
+        const uint64_t unsaved = ring.sequence - ring.saved;
+        const auto pending = static_cast<unsigned>(std::min<uint64_t>(unsaved, kQueueCapacity));
+        status.pending += pending;
+        status.dropped += ring.dropped.load(std::memory_order_relaxed) + static_cast<unsigned>(unsaved - pending);
+    };
+    accumulate(VisibleQueue(group));
+    // Storage status includes the diagnostic queue, because both are
+    // exported together. Recent() never includes it in the Web rows.
+    if (group == Group::Events) accumulate(Queue::SdOnly);
+    return status;
 }
 
 bool ReadArchive(Group group, Snapshot& snapshot) { return Save(group, &snapshot); }

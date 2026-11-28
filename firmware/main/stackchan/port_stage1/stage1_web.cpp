@@ -270,7 +270,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <button type="button" data-log-group="events" aria-pressed="true">通常ログ</button><button type="button" data-log-group="servo" aria-pressed="false">サーボログ</button>
 <button type="button" id="logRefresh">更新</button><button type="button" id="logDownload">SD履歴をダウンロード</button>
 </div>
-<small>起動後の通常ログ・サーボログをそれぞれ直近最大1000件からまとめて、新しい順に表示します。SDにはそれぞれ最大1万件を保存します。ダウンロードは発話・会話が終わってから実行してください。</small>
+<small>起動後の通常ログ・サーボログをそれぞれ直近最大1000件からまとめて、新しい順に表示します。メモリ診断はWeb表示に含めず、SD履歴にのみ保存します。SDにはそれぞれ最大1万件を保存します。ダウンロードは発話・会話が終わってから実行してください。</small>
 <p id="logStorage" class="status" role="status"></p>
 <div id="logScroll" class="log-scroll" tabindex="0" role="region" aria-label="動作履歴の一覧"><table class="log-table">
 <thead><tr><th scope="col">日時</th><th scope="col">分類</th><th scope="col">内容</th></tr></thead><tbody id="logEntries"></tbody>
@@ -973,7 +973,7 @@ const speechNames={monologue:'自動発話',sleep_talk:'寝言',snore:'いびき
 const speechResults={playback_completed:'完了',transport_closed:'切断',error:'失敗',server_error:'失敗',
  timeout:'タイムアウト',send_failed:'失敗',queue_failed:'失敗',greeting_retry_timeout:'タイムアウト'};
 const skippedSpeech=new Set(['skipped_overlap','suppressed_quiet','busy_or_unavailable','timed_out_waiting_for_idle']);
-const sessionCategories=new Set(['会話','発話・表情','接続','音声','メモリ']);
+const sessionCategories=new Set(['会話','発話・表情','接続','音声']);
 const liveStates=new Set(['connecting','listening','speaking','notifying']);
 const trackingNames={search:'音源・人物探索',body:'身体追従',face:'顔追従',paused:'一時停止'};
 let logGroup='events',logReading=null,logDownloading=false,logPrevious='';

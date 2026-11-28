@@ -21,6 +21,7 @@ struct EntryDeleter { void operator()(Entry* entries) const; };
 struct Snapshot {
     std::unique_ptr<Entry, EntryDeleter> entries;
     unsigned count = 0;
+    uint64_t end_cursor = 0; // source ring's local write cursor; not persisted
 };
 
 enum class Storage { Waiting, Saved, Unavailable };
