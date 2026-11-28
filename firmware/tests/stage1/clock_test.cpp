@@ -183,8 +183,7 @@ int main()
     assert(naps.Step({640000, 500, true, true, false, 0, true}).phase == Phase::NapWake);
     assert(naps.Step({640001, 500, true, true, false, 0, false}).phase == Phase::Awake);
 
-    // Simultaneous independent events: theatre wins and the missed nap is
-    // rearmed, never started immediately upon theatre completion.
+    // Simultaneous events: theatre wins, but the single nap draw is retained.
     Clock overlap;
     Config oc{};
     oc.theatre_min_seconds = oc.theatre_max_seconds = 60;
@@ -195,9 +194,56 @@ int main()
     assert(step(overlap, 2, 500).phase == Phase::Awake);
     assert(step(overlap, 60002, 500).phase == Phase::Theatre);
     assert(step(overlap, 64002, 500).phase == Phase::Awake);
-    assert(step(overlap, 64003, 500).phase == Phase::Awake);
-    assert(step(overlap, 120001, 500).phase == Phase::Awake);
-    assert(step(overlap, 120002, 500).phase == Phase::NapDrowsy);
+    assert(step(overlap, 64003, 500).phase == Phase::NapDrowsy);
+
+    // Nap deadline survives actual conversation resets, non-standby and
+    // long busy periods. Exactly one draw is executed after admission.
+    Clock retained;
+    Config rc = nap;
+    rc.nap_idle_min_minutes = rc.nap_idle_max_minutes = 1;
+    assert(retained.SetConfig(rc));
+    step(retained, 1, 500);
+    step(retained, 2, 500);
+    assert(retained.TakeNapNotice().scheduled_ms == 60000);
+    retained.ResetScene();
+    retained.MaintainNapSchedule(30000, 500, true, 0, true);
+    assert(!retained.TakeNapNotice().deferred);
+    retained.MaintainNapSchedule(60002, 500, true, 0, true);
+    assert(retained.TakeNapNotice().deferred);
+    retained.MaintainNapSchedule(240000, 500, true, 0, true);
+    assert(!retained.TakeNapNotice().deferred);
+    retained.ResetScene();
+    assert(step(retained, 240001, 500, false).phase == Phase::Awake);
+    assert(retained.Step({240002, 500, true, true, false, 0, true}).nap_draw == NapDraw::None);
+    assert(retained.Step({240003, 500, true, true, false, 0, false, true}).nap_draw == NapDraw::None);
+    assert(retained.Step({240004, 500, true, true, false, 0, false, false, true, true}).nap_draw == NapDraw::None);
+    assert(step(retained, 240005, 500).nap_draw == NapDraw::Won);
+    assert(step(retained, 240006, 500).nap_draw == NapDraw::None);
+    assert(!retained.NapDue(240006));
+
+    // Unrelated configuration preserves the pending nap; changes to nap
+    // configuration reset it. Night/invalid clock clear it even in a cue.
+    Clock settings;
+    assert(settings.SetConfig(rc));
+    step(settings, 1, 500); step(settings, 2, 500);
+    settings.TakeNapNotice();
+    rc.theatre_min_seconds = 20;
+    assert(settings.SetConfig(rc));
+    assert(settings.NapDue(60002));
+    assert(settings.TakeNapNotice().reset == NapReset::None);
+    rc.nap_chance = 50;
+    assert(settings.SetConfig(rc));
+    assert(!settings.NapDue(60002));
+    assert(settings.TakeNapNotice().reset == NapReset::Config);
+    settings.MaintainNapSchedule(70000, 500, true, 0, true);
+    settings.MaintainNapSchedule(130000, 1400, true, 0, true);
+    assert(!settings.NapDue(130000));
+    assert(settings.TakeNapNotice().reset == NapReset::Night);
+    settings.MaintainNapSchedule(200000, 360, true, 0, true);
+    assert(!settings.NapDue(259999) && settings.NapDue(260000));
+    settings.MaintainNapSchedule(260000, 360, false, 0, true);
+    assert(!settings.NapDue(260000));
+    assert(settings.TakeNapNotice().reset == NapReset::ClockInvalid);
 
     // Voice overlap consumes due theatre; a future deadline is not reset.
     overlap.Reset();

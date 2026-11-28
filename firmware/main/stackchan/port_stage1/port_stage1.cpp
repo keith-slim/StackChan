@@ -516,7 +516,7 @@ struct Runtime {
             cue_active = false;
             queued_cue.store(-1);
             phase = Phase::Boot;
-            schedule.Reset();
+            schedule.ResetScene();
             auto& av = sc.avatar();
             conversation_face = avatar::FaceSnapshot::Capture(av);
             conversation_saved = true;
@@ -1140,7 +1140,7 @@ struct Runtime {
             cue_active = false;
             Release(sc, true);
             phase = Phase::Boot;
-            schedule.Reset();
+            schedule.ResetScene();
         }
     }
 };
@@ -1511,8 +1511,8 @@ void CancelForExternalChange(StackChan& sc, const char* source) {
     r.cue_active = false;
     queued_cue.store(-1); // New explicit motion must not be followed by a stale gesture.
     r.phase = Phase::Boot;
-    r.schedule.Reset();
-    interrupted.store(true); // Reset idle deadlines even if the caller is a touch event.
+    r.schedule.ResetScene();
+    interrupted.store(true); // Reset the idle scene even if the caller is a touch event.
 }
 void NotifyManualMotion() {
     perception_looks.Invalidate();
@@ -1782,6 +1782,21 @@ static bool TickLowBattery(StackChan& sc, uint32_t now) {
     return true;
 }
 
+static void LogNapSchedule(Clock& clock) {
+    const auto notice = clock.TakeNapNotice();
+    if (notice.reset != NapReset::None) {
+        const char* reason = notice.reset == NapReset::Config ? "config" :
+            notice.reset == NapReset::Night ? "night" :
+            notice.reset == NapReset::ClockInvalid ? "clock_invalid" :
+            notice.reset == NapReset::ManualNap ? "manual_nap" : "full";
+        ESP_LOGI(LOG_TAG, "[NAP] phase=reset reason=%s", reason);
+    }
+    if (notice.scheduled_ms)
+        ESP_LOGI(LOG_TAG, "[NAP] phase=scheduled delay_ms=%lu",
+                 static_cast<unsigned long>(notice.scheduled_ms));
+    if (notice.deferred)
+        ESP_LOGI(LOG_TAG, "[NAP] phase=deferred");
+}
 static void LogNapProgress(const State& state, unsigned chance) {
     static Phase previous = Phase::Awake;
     if (state.nap_draw != NapDraw::None) {
@@ -1885,7 +1900,7 @@ void Update(StackChan& sc) {
         r.Release(sc, true); // explicit LED/neck ownership is respected by Release
         r.cue_active = false;
         r.phase = Phase::Boot;
-        r.schedule.Reset();
+        r.schedule.ResetScene();
     }
     int cue = queued_cue.exchange(-1);
     if (cue >= 0 && cue < static_cast<int>(Cue::Count)) {
@@ -2153,8 +2168,14 @@ void Update(StackChan& sc) {
         else
             speech_effects.End(sc);
     }
+    std::time_t epoch = std::time(nullptr);
+    std::tm local{};
+    const bool valid = epoch > 1700000000 && localtime_r(&epoch, &local) && local.tm_year >= 124;
+    const auto minute = static_cast<uint16_t>(valid ? local.tm_hour * 60 + local.tm_min : 0);
     if (r.cue_active) {
-        r.schedule.DiscardDueRandomEvents(now, esp_random());
+        r.schedule.MaintainNapSchedule(now, minute, valid, esp_random(), true);
+        LogNapSchedule(r.schedule);
+        r.schedule.DiscardDueTheatre(now, esp_random());
         tick_monologue(r.phase, false);
         poll_weather_change(false, false);
         r.SyncQuietMark(sc, false);
@@ -2165,7 +2186,9 @@ void Update(StackChan& sc) {
     // Explicit conversation state always wins over idle skits and sleep
     // previews; it is released on SPEAKING/STANDBY or other status changes.
     if (r.conversation_pose != ConversationPose::None) {
-        r.schedule.DiscardDueRandomEvents(now, esp_random());
+        r.schedule.MaintainNapSchedule(now, minute, valid, esp_random(), true);
+        LogNapSchedule(r.schedule);
+        r.schedule.DiscardDueTheatre(now, esp_random());
         tick_monologue(r.phase, false);
         poll_weather_change(false, false);
         r.SyncQuietMark(sc, false);
@@ -2174,10 +2197,6 @@ void Update(StackChan& sc) {
         return;
     }
 
-    std::time_t epoch = std::time(nullptr);
-    std::tm local{};
-    const bool valid = epoch > 1700000000 && localtime_r(&epoch, &local) && local.tm_year >= 124;
-    const auto minute = static_cast<uint16_t>(valid ? local.tm_hour * 60 + local.tm_min : 0);
     const bool standby = idle.load();
     // Xiaozhi can already be CONNECTING/LISTENING after a wake word.
     // Preserve the brief S3 wake animation without blocking microphone I/O.
@@ -2185,9 +2204,15 @@ void Update(StackChan& sc) {
     const bool linked_event_pending = dream_remark.motif != avatar_dream::Motif::None ||
                                       manual_sleep_requested.load();
     const bool sleep_home_ready = r.SleepHomeReady(sc, now);
+    // Use the application state in addition to the display's standby flag.
+    // Only consult physical motion for a due nap, avoiding periodic UART reads.
+    const bool nap_blocked = !standby || event || accepted_wake || wake_sequence_active.load() ||
+        motion_interrupted || Application::GetInstance().GetDeviceState() != kDeviceStateIdle ||
+        sc.motion().isModifyLocked() || sc.avatar().isModifyLocked() ||
+        (r.schedule.NapDue(now) && r.phase == Phase::Awake && sc.motion().isMoving());
     State state = r.schedule.Step({now,minute,valid,pose_standby,event,esp_random(),
                                    voice::IsBusy() || VoicePending(),
-                                   linked_event_pending, sleep_home_ready});
+                                   linked_event_pending, sleep_home_ready, nap_blocked});
     // Keep S3's explicit "寝て良いよ" separate from temporary quiet mode.
     // Never turn off the face/neck while the Live reply is still speaking.
     if (manual_sleep_requested.load()) {
@@ -2204,6 +2229,7 @@ void Update(StackChan& sc) {
             ESP_LOGI(LOG_TAG, "manual sleep started: phase=%d", static_cast<int>(state.phase));
         }
     }
+    LogNapSchedule(r.schedule);
     LogNapProgress(state, r.schedule.GetConfig().nap_chance);
     if (!status_logged || now - last_status_log_at >= 60000) {
         ESP_LOGI(LOG_TAG, "runtime phase=%d kind=%d standby=%d clock_valid=%d minute=%u auto=%d",

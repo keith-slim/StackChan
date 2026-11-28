@@ -986,7 +986,7 @@ function logGroupRow(event,label='',kind=''){
 }
 function groupNormalLogs(events){
  const groups=[],finishedSpeech=new Map();
- let active=null,theatre=null,scheduled=null,boot=null,tail=null,nap=null,gazeConversation=null;
+ let active=null,theatre=null,scheduled=null,boot=null,tail=null,nap=null,napSchedule=null,gazeConversation=null;
  const push=(event,label,kind)=>{const group=logGroupRow(event,label,kind);groups.push(group);return group;};
  const merge=(from,into)=>{into.events.unshift(...from.events);from.merged=true;};
  const closeAt=(group,eventTime)=>{group.closedAt=eventTime;tail=group;};
@@ -1004,6 +1004,7 @@ function groupNormalLogs(events){
   const text=event.message;
   if(event.category==='起動'){
    if(nap){nap.result='終了記録なし';nap=null;}
+   if(napSchedule){napSchedule.result='再起動';napSchedule=null;}
    gazeConversation=null;
    finish('終了',event.uptime_ms);
    boot=active=push(event,'起動','boot');
@@ -1024,13 +1025,24 @@ function groupNormalLogs(events){
   }
   const napPhase=text.match(/^\[NAP\] phase=(\w+)/)?.[1];
   if(napPhase){
-   if(napPhase==='draw_missed'){
+   if(napPhase==='scheduled'||napPhase==='deferred'||napPhase==='reset'){
+    if(napPhase==='scheduled'){
+     if(napSchedule)napSchedule.result='終了記録なし';
+     napSchedule=push(event,'昼寝抽選','nap');
+    }else if(napSchedule)napSchedule.events.push(event);
+    else napSchedule=push(event,'昼寝抽選','nap');
+    napSchedule.result=napPhase==='scheduled'?'予定':napPhase==='deferred'?'保留':'リセット';
+    if(napPhase==='reset')napSchedule=null;
+   }else if(napPhase==='draw_missed'){
     const chance=text.match(/\bchance=(\d+)/)?.[1];
-    push(event,'昼寝抽選','nap').result=chance?'外れ（確率'+chance+'%）':'外れ';
+    const draw=push(event,'昼寝抽選','nap');
+    if(napSchedule){merge(napSchedule,draw);napSchedule=null;}
+    draw.result=chance?'外れ（確率'+chance+'%）':'外れ';
    }else{
     if(napPhase==='draw_won'||napPhase==='preparing'||!nap){
      if(nap)nap.result='終了記録なし';
      nap=push(event,'昼寝','nap');
+     if(napPhase==='draw_won'&&napSchedule){merge(napSchedule,nap);napSchedule=null;}
     }else nap.events.push(event);
     if(napPhase==='woke'||napPhase==='canceled'){
      nap.result=napPhase==='woke'?'起床':'中断';

@@ -3,6 +3,7 @@
 // All times are monotonic milliseconds; local time is used only for day/night boundaries.
 #include <cstdint>
 #include "../event_timer.h"
+#include "nap_schedule.h"
 
 namespace stackchan::stage1 {
 
@@ -37,6 +38,7 @@ struct Inputs {
     bool voice_busy = false; // Voice generation/queue not yet fully drained.
     bool linked_event_pending = false; // Only blocks independent random events.
     bool sleep_home_ready = true; // Runtime's final timed neck movement has settled.
+    bool nap_blocked = false; // Extra nap-only admission (actual device/wake/motion state).
 };
 struct State {
     Phase phase = Phase::Boot;
@@ -69,8 +71,15 @@ public:
             cfg.nap_idle_min_minutes > cfg.nap_idle_max_minutes ||
             cfg.nap_sleep_min_minutes < 1 || cfg.nap_sleep_max_minutes > 1440 ||
             cfg.nap_sleep_min_minutes > cfg.nap_sleep_max_minutes) return false;
+        if (cfg_.naps != cfg.naps || cfg_.nap_chance != cfg.nap_chance ||
+            cfg_.nap_idle_min_minutes != cfg.nap_idle_min_minutes ||
+            cfg_.nap_idle_max_minutes != cfg.nap_idle_max_minutes ||
+            cfg_.nap_sleep_min_minutes != cfg.nap_sleep_min_minutes ||
+            cfg_.nap_sleep_max_minutes != cfg.nap_sleep_max_minutes ||
+            cfg_.wake_minute != cfg.wake_minute || cfg_.sleep_minute != cfg.sleep_minute)
+            nap_.Reset(NapReset::Config);
         cfg_ = cfg;
-        idle_due_ = nap_due_ = 0;
+        idle_due_ = 0;
         return true;
     }
     const Config& GetConfig() const { return cfg_; }
@@ -78,14 +87,24 @@ public:
     uint32_t DrowsyDurationMs() const {
         return phase_ == Phase::NapDrowsy && !manual_nap_ ? kNapDrowsyMs : kNightDrowsyMs;
     }
-    // An expired independent event is a missed opportunity, not a queue.
-    // Keep every deadline that has not expired yet.
-    void DiscardDueRandomEvents(uint32_t now, uint32_t random) {
+    // Theatre keeps its missed-opportunity policy; naps have their own deadline.
+    void DiscardDueTheatre(uint32_t now, uint32_t random) {
         if (cfg_.theatre)
             event_timer::DiscardDue(idle_due_, now, [&] { return TheatreDelay(random); });
-        if (cfg_.naps)
-            event_timer::DiscardDue(nap_due_, now, [&] { return NapDelay(random); });
     }
+    // Called also on Runtime paths that return before Step (cue/conversation).
+    void MaintainNapSchedule(uint32_t now, uint16_t minute, bool valid,
+                             uint32_t random, bool blocked) {
+        if (!valid || minute >= 1440) { nap_.Reset(NapReset::ClockInvalid); return; }
+        if (!IsDay(minute, cfg_)) { nap_.Reset(NapReset::Night); return; }
+        if (!cfg_.naps) return;
+        if (phase_ != Phase::Boot && phase_ != Phase::Awake && phase_ != Phase::Theatre)
+            return;
+        if (!nap_.Armed()) nap_.Arm(now, NapDelay(random));
+        if (blocked || phase_ != Phase::Awake) nap_.Defer(now);
+    }
+    bool NapDue(uint32_t now) const { return nap_.Due(now); }
+    NapNotice TakeNapNotice() { return nap_.TakeNotice(); }
     WakeReason CurrentWakeReason() const { return wake_reason_; }
     bool RequestWake(WakeReason why, uint32_t ms) {
         if (why != WakeReason::Touch && why != WakeReason::Word) return false;
@@ -108,6 +127,7 @@ public:
         if (!clock_valid || minute >= 1440) return false;
         if (IsDay(minute, cfg_)) {
             if (phase_ == Phase::NapSleep || phase_ == Phase::NapYawn || phase_ == Phase::NapDrowsy) return true;
+            nap_.Reset(NapReset::ManualNap);
             manual_nap_ = true;
             Enter(Phase::NapDrowsy, ms);
         } else {
@@ -118,10 +138,16 @@ public:
         return true;
     }
     void Reset() {
+        nap_.Reset(NapReset::Full);
+        ResetScene();
+    }
+    // Conversation, explicit gestures and expression changes reset the scene,
+    // not the independent daytime nap deadline.
+    void ResetScene() {
         phase_ = Phase::Boot;
         kind_ = Kind::None;
         dream_ = -1;
-        idle_due_ = nap_due_ = phase_at_ = dream_due_ = dream_hide_ = 0;
+        idle_due_ = phase_at_ = dream_due_ = dream_hide_ = 0;
         night_temp_ms_ = 120000;
         manual_nap_ = silent_night_ = false;
         last_kind_ = Kind::None;
@@ -135,10 +161,12 @@ public:
     }
     State Step(const Inputs& in) {
         if (!in.clock_valid || in.minute >= 1440) {
-            Reset();
+            nap_.Reset(NapReset::ClockInvalid);
+            ResetScene();
             return Snapshot(in.ms, true);
         }
         const bool day = IsDay(in.minute, cfg_);
+        if (!day) nap_.Reset(NapReset::Night);
         if (phase_ == Phase::Boot) {
             if (day) Enter(Phase::Awake, in.ms);
             else if (in.standby && !in.activity) BeginSilentNight(in.ms);
@@ -186,14 +214,17 @@ public:
             Enter(in.standby && !in.activity ? Phase::MorningWake : Phase::Awake, in.ms);
             return Snapshot(in.ms, day);
         }
+        MaintainNapSchedule(in.ms, in.minute, in.clock_valid, in.random,
+                            !in.standby || in.activity || in.voice_busy ||
+                            in.linked_event_pending || in.nap_blocked);
         if ((!in.standby || in.activity) && phase_ != Phase::NapWake) {
             if (phase_ != Phase::Awake) Enter(Phase::Awake, in.ms);
-            idle_due_ = nap_due_ = 0;
+            idle_due_ = 0;
             return Snapshot(in.ms, day);
         }
         switch (phase_) {
         case Phase::Theatre:
-            DiscardDueRandomEvents(in.ms, in.random);
+            DiscardDueTheatre(in.ms, in.random);
             if (Elapsed(in.ms) >= TheatreDuration(kind_)) Enter(Phase::Awake, in.ms);
             break;
         case Phase::NapDrowsy:
@@ -230,7 +261,7 @@ public:
             break;
         case Phase::Awake:
             if (in.voice_busy || in.linked_event_pending) {
-                DiscardDueRandomEvents(in.ms, in.random);
+                DiscardDueTheatre(in.ms, in.random);
                 break;
             }
             if (cfg_.theatre) {
@@ -243,15 +274,15 @@ public:
                     last_kind_ = kind_;
                     Enter(Phase::Theatre, in.ms);
                     idle_due_ = 0;
-                    // Theatre retains its existing priority when both are due.
-                    DiscardDueRandomEvents(in.ms, in.random);
+                    // Theatre retains priority; the single nap draw waits.
+                    DiscardDueTheatre(in.ms, in.random);
+                    nap_.Defer(in.ms);
                     return Snapshot(in.ms, day);
                 }
             }
-            if (cfg_.naps) {
-                if (!nap_due_) nap_due_ = event_timer::Next(in.ms, NapDelay(in.random));
-                if (event_timer::Due(nap_due_, in.ms)) {
-                    nap_due_ = 0;
+            if (cfg_.naps && !in.nap_blocked) {
+                if (nap_.Due(in.ms)) {
+                    nap_.Consume();
                     if ((in.random % 100) < cfg_.nap_chance) {
                         manual_nap_ = false;
                         Enter(Phase::NapDrowsy, in.ms);
@@ -295,17 +326,11 @@ private:
     }
     static uint32_t DreamWait(uint32_t r) { return 15000 + r % 45001; }
     void Enter(Phase phase, uint32_t now) {
-        const Phase old = phase_;
         phase_ = phase;
         phase_at_ = now;
         kind_ = phase == Phase::Theatre ? kind_ : Kind::None;
         dream_ = -1;
-        if (phase != Phase::Awake) idle_due_ = 0;
-        if (phase == Phase::Awake) {
-            idle_due_ = 0;
-            // A theatre performance must not postpone a nap draw indefinitely.
-            if (old != Phase::Theatre) nap_due_ = 0;
-        }
+        idle_due_ = 0;
     }
     uint32_t Elapsed(uint32_t now) const { return now - phase_at_; }
     State Snapshot(uint32_t now, bool day, NapDraw draw = NapDraw::None) const {
@@ -317,7 +342,8 @@ private:
     Kind last_kind_ = Kind::None;
     int8_t dream_ = -1;
     WakeReason wake_reason_ = WakeReason::None;
-    uint32_t phase_at_ = 0, idle_due_ = 0, nap_due_ = 0;
+    uint32_t phase_at_ = 0, idle_due_ = 0;
+    NapSchedule nap_;
     uint32_t nap_sleep_ms_ = 0, dream_due_ = 0, dream_hide_ = 0;
     uint32_t night_temp_ms_ = 120000;
     bool manual_nap_ = false, silent_night_ = false;
