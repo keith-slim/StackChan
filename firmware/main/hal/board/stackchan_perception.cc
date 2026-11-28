@@ -328,7 +328,9 @@ void StackChanPerception::RunWorker(uint64_t snapshot_end)
             stackchan::stage1::NoteEyeContact(false, 0);
         } else if (gaze != Gaze::Unknown) {
             // 一時的な判定困難は直近の一致を使い、Stage1の期限が切れたら解除する。
-            stackchan::stage1::NoteEyeContact(gaze == Gaze::Contact, captured);
+            // 目線の保持時間は、鮮度を確認した判定の受信時刻から数える。
+            const auto received_at = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            stackchan::stage1::NoteEyeContact(gaze == Gaze::Contact, received_at);
         }
         if (!tracking_face) {
             face_pitch.ResetMotion();
