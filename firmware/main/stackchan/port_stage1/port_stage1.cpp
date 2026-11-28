@@ -545,8 +545,8 @@ struct Runtime {
         ESP_LOGI(LOG_TAG, "[GAZE] phase=ended result=%s", result);
     }
     bool TickListeningGlance(StackChan& sc, uint32_t now, bool available) {
-        constexpr int kGlanceAngle = 150; // 15 degrees in servo angle units
-        constexpr uint32_t kGlanceHoldMs = 1000, kGlanceArrivalTimeoutMs = 2000;
+        constexpr int kGlanceAngle = 450; // 45 degrees in servo angle units
+        constexpr uint32_t kGlanceHoldMs = 1000, kGlanceArrivalTimeoutMs = 3000;
         auto& motion = sc.motion();
         auto& yaw = motion.yawServo();
         if (!available || !gaze_listening) {
