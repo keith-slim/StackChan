@@ -532,9 +532,10 @@ struct Runtime {
             listening_nod_at = now;
         }
     }
-    void StopListeningGlance(motion::Servo& yaw, const char* result = "canceled") {
+    void StopListeningGlance(motion::Servo& yaw, const char* result = "canceled",
+                              const int* measured_stop = nullptr) {
         if (!gaze_yaw.commanded) return;
-        gaze_yaw.Stop(yaw);
+        gaze_yaw.Stop(yaw, measured_stop);
         gaze_blush.reset();
         perception_looks.Invalidate();
         ESP_LOGI(LOG_TAG, "[SERVO_GAZE] phase=end axis=yaw result=%s", result);
@@ -542,7 +543,7 @@ struct Runtime {
     }
     bool TickListeningGlance(StackChan& sc, uint32_t now, bool available) {
         constexpr int kGlanceAngle = 80; // 8 degrees in servo angle units
-        constexpr uint32_t kTurnBackMs = 500, kGlanceTimeoutMs = 1500;
+        constexpr uint32_t kTurnBackMs = 500, kGlanceMinMs = 1000, kGlanceTimeoutMs = 1500;
         auto& motion = sc.motion();
         auto& yaw = motion.yawServo();
         if (!available || !gaze_listening) {
@@ -556,9 +557,14 @@ struct Runtime {
                 StopListeningGlance(yaw);
                 return false;
             }
-            if (gaze_returning && !yaw.isTrackingCommandActive()) {
-                StopListeningGlance(yaw, "completed");
-                return false;
+            if (gaze_returning && elapsed >= kGlanceMinMs && now - gaze_yaw.last_poll >= 200) {
+                // 実測角が既存の到達許容差に収まったら復帰完了とする。
+                gaze_yaw.last_poll = now;
+                int actual = 0;
+                if (yaw.tryGetCurrentAngle(actual) && search_arrived(actual, gaze_origin, kYawArrivalTolerance)) {
+                    StopListeningGlance(yaw, "completed", &actual);
+                    return false;
+                }
             }
             if (elapsed >= kGlanceTimeoutMs) {
                 StopListeningGlance(yaw, "timeout");
