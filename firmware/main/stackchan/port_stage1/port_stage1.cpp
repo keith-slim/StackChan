@@ -369,7 +369,7 @@ struct Runtime {
     GlancePhase gaze_phase = GlancePhase::Turning;
     uint32_t gaze_phase_at = 0;
     int gaze_origin = 0, gaze_target = 0;
-    bool gaze_listening = false, averted_this_listen = false;
+    bool gaze_enabled = false, gaze_listening = false, averted_this_listen = false;
     std::unique_ptr<AvatarThinkingFace> thinking_face;
     Clock schedule;
     Phase phase = Phase::Boot;
@@ -549,7 +549,7 @@ struct Runtime {
         constexpr uint32_t kGlanceHoldMs = 1000, kGlanceArrivalTimeoutMs = 3000;
         auto& motion = sc.motion();
         auto& yaw = motion.yawServo();
-        if (!available || !gaze_listening) {
+        if (!gaze_enabled || !available || !gaze_listening) {
             eye_contact_since = 0;
             StopListeningGlance(yaw);
             return false;
@@ -1355,7 +1355,9 @@ void Start() {
     CancelDreamRemark();
     weather_changes = weather::Changes{};
     r = Runtime{};
-    ESP_LOGI(LOG_TAG, "[GAZE] boot neck glance=enabled");
+    static const bool gaze_enabled_at_boot = (esp_random() & 1) != 0;
+    r.gaze_enabled = gaze_enabled_at_boot;
+    ESP_LOGI(LOG_TAG, "[GAZE] boot neck glance=%s", r.gaze_enabled ? "enabled" : "disabled");
     speech_effects = SpeechEffectsRuntime{};
     speech_tracking_paused.store(false);
     person_search = PersonSearch{};
@@ -2254,7 +2256,9 @@ void Update(StackChan& sc) {
     const auto* remark_config = voice::Current();
     const auto remark_session = Application::GetInstance().TakeDueConversationRemark(
         monologue_eligible && !weather_announced, quiet_mode::Active());
-    if (!remark_session.empty() && remark_config && remark_config->monologue_enabled)
+    constexpr unsigned kConversationRemarkChancePercent = 30;
+    if (!remark_session.empty() && remark_config && remark_config->monologue_enabled &&
+        esp_random() % 100 < kConversationRemarkChancePercent)
         conversation_remarked = voice::Request(*remark_config, "conversation_remark", remark_session.c_str());
     tick_monologue(state.phase, monologue_eligible && !weather_announced && !conversation_remarked);
     DreamRemarkTick(sc, state, now, event && !Application::GetInstance().IsAnnouncementActive());
