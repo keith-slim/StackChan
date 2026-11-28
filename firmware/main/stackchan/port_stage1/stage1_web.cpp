@@ -1116,7 +1116,7 @@ function groupNormalLogs(events){
 }
 function groupServoLogs(events){
  const groups=[];
- let tracking=null,normal=null;
+ let tracking=null,normal=null,gaze=null;
  const outcomes={completed:'完了',canceled:'中断',stall:'過負荷保護',interrupted:'中断',replaced:'別動作へ移行'};
  const priority={completed:0,replaced:1,canceled:2,interrupted:2,stall:3};
  const periodic=/^\[SERVO_(?:CYCLE|DISPATCH|UART|IO|RX_RESYNC|BUS|WRITE_RATE|WRITE_ACK|RX_HEADER|RX_LAST|STALL_BUS)\]/;
@@ -1128,6 +1128,20 @@ function groupServoLogs(events){
  }
  for(const event of events){
   const text=event.message;
+  const gazePhase=text.match(/^\[SERVO_GAZE\] phase=(start|return|end)\b/)?.[1];
+  if(gazePhase){
+   if(gazePhase==='start'||!gaze){
+    if(gaze)gaze.result='終了記録なし';
+    gaze=logGroupRow(event,gazePhase==='start'?'目そらしサーボ':'目そらしサーボ（表示分）','gaze_motion');
+    groups.push(gaze);
+   }else gaze.events.push(event);
+   if(gazePhase==='end'){
+    const result=text.match(/\bresult=(\w+)/)?.[1];
+    gaze.result=result==='timeout'?'タイムアウト':outcomes[result]||'終了';
+    gaze=null;
+   }
+   continue;
+  }
   const motion=text.match(/^\[SERVO_MOTION\] phase=(start|retarget|end) id=(\d+)/);
   if(motion){
    const [,phase,id]=motion;

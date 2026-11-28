@@ -539,6 +539,7 @@ struct Runtime {
         gaze_yaw.Stop(yaw);
         gaze_blush.reset();
         perception_looks.Invalidate();
+        ESP_LOGI(LOG_TAG, "[SERVO_GAZE] phase=end axis=yaw result=%s", result);
         ESP_LOGI(LOG_TAG, "[GAZE] phase=ended result=%s", result);
     }
     bool TickListeningGlance(StackChan& sc, uint32_t now, bool available) {
@@ -568,6 +569,8 @@ struct Runtime {
             if (!gaze_returning && elapsed >= kTurnBackMs) {
                 gaze_yaw.Issue(yaw, gaze_origin, now, kFaceTrackingRate);
                 gaze_returning = true;
+                ESP_LOGI(LOG_TAG, "[SERVO_GAZE] phase=return axis=yaw target=%d rate=%d",
+                         gaze_origin, kFaceTrackingRate);
             }
             return true;
         }
@@ -607,7 +610,9 @@ struct Runtime {
             auto& avatar = static_cast<avatar::DefaultAvatar&>(sc.avatar());
             gaze_blush = std::make_unique<avatar::ShyDecorator>(avatar.getPanel()->get());
         }
-        ESP_LOGI(LOG_TAG, "[GAZE] phase=started yaw=%d target=%d blush=%d", gaze_origin, target, blush);
+        ESP_LOGI(LOG_TAG, "[SERVO_GAZE] phase=start axis=yaw from=%d target=%d rate=%d",
+                 gaze_origin, target, kFaceTrackingRate);
+        ESP_LOGI(LOG_TAG, "[GAZE] phase=started blush=%d", blush);
         return true;
     }
     void DrawConversation(StackChan& sc, uint32_t now) {
