@@ -231,6 +231,15 @@ protected:
     // Track commands instead of polling the servo while idle with torque off.
     bool _torque_commanded_enabled    = false;
 
+    // Ordinary motion history only; no additional actuator reads or writes.
+    virtual int normal_log_id() const { return -1; }
+    void begin_normal_log(const char* profile, int target);
+    void finish_normal_log(const char* cleanup, const char* result = nullptr);
+    bool _normal_log_active = false;
+    int _normal_log_goal = 0;
+    const char* _normal_log_profile = nullptr;
+    const char* _normal_log_result = "completed";
+
     void cancel_profile(bool preserve_spring = false);
     void apply_default_spring_options();
     void update_angle_anim_target(int angle);

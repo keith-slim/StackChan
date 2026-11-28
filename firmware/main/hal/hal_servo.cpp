@@ -76,6 +76,8 @@ public:
         }
     }
 
+    int normal_log_id() const override { return _config.id; }
+
     void update() override
     {
         if (executor::external()) {
@@ -94,6 +96,13 @@ public:
             }
         }
         report_bus_stats();
+        // In the normal auto-release path, Servo::update has already checked
+        // moving status and released torque. A retained torque only proves
+        // the command profile ended, not a separately measured physical stop.
+        if (_profile == Profile::Idle) {
+            if (!_torque_commanded_enabled) finish_normal_log("torque_off");
+            else if (!_auto_torque_release_enabled) finish_normal_log("torque_held");
+        }
     }
 
     int _sweep_hold_raw = -1;
@@ -386,7 +395,7 @@ public:
             return;
         }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
-        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+        std::unique_lock<std::mutex> bus_lock(_scs_bus_mutex);
         // Write ACK is optional and collected by the bus with a short timeout.
         if (_torque_command_known && _torque_commanded_enabled == enabled) return;
         if (!enabled && _profile == Profile::HardwareSweep) {
@@ -408,6 +417,10 @@ public:
         _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
         if (!enabled) { _monitor_target = -1; reset_stall_detection(); }
         Servo::setTorqueEnabled(enabled);
+        bus_lock.unlock();
+        // The normal idle update closes after its remaining stall/report work.
+        // Explicit torque-off during an active profile is an interruption.
+        if (!enabled && _profile != Profile::Idle) finish_normal_log("torque_off", "interrupted");
     }
 
     bool getTorqueEnabled() override
@@ -469,7 +482,7 @@ public:
             return;
         }
         std::lock_guard<std::recursive_mutex> state_lock(_state_mutex);
-        std::lock_guard<std::mutex> bus_lock(_scs_bus_mutex);
+        std::unique_lock<std::mutex> bus_lock(_scs_bus_mutex);
         velocity = uitk::clamp(velocity, -1000, 1000);
 
         if (!_config.enablePwmMode) {
@@ -488,6 +501,8 @@ public:
         }
         check_mode(Mode::PWM);
         _scs_bus.WritePWM(_config.id, mapped_velocity);
+        bus_lock.unlock();
+        finish_normal_log("pwm_handoff", "replaced");
     }
 
 private:
@@ -747,6 +762,7 @@ private:
             }
         }
         set_angle_limit(angle_limit);
+        if (_normal_log_active) _normal_log_result = "stall";
         stop_motion_at_angle(angle);
         reset_stall_detection();
 

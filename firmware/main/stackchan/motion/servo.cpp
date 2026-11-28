@@ -8,6 +8,8 @@
 #include "tracking_step.h"
 #include <hal/hal.h>
 #include <cmath>
+#include <cstring>
+#include <esp_log.h>
 
 using namespace uitk;
 
@@ -178,6 +180,7 @@ uint32_t Servo::trackWithSpeed(int angle, int speed, const int* measured_start)
         return result;
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+    finish_normal_log("tracking_handoff", "replaced");
     const bool continuing = _profile == Profile::Tracking && _torque_commanded_enabled;
     const bool replacing_sweep = _profile == Profile::HardwareSweep;
     const bool resume_from_feedback = continuing && _tracking_replan_pending && measured_start;
@@ -219,6 +222,7 @@ bool Servo::startHardwareSweep(int angle, int rate, uint32_t& revision, bool ret
     int measured = 0;
     if (!tryGetCurrentAngle(measured) || sweep_cancelled() ||
         (retarget && _hardware_stop_requested.load())) return false;
+    finish_normal_log("sweep_handoff", "replaced");
     cancel_profile();
     _goal = uitk::clamp(angle, _angle_limit.x, _angle_limit.y);
     _angle_anim.teleport(measured);
@@ -303,6 +307,7 @@ void Servo::moveWithDuration(int angle, uint32_t duration_ms, uint32_t now)
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+    begin_normal_log("timed", uitk::clamp(angle, _angle_limit.x, _angle_limit.y));
     const bool was_moving = isMoving();
     const int current = uitk::clamp(getCurrentAngle(), _angle_limit.x, _angle_limit.y);
     cancel_profile();
@@ -325,6 +330,7 @@ void Servo::cancelTimedMove()
     std::lock_guard<std::recursive_mutex> lock(_state_mutex);
     // Public cancellation historically leaves ordinary spring motion intact.
     if (_profile == Profile::HardwareSweep) { stopHardwareSweep(getCommandRevision()); return; }
+    if (_normal_log_active && _profile == Profile::Timed) _normal_log_result = "canceled";
     cancel_profile(true);
 }
 
@@ -371,6 +377,7 @@ void Servo::apply_default_spring_options()
 
 void Servo::update_angle_anim_target(int angle)
 {
+    begin_normal_log("spring", uitk::clamp(angle, _angle_limit.x, _angle_limit.y));
     const bool replacing_sweep = _profile == Profile::HardwareSweep;
     const int sweep_position = replacing_sweep ? getCurrentAngle() : 0;
     cancel_profile(true);
@@ -386,6 +393,29 @@ void Servo::update_angle_anim_target(int angle)
     _angle_anim = _goal;
     _profile = Profile::Spring;
     if (replacing_sweep) set_angle_impl(sweep_position);
+}
+
+void Servo::begin_normal_log(const char* profile, int target)
+{
+    const int id = normal_log_id();
+    if (id < 0) return;
+    if (_normal_log_active && _normal_log_goal == target &&
+        std::strcmp(_normal_log_profile, profile) == 0 &&
+        std::strcmp(_normal_log_result, "completed") == 0) return;
+    ESP_LOGI("Motion", "[SERVO_MOTION] phase=%s id=%d profile=%s target=%d",
+             _normal_log_active ? "retarget" : "start", id, profile, target);
+    _normal_log_active = true;
+    _normal_log_goal = target;
+    _normal_log_profile = profile;
+    _normal_log_result = "completed";
+}
+
+void Servo::finish_normal_log(const char* cleanup, const char* result)
+{
+    if (!_normal_log_active) return;
+    ESP_LOGI("Motion", "[SERVO_MOTION] phase=end id=%d result=%s cleanup=%s",
+             normal_log_id(), result ? result : _normal_log_result, cleanup);
+    _normal_log_active = false;
 }
 
 void Servo::stop_motion_at_angle(int angle)

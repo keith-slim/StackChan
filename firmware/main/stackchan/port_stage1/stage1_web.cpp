@@ -270,7 +270,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 <button type="button" data-log-group="events" aria-pressed="true">通常ログ</button><button type="button" data-log-group="servo" aria-pressed="false">サーボログ</button>
 <button type="button" id="logRefresh">更新</button><button type="button" id="logDownload">SD履歴をダウンロード</button>
 </div>
-<small>起動後の直近200件を新しい順に表示します。SDにはそれぞれ最大1万件を保存します。ダウンロードは発話・会話が終わってから実行してください。</small>
+<small>起動後の通常ログ・サーボログをそれぞれ直近最大1000件からまとめて、新しい順に表示します。SDにはそれぞれ最大1万件を保存します。ダウンロードは発話・会話が終わってから実行してください。</small>
 <p id="logStorage" class="status" role="status"></p>
 <div id="logScroll" class="log-scroll" tabindex="0" role="region" aria-label="動作履歴の一覧"><table class="log-table">
 <thead><tr><th scope="col">日時</th><th scope="col">分類</th><th scope="col">内容</th></tr></thead><tbody id="logEntries"></tbody>
@@ -1101,25 +1101,68 @@ function groupNormalLogs(events){
 }
 function groupServoLogs(events){
  const groups=[];
- let active=null;
+ let tracking=null,normal=null;
+ const outcomes={completed:'完了',canceled:'中断',stall:'過負荷保護',interrupted:'中断',replaced:'別動作へ移行'};
+ const priority={completed:0,replaced:1,canceled:2,interrupted:2,stall:3};
+ const periodic=/^\[SERVO_(?:CYCLE|DISPATCH|UART|IO|RX_RESYNC|BUS|WRITE_RATE|WRITE_ACK|RX_HEADER|RX_LAST|STALL_BUS)\]/;
+ function finishNormal(){
+  const result=normal.outcome||'completed';
+  normal.result=normal.partial?'表示分・'+outcomes[result]:outcomes[result];
+  if(normal.held&&result==='completed')normal.result=normal.partial?'表示分・指令終了（保持）':'指令終了（保持）';
+  normal=null;
+ }
  for(const event of events){
   const text=event.message;
-  const marker=text.match(/^\[TRACK_PHASE\] phase=(\w+)/)?.[1];
-  const inferred=text.startsWith('Track face=')?'face':text.startsWith('Track body ')?'body':
-   /^(DOA angle=|\[PERSON_SEARCH\] restart:|\[SWEEP_START\])/.test(text)?'search':'';
-  const phase=marker==='started'?'search':marker||(!active?.hasMarker?inferred:'');
-  if(marker==='started'&&active){active.result='終了';active=null;}
-  if(!active){
-   if(!trackingNames[phase]){groups.push(logGroupRow(event));continue;}
-   active=logGroupRow(event,marker==='started'?'人物追従':'人物追従（表示分）','tracking');
-   active.sections=[];groups.push(active);
-  }else active.events.push(event);
-  if(marker)active.hasMarker=true;
-  if(trackingNames[phase]&&active.sections.at(-1)?.phase!==phase){
-   active.sections.push({phase,events:[]});
+  const motion=text.match(/^\[SERVO_MOTION\] phase=(start|retarget|end) id=(\d+)/);
+  if(motion){
+   const [,phase,id]=motion;
+   // A new start for an already-open axis proves an earlier end marker
+   // was lost. Do not leave every later idle movement in that old row.
+   if(phase==='start'&&normal?.axes.has(id)&&normal.axes.size===1){
+    normal.result='終了記録なし';normal=null;
+   }
+   if(!normal){
+    normal=logGroupRow(event,phase==='start'?'通常サーボ動作':'通常サーボ動作（表示分）','normal_motion');
+    normal.axes=new Set();normal.partial=phase!=='start';groups.push(normal);
+   }else normal.events.push(event);
+   if(phase==='end'){
+    const outcome=text.match(/\bresult=(\w+)/)?.[1]||'completed';
+    if(!normal.axes.has(id))normal.partial=true;
+    if((priority[outcome]??0)>=(priority[normal.outcome]??0))normal.outcome=outcomes[outcome]?outcome:'completed';
+    if(text.includes('cleanup=torque_held'))normal.held=true;
+    normal.axes.delete(id);
+    if(!normal.axes.size)finishNormal();
+   }else normal.axes.add(id);
+   continue;
   }
-  active.sections.at(-1).events.push(event);
-  if(marker==='stopped'){active.result='終了';active=null;}
+  const marker=text.match(/^\[TRACK_PHASE\] phase=(\w+)/)?.[1];
+  const inferred=text.startsWith('Track face=')?'face':/^Track body[ =]/.test(text)?'body':
+   /^(DOA angle=|\[PERSON_SEARCH\] restart:|\[SWEEP_START\])/.test(text)?'search':'';
+  const phase=marker==='started'?'search':marker||(!tracking?.hasMarker?inferred:'');
+  if(marker==='started'&&tracking){tracking.result='終了';tracking=null;}
+  // Attribute ordinary-motion diagnostics to its open session, without
+  // swallowing tracking phase markers or creating periodic idle rows.
+  if(normal&&!marker&&!inferred){
+   const axis=text.match(/\bid=(\d+)/)?.[1];
+   const trackingDetail=/^\[(?:TRACK_|SWEEP_|PERSON_SEARCH\]|FACE_PITCH_SEARCH\])/.test(text);
+   if(!tracking||!trackingDetail&&!periodic.test(text)&&(!axis||normal.axes.has(axis))){
+    normal.events.push(event);continue;
+   }
+  }
+  if(!tracking){
+   if(!trackingNames[phase]){
+    if(!periodic.test(text))groups.push(logGroupRow(event));
+    continue;
+   }
+   tracking=logGroupRow(event,marker==='started'?'人物追従':'人物追従（表示分）','tracking');
+   tracking.sections=[];groups.push(tracking);
+  }else tracking.events.push(event);
+  if(marker)tracking.hasMarker=true;
+  if(trackingNames[phase]&&tracking.sections.at(-1)?.phase!==phase){
+   tracking.sections.push({phase,events:[]});
+  }
+  tracking.sections.at(-1).events.push(event);
+  if(marker==='stopped'){tracking.result='終了';tracking=null;}
  }
  return groups;
 }

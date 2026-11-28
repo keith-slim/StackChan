@@ -30,7 +30,7 @@ struct Status {
     unsigned dropped;
 };
 
-constexpr unsigned kRecentCapacity = 200;
+constexpr unsigned kRecentCapacity = 1000;
 constexpr unsigned kArchiveCapacity = 10000;
 
 void Start();

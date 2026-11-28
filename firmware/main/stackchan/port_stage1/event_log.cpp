@@ -25,7 +25,7 @@
 namespace stackchan::stage1::event_log {
 namespace {
 
-constexpr unsigned kQueueCapacity = 1000;
+constexpr unsigned kQueueCapacity = kRecentCapacity;
 constexpr int64_t kWritePeriodUs = 30000000;
 constexpr int64_t kRetryPeriodUs = 60000000;
 constexpr auto kPsram = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
