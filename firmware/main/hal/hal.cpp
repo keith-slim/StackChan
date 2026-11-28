@@ -5,11 +5,47 @@
  */
 #include "hal.h"
 #include <memory>
+#include <atomic>
+#include <esp_heap_caps.h>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
+#include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
+#include <freertos/task.h>
+#include "board/hal_bridge.h"
+#include "stackchan/storage/nvs_snapshot.h"
+#include "stackchan/storage/factory_reset.h"
+#include "stackchan/port_stage1/event_log.h"
+#include "stackchan/config/server_boot_policy.h"
+#include <stackchan/config/low_battery.h>
+#include "stackchan/speech_mouth.h"
+#include "stackchan/wifi/wifi_web.h"
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string_view _tag = "HAL";
+
+// An NVS commit, not a timer, requests the SD mirror. The backup worker
+// exists only while a committed change is being copied to the SD card.
+static std::atomic<uint32_t> _sd_nvs_revision{0};
+static std::atomic<uint32_t> _sd_saved_revision{0};
+static std::atomic<int64_t> _sd_retry_after_us{0};
+static std::atomic<bool> _sd_backup_running{false};
+static std::atomic<bool> _sd_backup_ready{false};
+static void _schedule_sd_backup_if_safe();
+
+extern "C" void stackchan_nvs_commit_observer(void)
+{
+    _sd_nvs_revision.fetch_add(1, std::memory_order_release);
+    _sd_retry_after_us.store(0, std::memory_order_release);
+    _schedule_sd_backup_if_safe();
+}
+
+extern "C" bool stackchan_sd_nvs_backup_pending(void)
+{
+    return _sd_nvs_revision.load(std::memory_order_acquire) !=
+           _sd_saved_revision.load(std::memory_order_acquire);
+}
 
 Hal& GetHAL()
 {
@@ -31,8 +67,17 @@ void Hal::init()
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    ESP_ERROR_CHECK(stackchan::storage::CompletePendingFactoryReset());
 
     xiaozhi_board_init();
+    // The display/SD shared-bus controller is ready here; settings consumers
+    // have not yet started. Restore only a truly empty NVS partition.
+    if (stackchan::sd::RestoreNvsIfEmpty()) {
+        mclog::tagInfo(_tag, "NVS recovered from SD; restarting to reload all settings");
+        esp_restart();
+        return;
+    }
+    stackchan::config::server_boot::PrepareStoredProtocol();
     xiaozhi_mcp_init();
     head_touch_init();
     io_expander_init();
@@ -40,6 +85,8 @@ void Hal::init()
     imu_init();
     servo_init();
     lvgl_init();
+    _sd_backup_ready.store(true, std::memory_order_release);
+    _schedule_sd_backup_if_safe();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -142,27 +189,108 @@ void Hal::xiaozhi_board_init()
     hal_bridge::xiaozhi_board_init();
 }
 
+// A successful NVS commit triggers a snapshot. Do not reserve a permanent
+// task stack, and never run optional SD work in the committing thread.
+static void _sd_backup_task(void*)
+{
+    const uint32_t revision = _sd_nvs_revision.load(std::memory_order_acquire);
+    const bool success = stackchan::sd::BackupNvsIfChanged();
+    if (success) {
+        _sd_saved_revision.store(revision, std::memory_order_release);
+    } else {
+        // A missing SD must not cause repeated task creation or starving audio.
+        _sd_retry_after_us.store(esp_timer_get_time() + 60000000LL, std::memory_order_release);
+    }
+    _sd_backup_running.store(false, std::memory_order_release);
+    vTaskDeleteWithCaps(nullptr);
+}
+
+static void _schedule_sd_backup_if_safe()
+{
+    if (stackchan::low_battery::Active() || !_sd_backup_ready.load(std::memory_order_acquire) ||
+        _sd_nvs_revision.load(std::memory_order_acquire) ==
+            _sd_saved_revision.load(std::memory_order_acquire) ||
+        _sd_backup_running.load(std::memory_order_acquire) ||
+        (hal_bridge::is_xiaozhi_ready() && !hal_bridge::is_xiaozhi_idle())) {
+        return;
+    }
+    const int64_t retry_at = _sd_retry_after_us.load(std::memory_order_acquire);
+    if (retry_at && esp_timer_get_time() < retry_at) return;
+
+    // esp_flash_dispatcher runs cache-disabling NVS operations on its own
+    // internal stack, so this short-lived worker can keep its stack in PSRAM.
+    // Retain enough internal heap for the SD driver, Wi-Fi, audio and DMA.
+    constexpr size_t kMinInternalFree = 28 * 1024;
+    constexpr size_t kMinLargestBlock = 6 * 1024;
+    constexpr size_t kMinPsramFree = 32 * 1024;
+    const size_t free_bytes = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (free_bytes < kMinInternalFree || largest < kMinLargestBlock ||
+        psram < kMinPsramFree) return;
+
+    bool expected = false;
+    if (!_sd_backup_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    TaskHandle_t task = nullptr;
+    if (xTaskCreateWithCaps(_sd_backup_task, "sd_nvs_backup", 6144, nullptr, 1, &task,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        _sd_backup_running.store(false, std::memory_order_release);
+        _sd_retry_after_us.store(esp_timer_get_time() + 60000000LL, std::memory_order_release);
+        mclog::tagError(_tag, "SD NVS backup task creation failed");
+    } else {
+        mclog::tagInfo(_tag, "SD NVS backup task started with PSRAM stack");
+    }
+}
+
 static void _stackchan_update_task(void* param)
 {
     bool is_setup_done = false;
+    uint32_t last_sd_backup_check = GetHAL().millis();
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(20));
-
-        tools::update_reminders();
-
-        LvglLockGuard lock;
-
-        if (!hal_bridge::is_xiaozhi_idle()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+        const uint32_t now = GetHAL().millis();
+        if (now - last_sd_backup_check >= 1000) {
+            last_sd_backup_check = now;
+            stackchan::stage1::event_log::Poll();
+            // Retry a pending NVS-save event outside the LVGL lock. No
+            // periodic SD snapshot is made without a committed NVS change.
+            if (_sd_nvs_revision.load(std::memory_order_acquire) !=
+                _sd_saved_revision.load(std::memory_order_acquire)) {
+                _schedule_sd_backup_if_safe();
+            }
         }
 
+        // Apply a saved Wi-Fi change after the HTTP response and only while
+        // conversation processing is idle; reuse this task (no new stack).
+        if (!stackchan::low_battery::Active()) {
+            stackchan::wifi::web::ApplyPendingIfIdle();
+            tools::update_reminders();
+        }
+
+        // Keep the conversation pacing delay OUTSIDE the LVGL lock so
+        // subtitles and audio-related UI callbacks are not blocked by it.
+        // Retain the existing task and audio/listening pacing. Speech
+        // gets an approximately 30ms avatar update instead of 120ms.
+        if (!hal_bridge::is_xiaozhi_idle()) {
+            vTaskDelay(pdMS_TO_TICKS(stackchan::speech_mouth::Playing() ? 10 : 100));
+        }
+
+        LvglLockGuard lock;
         GetStackChan().update();
+        const bool shutdown = stackchan::low_battery::Active();
+        GetHAL().updateRandomRgb(!shutdown && stackchan::stage1::CanRunRgbTest(), shutdown);
+        if (shutdown) continue;
 
         if (!hal_bridge::is_xiaozhi_ready()) {
             continue;
         }
 
+        // Direct boot does not run the OTA version check. Keep bootloader
+        // rollback confirmation on the existing stable-uptime path.
+        _confirm_ota_image_if_stable();
         if (!is_setup_done) {
             // Setup when xiaozhi ready
             GetHAL().startSntp();
@@ -206,8 +334,6 @@ XiaozhiConfig_t Hal::getXiaozhiConfig()
 {
     auto bridge_config = hal_bridge::get_xiaozhi_config();
     return XiaozhiConfig_t{
-        .idleShutdownTimeSeconds   = bridge_config.idleShutdownTimeSeconds,
-        .allowShutdownWhenCharging = bridge_config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = bridge_config.idleRandomMovementLevel,
         .startAiAgentOnBoot        = bridge_config.startAiAgentOnBoot,
     };
@@ -216,8 +342,6 @@ XiaozhiConfig_t Hal::getXiaozhiConfig()
 void Hal::setXiaozhiConfig(XiaozhiConfig_t config)
 {
     hal_bridge::set_xiaozhi_config({
-        .idleShutdownTimeSeconds   = config.idleShutdownTimeSeconds,
-        .allowShutdownWhenCharging = config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = config.idleRandomMovementLevel,
         .startAiAgentOnBoot        = config.startAiAgentOnBoot,
     });
@@ -236,7 +360,8 @@ bool Hal::isBatteryCharging()
 void Hal::factoryReset()
 {
     mclog::tagInfo(_tag, "start factory reset");
-    ESP_ERROR_CHECK(nvs_flash_erase());
+    _sd_backup_ready.store(false, std::memory_order_release);
+    ESP_ERROR_CHECK(stackchan::storage::RequestFactoryReset());
     reboot();
 }
 

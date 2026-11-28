@@ -8,6 +8,7 @@
 #include <mooncake.h>
 #include <mooncake_log.h>
 #include <wifi_manager.h>
+#include <ssid_manager.h>
 #include <board.h>
 #include <mutex>
 #include <queue>
@@ -33,14 +34,19 @@ void Hal::startSntp()
     } else {
         esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
 
-        esp_sntp_setservername(0, "pool.ntp.org");
+        esp_sntp_setservername(0, "ntp.nict.jp");
         esp_sntp_setservername(1, "time.google.com");
-        esp_sntp_setservername(2, "cn.pool.ntp.org");
+        esp_sntp_setservername(2, "time.asia.apple.com");
 
         sntp_set_time_sync_notification_cb(time_sync_notification_cb);
 
         esp_sntp_init();
     }
+}
+
+bool Hal::hasSavedWifi()
+{
+    return !SsidManager::GetInstance().GetSsidList().empty();
 }
 
 void Hal::startNetwork(std::function<void(std::string_view)> onLog)
@@ -113,7 +119,7 @@ void Hal::startNetwork(std::function<void(std::string_view)> onLog)
         if (setup_required || uint32_t(millis() - started_at) >= 65000) {
             board.SetNetworkEventCallback(nullptr);
             if (onLog) {
-                onLog("WiFi unavailable. Open StackChan World to set up WiFi.");
+                onLog("WiFi unavailable. Opening local Wi-Fi setup.");
             }
             requestAppSetup();
         }

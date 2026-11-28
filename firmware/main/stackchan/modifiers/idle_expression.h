@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../port_stage1/port_stage1.h"
 #include "../utils/random.h"
 #include <smooth_ui_toolkit.hpp>
 #include <hal/hal.h>
@@ -26,7 +27,7 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
-        if (!stackchan.hasAvatar() || stackchan.avatar().isModifyLocked()) {
+        if (!stackchan.hasAvatar() || stackchan.avatar().isModifyLocked() || (stage1::IsAutonomousSceneActive() || stage1::IsConversationFaceActive())) {
             return;
         }
 

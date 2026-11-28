@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 #include "stackchan_display.h"
+#include <stackchan/config/low_battery.h>
+#include <application.h>
+#include <stackchan/port_stage1/port_stage1.h>
+#include <stackchan/modifiers/idle_lifecycle.h>
+#include <stackchan/speech_mouth.h>
+#include <stackchan/port_stage1/speech_emotion.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
@@ -18,6 +25,8 @@
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -27,6 +36,27 @@ using namespace stackchan::avatar;
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_material_symbols_30_4);
+
+namespace {
+// Read by the StackChan update task and written under the display lock.
+static std::atomic_bool _is_xiaozhi_idle{false};
+
+stackchan::idle_lifecycle::State CurrentIdleState(bool device_idle, bool explicit_sleep)
+{
+    return {device_idle,
+            Application::GetInstance().IsAnnouncementActive(),
+            stackchan::stage1::IsAutonomousSceneActive(),
+            stackchan::stage1::IsConversationFaceActive(),
+            stackchan::stage1::IsWakeSequenceActive(),
+            explicit_sleep};
+}
+}
+
+// Audio output worker publishes only a scalar; LVGL reads it independently.
+extern "C" void stackchan_speech_pcm_average(uint32_t average)
+{
+    stackchan::speech_mouth::Observe(average, GetHAL().millis());
+}
 
 // Have to register themes, so the asset apply can update the text font
 void StackChanAvatarDisplay::InitializeLcdThemes()
@@ -132,7 +162,11 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
         .io_handle      = panel_io_,
         .panel_handle   = panel_,
         .control_handle = nullptr,
-        .buffer_size    = static_cast<uint32_t>(width_ * 20),
+        // The CoreS3 ILI9342E uses SPI DMA. Allocate the single 8-line
+        // draw buffer in DMA-capable internal RAM so the SPI driver does not
+        // need to allocate a temporary DMA-compatible copy for each flush.
+        // LVGL's separate 512KB heap remains in PSRAM.
+        .buffer_size    = static_cast<uint32_t>(width_ * 8),
         .double_buffer  = false,
         .trans_size     = 0,
         .hres           = static_cast<uint32_t>(width_),
@@ -198,6 +232,13 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
 StackChanAvatarDisplay::~StackChanAvatarDisplay()
 {
     ESP_LOGI(TAG, "Destroying StackChanAvatarDisplay");
+    HideSetupQr();
+    battery_indicator_.reset();
+    stackchan::stage1::Stop(); // Remove scene children before LVGL / avatar teardown.
+    if (idle_recovery_timer_) {
+        lv_timer_delete(idle_recovery_timer_);
+        idle_recovery_timer_ = nullptr;
+    }
 
     if (preview_timer_ != nullptr) {
         esp_timer_stop(preview_timer_);
@@ -253,8 +294,18 @@ void StackChanAvatarDisplay::SetupUI()
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 
     auto avatar = std::make_unique<DefaultAvatar>();
-    avatar->init(lv_screen_active());
+    // Use the same active font profile that Xiaozhi advertises for Glyph
+    // Push. A private Montserrat label would not see the fallback glyphs.
+    auto speech_font = current_theme_ ? current_theme_->GetTextFont() : nullptr;
+    avatar->init(lv_screen_active(),
+                 speech_font && speech_font->font() ? speech_font->font()
+                                                   : &lv_font_montserrat_16);
     avatar->getPanel()->onClick().connect([]() {
+        // S3: a screen tap during sleep wakes the avatar first. It must
+        // not toggle the Xiaozhi chat state on the same touch.
+        if (stackchan::stage1::RequestWakeTouch("screen_click")) return;
+        // タップ自体では昼寝抽選を延期しない。実際に会話が始まれば、
+        // Xiaozhiの通常の状態遷移が待機解除を通知する。
         static uint32_t last_toggle_tick = 0;
         const uint32_t now               = GetHAL().millis();
         if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
@@ -268,6 +319,11 @@ void StackChanAvatarDisplay::SetupUI()
     });
 
     stackchan.attachAvatar(std::move(avatar));
+    // Sibling of the avatar panel: sleep/theatre face overlays cannot cover
+    // the indicator; the existing photo preview still owns the full screen.
+    battery_indicator_ = std::make_unique<view::BatteryIndicator>(lv_screen_active(), 0xffffff, true);
+    battery_indicator_->Align(LV_ALIGN_TOP_RIGHT, -4, 3);
+    stackchan::stage1::Start();
     stackchan.addModifier(std::make_unique<BreathModifier>());
     blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
     stackchan.addModifier(std::make_unique<HeadPetModifier>());
@@ -282,6 +338,27 @@ void StackChanAvatarDisplay::SetupUI()
 
     auto config        = hal_bridge::get_xiaozhi_config();
     idle_motion_level_ = config.idleRandomMovementLevel;
+
+    // Apply one idle/voice lifecycle policy after a missed STANDBY.
+    // LVGL timers run under the LVGL task's existing display lock.
+    idle_recovery_timer_ = lv_timer_create([](lv_timer_t* timer) {
+        auto* self = static_cast<StackChanAvatarDisplay*>(lv_timer_get_user_data(timer));
+        if (!self || !GetStackChan().hasAvatar() || stackchan::low_battery::Active()) return;
+        const auto decision = stackchan::idle_lifecycle::Resolve(CurrentIdleState(
+            Application::GetInstance().GetDeviceState() == kDeviceStateIdle,
+            self->is_sleeping_));
+        if (!decision.audio_finished) return;
+        self->EndWakeFaceSmile();
+        if (self->speaking_modifier_id_ >= 0 || self->subtitle_speaking_ ||
+            self->speech_emotion_active_) {
+            ESP_LOGW(TAG, "[IDLE_RECOVERY] completing missed speech end (mouth=%d subtitle=%d)",
+                     self->speaking_modifier_id_ >= 0, self->subtitle_speaking_);
+            self->FinishSpeakingAnimation();
+        }
+        // Restore both idle modifiers and the StackChan update cadence.
+        // The normal STANDBY callback uses this same reconciliation.
+        self->ReconcileIdleLifecycle(true);
+    }, 2000, this);
 
     ESP_LOGI(TAG, "Avatar created and started");
 }
@@ -319,6 +396,167 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
     }
 }
 
+bool StackChanAvatarDisplay::ShowWakeFaceSmile()
+{
+    if (stackchan::low_battery::Active()) return false;
+    // Called by the existing perception worker, never the audio feed task.
+    if (!wake_face_armed_.load() || Application::GetInstance().GetDeviceState() != kDeviceStateListening)
+        return false;
+    if (!Lock(10)) return false;
+    auto& sc = GetStackChan();
+    bool shown = false;
+    if (wake_face_armed_.load() && !wake_face_active_ && !wake_face_waiting_neutral_ &&
+        sc.hasAvatar() && Application::GetInstance().GetDeviceState() == kDeviceStateListening &&
+        !Application::GetInstance().IsAnnouncementActive() && !is_sleeping_ &&
+        !stackchan::stage1::IsSleepSceneActive() && !stackchan::stage1::IsWakeSequenceActive()) {
+        // The listening pose otherwise redraws neutral eye/mouth geometry on every update.
+        stackchan::stage1::SetConversationPose(sc, stackchan::stage1::ConversationPose::None);
+        sc.prepareFaceTakeover();
+        wake_face_before_ = sc.avatar().getEmotion();
+        sc.avatar().setEmotion(Emotion::Happy);
+        if (auto* blink = static_cast<BlinkModifier*>(sc.getModifier(blink_modifier_id_)))
+            blink->resyncEyeWeights();
+        wake_face_active_ = true;
+        shown = true;
+        ESP_LOGI(TAG, "[EMOTION] wake face found: happy");
+    }
+    Unlock();
+    return shown;
+}
+
+void StackChanAvatarDisplay::EndWakeFaceSmile(bool resume_listening)
+{
+    // All callers already hold the display lock (including the LVGL idle timer).
+    wake_face_armed_.store(false);
+    wake_face_waiting_neutral_ = false;
+    if (!wake_face_active_) return;
+    wake_face_active_ = false;
+    auto& sc = GetStackChan();
+    if (!sc.hasAvatar()) return;
+    if (sc.avatar().getEmotion() == Emotion::Happy) {
+        sc.avatar().setEmotion(wake_face_before_);
+        if (auto* blink = static_cast<BlinkModifier*>(sc.getModifier(blink_modifier_id_)))
+            blink->resyncEyeWeights();
+    }
+    // Preserve the existing listening-complete nod and thinking animation.
+    if (resume_listening && Application::GetInstance().GetDeviceState() == kDeviceStateListening &&
+        !stackchan::stage1::IsWakeSequenceActive())
+        stackchan::stage1::SetConversationPose(sc, stackchan::stage1::ConversationPose::Listening);
+    ESP_LOGI(TAG, "[EMOTION] wake face smile ended");
+}
+
+void StackChanAvatarDisplay::FinishSpeakingAnimation()
+{
+    stackchan::speech_mouth::SetPlaying(false);
+    // One speech-end path for normal status changes and idle recovery.
+    auto& stackchan = GetStackChan();
+    auto& avatar = stackchan.avatar();
+    stackchan::stage1::EndSpeechEffects(stackchan);
+    if (stackchan::stage1::IsNapSleepActive() &&
+        !stackchan::stage1::IsWakeSequenceActive()) {
+        avatar.setEmotion(Emotion::Sleepy);
+        if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
+            blink->resyncEyeWeights();
+        ESP_LOGI(TAG, "[SLEEP_DIAG] restored nap face after speech");
+    } else if (speech_emotion_active_) {
+        avatar.setEmotion(speech_emotion_before_);
+        if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
+            blink->resyncEyeWeights();
+        ESP_LOGI(TAG, "[EMOTION] restored after reply");
+    }
+    speech_emotion_active_ = false;
+    speech_emotion_explicit_ = false;
+
+    if (subtitle_speaking_) {
+        subtitle_speaking_ = false;
+        subtitle_preview_shown_ = false;
+        BeginSubtitleReview();
+    }
+    if (speaking_modifier_id_ < 0) return;
+    stackchan.removeModifier(speaking_modifier_id_);
+    speaking_modifier_id_ = -1;
+    avatar.mouth().setWeight(0);
+}
+
+void StackChanAvatarDisplay::ReconcileIdleLifecycle(bool device_idle)
+{
+    auto decision = stackchan::idle_lifecycle::Resolve(
+        CurrentIdleState(device_idle, is_sleeping_));
+    // Restore the existing conversation face before enabling idle expressions.
+    if (decision.restore_conversation_face) {
+        stackchan::stage1::SetConversationPose(
+            GetStackChan(), stackchan::stage1::ConversationPose::None);
+        decision = stackchan::idle_lifecycle::Resolve(
+            CurrentIdleState(device_idle, is_sleeping_));
+        ESP_LOGI(TAG, "[IDLE_RECOVERY] conversation face restored");
+    }
+    // Shared policy controls update cadence, modifiers and Stage1 standby.
+    const bool normal_rate = decision.audio_finished;
+    const bool idle = decision.allow_idle_modifiers;
+    // An actual application idle state is sufficient to restore Stage1.
+    // Requiring an earlier STANDBY callback would defeat missed-STANDBY
+    // recovery and leave the nap scheduler stuck in non-standby.
+    if (normal_rate) {
+        stackchan::stage1::OnStandby(true);
+        GetHAL().releaseConversationRgbColor();
+    }
+    if (normal_rate && !_is_xiaozhi_idle.load())
+        ESP_LOGI(TAG, "[IDLE_RECOVERY] normal StackChan update cadence restored");
+    _is_xiaozhi_idle.store(normal_rate);
+
+    auto& sc = GetStackChan();
+    if (!idle) {
+        idle_non_neutral_pending_ = false;
+        if (idle_motion_modifier_id_ >= 0) {
+            sc.removeModifier(idle_motion_modifier_id_);
+            idle_motion_modifier_id_ = -1;
+        }
+        if (idle_expression_modifier_id_ >= 0) {
+            sc.removeModifier(idle_expression_modifier_id_);
+            idle_expression_modifier_id_ = -1;
+        }
+        return;
+    }
+    // Recover any residual expression, not just Doubt. A newly restored
+    // idle lifecycle has no speech/scene owner. During established idle,
+    // allow temporary head-pet reactions (existing 12s failsafe) to finish
+    // before clearing a stuck expression. IMU/locked faces are excluded.
+    const bool new_idle_expression = idle_expression_modifier_id_ < 0 ||
+        !sc.getModifier(idle_expression_modifier_id_);
+    if (sc.avatar().isModifyLocked() || sc.avatar().getEmotion() == Emotion::Neutral) {
+        idle_non_neutral_pending_ = false;
+    } else {
+        const uint32_t now = GetHAL().millis();
+        if (!idle_non_neutral_pending_) {
+            idle_non_neutral_since_ = now;
+            idle_non_neutral_pending_ = true;
+        }
+        if (new_idle_expression || now - idle_non_neutral_since_ >= 15000) {
+            sc.prepareFaceTakeover();
+            sc.avatar().setEmotion(Emotion::Neutral);
+            sc.avatar().leftEye().setSize(0);
+            sc.avatar().rightEye().setSize(0);
+            if (auto* blink = static_cast<BlinkModifier*>(sc.getModifier(blink_modifier_id_)))
+                blink->resyncEyeWeights();
+            idle_non_neutral_pending_ = false;
+            ESP_LOGI(TAG, "[IDLE_RECOVERY] residual expression restored to neutral");
+        }
+    }
+    // The two modifiers have independent lifetimes (including when the
+    // configured motion level is zero). Never infer one from the other.
+    if (idle_motion_level_ > 0 &&
+        (idle_motion_modifier_id_ < 0 || !sc.getModifier(idle_motion_modifier_id_))) {
+        CreateIdleMotionModifier();
+        ESP_LOGI(TAG, "[IDLE_RECOVERY] random head motion registered");
+    }
+    if (idle_expression_modifier_id_ < 0 ||
+        !sc.getModifier(idle_expression_modifier_id_)) {
+        idle_expression_modifier_id_ =
+            sc.addModifier(std::make_unique<IdleExpressionModifier>());
+        ESP_LOGI(TAG, "[IDLE_RECOVERY] idle expression registered");
+    }
+}
+
 bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
 {
     auto& stackchan = GetStackChan();
@@ -328,19 +566,72 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     }
 
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) return true;
 
+    // CONNECTING/LISTENING each emit a normal neutral UI callback.
+    // Consume only that callback; subsequent LLM emotions (even neutral)
+    // end the temporary greeting before the normal speech emotion is saved.
+    const bool wake_ui_neutral = wake_face_waiting_neutral_ && strcmp(emotion, "neutral") == 0;
+    wake_face_waiting_neutral_ = false;
+    if (!wake_ui_neutral) EndWakeFaceSmile();
+
+    // A failed snore/sleep-talk announcement can report an error emotion after
+    // the announcement has already been cleared. That error is not a wake
+    // request: leave NapSleep, its face, and the sleep timer untouched.
+    if (strcmp(emotion, "cancel") == 0 &&
+        stackchan::stage1::IsNapSleepActive()) {
+        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored sleep audio error emotion=cancel");
+        return true;
+    }
+
+    // Audio can enter idle and start a queued sleep scene before its final
+    // neutral display callback arrives. Protect ALL shared sleep preparation
+    // and sleeping phases, not just the old NapSleep/NightMessage paths.
+    // Preserve the existing announcement guards and let real wake requests,
+    // conversation status transitions and non-neutral emotions take precedence.
+    if (strcmp(emotion, "neutral") == 0 &&
+        !stackchan::stage1::IsWakeSequenceActive() &&
+        (stackchan::stage1::IsNapSleepActive() ||
+         stackchan::stage1::IsNightBedtimeMessageActive() ||
+         (Application::GetInstance().GetDeviceState() == kDeviceStateIdle &&
+          stackchan::stage1::IsSleepSceneActive()))) {
+        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored sleep trailing neutral");
+        return true;
+    }
+
+    // Startup speech opens the same WebSocket but is not a wake-word event.
+    // Its neutral CONNECTING/IDLE UI update must not reset a sleep/nap scene.
+    if (Application::GetInstance().IsAnnouncementActive() &&
+        strcmp(emotion, "neutral") == 0)
+        return true;
+    // A connecting/listening state often sets neutral immediately after a
+    // wake word. Do not erase the S3 startled wake animation in that window.
+    if (!stackchan::stage1::IsWakeSequenceActive() &&
+        !Application::GetInstance().IsAnnouncementActive()) {
+        if (speech_conversation_running_)
+            stackchan::stage1::PrepareSpeechExpression(stackchan, "set_emotion");
+        else
+            stackchan::stage1::CancelForExternalChange(stackchan, "set_emotion");
+    }
+    // A temporary head-pet/shake must not outlive an explicit speech emotion.
+    stackchan.prepareFaceTakeover();
     // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
     auto& avatar = stackchan.avatar();
+    const auto previous_emotion = avatar.getEmotion();
     bool accepted = true;
 
     // Map emotion string to stackchan::Emotion
     if (strcmp(emotion, "neutral") == 0) {
+        if (is_sleeping_) avatar.setSpeech("");
+        is_sleeping_ = false;
         avatar.setEmotion(Emotion::Neutral);
     } else if (strcmp(emotion, "happy") == 0) {
         avatar.setEmotion(Emotion::Happy);
     } else if (strcmp(emotion, "laughing") == 0) {
-        avatar.setEmotion(Emotion::Happy);
+        avatar.setEmotion(Emotion::Fun);
+    } else if (strcmp(emotion, "surprised") == 0) {
+        avatar.setEmotion(Emotion::Surprise);
     } else if (strcmp(emotion, "angry") == 0) {
         avatar.setEmotion(Emotion::Angry);
     } else if (strcmp(emotion, "sad") == 0) {
@@ -349,22 +640,18 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
         avatar.setEmotion(Emotion::Sad);
     } else if (strcmp(emotion, "sleepy") == 0) {
         avatar.setEmotion(Emotion::Sleepy);
-        avatar.setSpeech("Zzz…");
-        is_sleeping_ = true;
-        // avatar.mouth().setWeight(10);
+        // S3 distinguishes a sleepy *spoken emotion* from the sleep state.
+        // Keep the legacy Zzz/servo action for explicit non-conversation
+        // requests, but never move the neck or clear subtitles for speech.
+        if (!speech_conversation_running_) {
+            avatar.setSpeech("Zzz…");
+            is_sleeping_ = true;
 
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
+            ESP_LOGW(TAG, "Stop idle motion");
+            ReconcileIdleLifecycle(Application::GetInstance().GetDeviceState() == kDeviceStateIdle);
+            auto& motion = GetStackChan().motion();
+            motion.pitchServo().moveWithSpeed(0, 80);
         }
-
-        // Return to default pose
-        auto& motion = GetStackChan().motion();
-        motion.pitchServo().moveWithSpeed(0, 80);
 
     } else if (strcmp(emotion, "doubtful") == 0) {
         avatar.setEmotion(Emotion::Doubt);
@@ -372,6 +659,21 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
         ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
         avatar.setEmotion(Emotion::Neutral);
         accepted = false;
+    }
+
+    if (accepted) {
+        // This path is used by protocol llm.emotion as well as explicit app
+        // commands. Preserve the first pre-reply face if a text cue was
+        // already inferred; the explicit emotion always takes precedence.
+        if (!speech_emotion_active_) {
+            speech_emotion_before_ = previous_emotion;
+            speech_emotion_active_ = true;
+        }
+        speech_emotion_explicit_ = true;
+        ESP_LOGI(TAG, "[EMOTION] explicit=%s", emotion);
+        if (!stackchan::stage1::IsWakeSequenceActive() &&
+            !stackchan::stage1::IsSleepSceneActive())
+            stackchan::stage1::UpdateSpeechEffects(stackchan, avatar.getEmotion());
     }
 
     // Resync blink modifier base eye weights
@@ -383,70 +685,158 @@ bool StackChanAvatarDisplay::SetEmotion(const char* emotion)
     return accepted;
 }
 
+
 void StackChanAvatarDisplay::ResetSubtitleQueue()
 {
     subtitle_queue_.clear();
+    subtitle_memory_sampled_ = false;
     subtitle_displaying_ = false;
+    subtitle_reviewing_ = false;
+    subtitle_preview_shown_ = false;
+    subtitle_playback_started_ = false;
+    subtitle_playback_synced_ = false;
+    subtitle_next_playback_ms_ = 0;
+    subtitle_latest_playback_ms_ = 0;
+    subtitle_pcm_started_ = false;
+    subtitle_prestart_queued_ = false;
     subtitle_until_ms_ = 0;
-
+    subtitle_review_wait_until_ms_ = 0;
     if (subtitle_timer_ != nullptr) {
         lv_timer_delete(subtitle_timer_);
         subtitle_timer_ = nullptr;
     }
 }
 
+void StackChanAvatarDisplay::BeginSubtitleReview()
+{
+    // Review only unread captions; if all played live, keep the last one
+    // visible for a reading interval before hiding the bubble.
+    const bool has_unread = !subtitle_queue_.empty();
+    if (!has_unread && !subtitle_playback_started_) return;
+    subtitle_reviewing_ = true;
+    subtitle_displaying_ = !has_unread;
+    const uint32_t now = lv_tick_get();
+    // Give late network frames a short chance to arrive after audio ends.
+    subtitle_review_wait_until_ms_ = now + 450;
+    subtitle_until_ms_ = 0;
+    if (!has_unread) {
+        uint32_t duration = 1700;
+        const auto& bubble = GetStackChan().avatar().getKeyElements().speechBubble;
+        if (bubble) duration = bubble->getDisplayDurationMs();
+        subtitle_until_ms_ = now + std::min<uint32_t>((duration * 3u) / 2u, 8000u);
+    }
+    if (subtitle_timer_ == nullptr) {
+        subtitle_timer_ = lv_timer_create(
+            [](lv_timer_t* timer) {
+                auto* self = static_cast<StackChanAvatarDisplay*>(
+                    lv_timer_get_user_data(timer));
+                self->AdvanceSubtitle();
+            }, 100, this);
+    }
+    ESP_LOGI(TAG, "[SUBTITLE] audio finished; review queued (%u parts)",
+             static_cast<unsigned>(subtitle_queue_.size()));
+}
+
+void StackChanAvatarDisplay::PauseSubtitleReview()
+{
+    if (!subtitle_reviewing_) return;
+    subtitle_reviewing_ = false;
+    subtitle_displaying_ = false;
+    subtitle_until_ms_ = 0;
+    if (subtitle_timer_ != nullptr) {
+        lv_timer_delete(subtitle_timer_);
+        subtitle_timer_ = nullptr;
+    }
+    // The remaining segments belong to an earlier response and will be
+    // reviewed after the current audio finishes. Never discard them here.
+    ESP_LOGI(TAG, "[SUBTITLE] review paused (%u parts retained)",
+             static_cast<unsigned>(subtitle_queue_.size()));
+}
+
 void StackChanAvatarDisplay::AdvanceSubtitle()
 {
+    if (stackchan::low_battery::Active() || !subtitle_reviewing_) return;
     const uint32_t now = lv_tick_get();
-
-    // 表示時間が残っている場合は切り替えない
-    if (subtitle_displaying_ &&
-        static_cast<int32_t>(now - subtitle_until_ms_) < 0) {
-        return;
-    }
+    if (static_cast<int32_t>(now - subtitle_review_wait_until_ms_) < 0) return;
+    if (subtitle_displaying_ && static_cast<int32_t>(now - subtitle_until_ms_) < 0) return;
 
     if (subtitle_queue_.empty()) {
+        subtitle_reviewing_ = false;
         subtitle_displaying_ = false;
-
         if (subtitle_timer_ != nullptr) {
             lv_timer_delete(subtitle_timer_);
             subtitle_timer_ = nullptr;
         }
+        GetStackChan().avatar().clearSpeech();
+        ESP_LOGI(TAG, "[SUBTITLE] review completed; bubble hidden");
         return;
     }
 
-    std::string text = std::move(subtitle_queue_.front());
-    // 1行横スクロール用に改行だけ空白へ変換
-    std::replace(text.begin(), text.end(), '\n', ' ');
-    std::replace(text.begin(), text.end(), '\r', ' ');
+    auto text = std::move(subtitle_queue_.front());
     subtitle_queue_.pop_front();
-
     auto& stackchan = GetStackChan();
-    if (stackchan.hasAvatar()) {
-        stackchan.avatar().setSpeech(text.c_str());
+    if (!stackchan.hasAvatar()) {
+        ResetSubtitleQueue();
+        return;
     }
+    stackchan.avatar().setSpeech(text.c_str());
 
-    // UTF-8のバイト数ではなく文字数を数える
-    // 吹き出し側で計算した表示時間を取得
     uint32_t duration = 1700;
+    const auto& bubble = stackchan.avatar().getKeyElements().speechBubble;
+    if (bubble) duration = bubble->getDisplayDurationMs();
 
-    if (stackchan.hasAvatar()) {
-        const auto& bubble =
-            stackchan.avatar().getKeyElements().speechBubble;
-
-        if (bubble) {
-            duration = bubble->getDisplayDurationMs();
-        }
-    }
+    // The live preview changes immediately. Only post-speech review needs
+    // enough time for the user to read each complete phrase.
+    // 1.7 s -> 2.55 s, 2.6 s -> 3.9 s, 5.5 s -> 8.0 s maximum.
+    duration = std::min<uint32_t>((duration * 3u) / 2u, 8000u);
 
     subtitle_until_ms_ = now + duration;
     subtitle_displaying_ = true;
-
-    ESP_LOGI(TAG, "[SUBTITLE] showing: %s (%lu ms)",
-             text.c_str(),
-             static_cast<unsigned long>(duration));
+    ESP_LOGI(TAG, "[SUBTITLE] review: %s (%lu ms; remaining %u)",
+             text.c_str(), static_cast<unsigned long>(duration),
+             static_cast<unsigned>(subtitle_queue_.size()));
 }
 
+void StackChanAvatarDisplay::AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary)
+{
+    if (!subtitle_speaking_ || subtitle_queue_.empty()) return;
+    if (subtitle_playback_started_) {
+        const uint32_t target = subtitle_next_playback_ms_ +
+            (at_phrase_boundary ? 0u : 300u);
+        if (static_cast<int32_t>(played_ms - target) < 0) return;
+    }
+
+    auto text = std::move(subtitle_queue_.front());
+    subtitle_queue_.pop_front();
+    GetStackChan().avatar().setSpeech(text.c_str());
+
+    const bool first = !subtitle_playback_started_;
+    subtitle_playback_started_ = true;
+    subtitle_playback_synced_ = true;
+    subtitle_preview_shown_ = true;
+
+    uint32_t duration = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) duration += c < 0x80 ? 60u : 175u;
+    }
+    duration = std::clamp<uint32_t>(duration, 700u, 7500u);
+
+    // Anchor the first phrase to PCM time zero, not the late-arriving
+    // subtitle. Advance subsequent deadlines on this same audio timeline.
+    // Otherwise every display delay is added to all later subtitles.
+    if (first) {
+        subtitle_next_playback_ms_ = duration;
+    } else {
+        subtitle_next_playback_ms_ += duration;
+    }
+    ESP_LOGI(TAG,
+             "[SUBTITLE] playback=%lu ms, next=%lu ms, via=%s%s, remaining=%u: %s",
+             static_cast<unsigned long>(played_ms),
+             static_cast<unsigned long>(subtitle_next_playback_ms_),
+             first ? "first" : (at_phrase_boundary ? "pause" : "clock"),
+             first && played_ms > 0 ? "(pcm-anchored)" : "",
+             static_cast<unsigned>(subtitle_queue_.size()), text.c_str());
+}
 
 void StackChanAvatarDisplay::SetChatMessage(
     const char* role, const char* content)
@@ -466,35 +856,156 @@ void StackChanAvatarDisplay::SetChatMessage(
     }
 
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) return;
 
-    if (strcmp(role, "system") == 0) {
+    // Boot fallback is a local hint, not an audio-synchronised TTS subtitle.
+    // Never park it in the normal assistant queue waiting for SPEAKING.
+    if (strcmp(role, "startup_hint") == 0) {
+        ResetSubtitleQueue();
+        stackchan::stage1::NotifyExternalSpeech();
+        startup_hint_text_ = content;
+        stackchan.avatar().setSpeech(content);
+        return;
+    }
+    if (strcmp(role, "assistant") == 0 || strcmp(role, "user") == 0 ||
+        strcmp(role, "system") == 0) {
+        startup_hint_text_.clear();
+    }
+
+    // During touch wake, the WebSocket CONNECTING transition sends an empty
+    // system message. Keep the pending subtitle/display state intact until
+    // the first standalone subtitle arrives.
+    if (strcmp(role, "system") == 0 && content[0] == '\0' &&
+        Application::GetInstance().IsAnnouncementActive() &&
+        stackchan::stage1::IsWakeSequenceActive()) {
+        return;
+    }
+
+    // System/ASR/TTS text takes precedence over the short wake greeting.
+    if (strcmp(role, "user") == 0 || strcmp(role, "system") == 0 ||
+        strcmp(role, "assistant") == 0)
+        stackchan::stage1::NotifyExternalSpeech();
+
+    if (strcmp(role, "user") == 0) {
+        if (content[0] != '\0') EndWakeFaceSmile(true);
+        // S3 listening-complete animation: show a short visual nod, then
+        // the thinking face. The ASR text/audio path is unchanged.
+        if (content[0] != '\0')
+            stackchan::stage1::BeginListeningComplete(stackchan);
+    } else if (strcmp(role, "system") == 0) {
         // システム表示は従来どおり優先
         ResetSubtitleQueue();
         stackchan.avatar().setSpeech(content);
 
+
+    } else if (strcmp(role, "assistant_tick") == 0 ||
+               strcmp(role, "assistant_pause") == 0) {
+        if (!subtitle_speaking_) return;
+        const bool at_phrase_boundary = strcmp(role, "assistant_pause") == 0;
+        char* end = nullptr;
+        const auto played = std::strtoul(content, &end, 10);
+        if (end == content || *end != '\0') return;
+        const uint32_t played_ms = static_cast<uint32_t>(played);
+        // Remember PCM progress even if the first subtitle has not arrived yet.
+        // The next assistant message can then display its first phrase immediately.
+        subtitle_pcm_started_ = true;
+        subtitle_latest_playback_ms_ = played_ms;
+        AdvanceLiveSubtitle(played_ms, at_phrase_boundary);
+
     } else if (strcmp(role, "assistant") == 0) {
-        if (content[0] == '\0') {
-            return;
+        if (content[0] == '\0') return;
+        EndWakeFaceSmile();
+
+        // The existing protocol can stream TTS sentence text without an
+        // llm.emotion packet. Match S3's conservative speech heuristics,
+        // but never override a model-specified emotion in this reply.
+        if (!speech_emotion_explicit_ && !stackchan::stage1::IsWakeSequenceActive() &&
+            !Application::GetInstance().IsAnnouncementActive()) {
+            avatar::Emotion inferred;
+            if (stackchan::stage1::SpeechEmotionFromText(content, inferred) &&
+                stackchan.avatar().getEmotion() != inferred) {
+                stackchan::stage1::PrepareSpeechExpression(stackchan, "text_emotion_fallback");
+                stackchan.prepareFaceTakeover();
+                if (!speech_emotion_active_) {
+                    speech_emotion_before_ = stackchan.avatar().getEmotion();
+                    speech_emotion_active_ = true;
+                }
+                stackchan.avatar().setEmotion(inferred);
+                if (auto* blink = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_)))
+                    blink->resyncEyeWeights();
+                ESP_LOGI(TAG, "[EMOTION] S3 text fallback=%d", static_cast<int>(inferred));
+                stackchan::stage1::UpdateSpeechEffects(stackchan, inferred);
+            }
         }
 
-        // 受信した字幕をキューへ保存
-        subtitle_queue_.emplace_back(content);
-
-        if (subtitle_timer_ == nullptr) {
-            subtitle_timer_ = lv_timer_create(
-                [](lv_timer_t* timer) {
-                    auto* self =
-                        static_cast<StackChanAvatarDisplay*>(
-                            lv_timer_get_user_data(timer));
-                    self->AdvanceSubtitle();
-                },
-                100,
-                this
-            );
+        if (!subtitle_speaking_ && !subtitle_prestart_queued_) {
+            // The first text packet of the upcoming response may arrive while
+            // we are still LISTENING. Discard only the old response's review,
+            // then retain all pre-start packets until SPEAKING begins.
+            ESP_LOGI(TAG,
+                     "[SUBTITLE] new response text before speaking; old review=%u parts",
+                     static_cast<unsigned>(subtitle_queue_.size()));
+            ResetSubtitleQueue();
+            subtitle_prestart_queued_ = true;
         }
 
-        // 最初の字幕はすぐ表示
-        AdvanceSubtitle();
+        // Diagnostic only: sample the first text packet's parsing/queueing
+        // allocations. No changes to allocator, containers, or TTS timing.
+        const bool measure_memory = !subtitle_memory_sampled_;
+        const size_t internal_before = measure_memory
+            ? heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : 0;
+        const size_t largest_before = measure_memory
+            ? heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : 0;
+        const size_t psram_before = measure_memory
+            ? heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : 0;
+
+        std::string incoming(content);
+        std::replace(incoming.begin(), incoming.end(), '\n', ' ');
+        std::replace(incoming.begin(), incoming.end(), '\r', ' ');
+        const auto& bubble = stackchan.avatar().getKeyElements().speechBubble;
+        const auto segments = bubble
+            ? bubble->splitSubtitle(incoming)
+            : std::vector<std::string>{incoming};
+
+        // Live playback consumes this queue; post-speech review shows only
+        // any unread remainder, never the complete answer a second time.
+        for (const auto& segment : segments) {
+            if (!segment.empty()) subtitle_queue_.emplace_back(segment.data(), segment.size());
+        }
+        if (measure_memory) {
+            subtitle_memory_sampled_ = true;
+            ESP_LOGI(TAG,
+                     "[MEM_SUBTITLE] first_packet bytes=%u parts=%u "
+                     "internal=%u->%u largest=%u->%u psram=%u->%u",
+                     static_cast<unsigned>(incoming.size()),
+                     static_cast<unsigned>(subtitle_queue_.size()),
+                     static_cast<unsigned>(internal_before),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                     static_cast<unsigned>(largest_before),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                     static_cast<unsigned>(psram_before),
+                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+        }
+
+        // If PCM is already playing, display the first queued phrase now,
+        // instead of waiting for the next 180-ms progress notification.
+        if (subtitle_speaking_ && subtitle_pcm_started_ && !subtitle_playback_started_) {
+            AdvanceLiveSubtitle(subtitle_latest_playback_ms_, false);
+        }
+
+    }
+}
+
+void StackChanAvatarDisplay::RemoveChatMessage(const char* role, const char* content)
+{
+    if (!role || !content || strcmp(role, "startup_hint") != 0) return;
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) return;
+    DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) return;
+    if (!startup_hint_text_.empty() && startup_hint_text_ == content) {
+        startup_hint_text_.clear();
+        stackchan.avatar().clearSpeech();
     }
 }
 
@@ -506,11 +1017,19 @@ void StackChanAvatarDisplay::ClearChatMessages()
     }
 
     DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) return;
 
-    // 字幕キューとタイマーをリセット
+    // The network may disconnect while the user is still reading the
+    // post-speech subtitle review. Keep the timer and unread text alive.
+    if (subtitle_reviewing_ && (subtitle_displaying_ || !subtitle_queue_.empty())) {
+        ESP_LOGI(TAG, "[SUBTITLE] keep review on chat clear (%u parts remaining)",
+                 static_cast<unsigned>(subtitle_queue_.size()));
+        return;
+    }
+
+    startup_hint_text_.clear();
     ResetSubtitleQueue();
-
-    // 吹き出しの文字を消去
+    stackchan::stage1::NotifyExternalSpeech();
     stackchan.avatar().clearSpeech();
 
     ESP_LOGI(TAG, "Chat messages cleared");
@@ -519,7 +1038,7 @@ void StackChanAvatarDisplay::ClearChatMessages()
 void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
 {
     DisplayLockGuard lock(this);
-    if (preview_image_ == nullptr) {
+    if (preview_image_ == nullptr || (image && stackchan::low_battery::Active())) {
         return;
     }
 
@@ -545,8 +1064,107 @@ void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
     ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, 6000 * 1000));
 }
 
+void StackChanAvatarDisplay::HideSetupQr()
+{
+    if (setup_qr_timer_) {
+        lv_timer_delete(setup_qr_timer_);
+        setup_qr_timer_ = nullptr;
+    }
+    if (setup_qr_overlay_) {
+        auto* overlay = setup_qr_overlay_;
+        setup_qr_overlay_ = nullptr;
+        lv_obj_delete(overlay);
+    }
+    if (setup_qr_battery_index_ >= 0 && battery_indicator_) {
+        battery_indicator_->RestoreIndex(setup_qr_battery_index_);
+    }
+    setup_qr_battery_index_ = -1;
+}
+
+bool StackChanAvatarDisplay::ShowSetupQr(const std::string& url)
+{
+    // MCP runs outside the LVGL task. Never change the conversation state,
+    // avatar visibility, motion ownership, or underlying subtitle queue.
+    if (!Lock(1000)) return false;
+    const bool available = !stackchan::low_battery::Active() &&
+        GetStackChan().hasAvatar() && preview_image_ &&
+        lv_obj_get_parent(preview_image_) == lv_screen_active() && !url.empty();
+    if (!available) {
+        Unlock();
+        return false;
+    }
+    HideSetupQr();
+    auto* overlay = lv_obj_create(lv_screen_active());
+    if (!overlay) { Unlock(); return false; }
+    setup_qr_overlay_ = overlay;
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_center(overlay);
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(overlay, [](lv_event_t* event) {
+        auto* self = static_cast<StackChanAvatarDisplay*>(lv_event_get_user_data(event));
+        self->HideSetupQr();
+    }, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(overlay, [](lv_event_t* event) {
+        auto* self = static_cast<StackChanAvatarDisplay*>(lv_event_get_user_data(event));
+        if (self->setup_qr_overlay_ == lv_event_get_target(event)) {
+            self->setup_qr_overlay_ = nullptr;
+            self->setup_qr_battery_index_ = -1; // parent screen may be deleting its children
+            self->HideSetupQr();
+        }
+    }, LV_EVENT_DELETE, this);
+
+    auto* qr = lv_qrcode_create(overlay);
+    if (!qr) { HideSetupQr(); Unlock(); return false; }
+    lv_qrcode_set_size(qr, 168);
+    lv_qrcode_set_dark_color(qr, lv_color_black());
+    lv_qrcode_set_light_color(qr, lv_color_white());
+    lv_qrcode_set_quiet_zone(qr, true);
+    if (lv_qrcode_update(qr, url.data(), static_cast<uint32_t>(url.size())) != LV_RESULT_OK) {
+        HideSetupQr(); Unlock(); return false;
+    }
+    lv_obj_align(qr, LV_ALIGN_CENTER, 0, -4);
+    lv_obj_remove_flag(qr, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(qr, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto label = [overlay](const char* text, lv_align_t align, int x, int y) {
+        auto* obj = lv_label_create(overlay);
+        lv_obj_set_style_text_font(obj, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(obj, lv_color_white(), 0);
+        lv_label_set_text(obj, text);
+        lv_obj_align(obj, align, x, y);
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+    };
+    label("Web SETUP", LV_ALIGN_TOP_MID, -36, 7);
+    label(url.c_str(), LV_ALIGN_BOTTOM_MID, 0, -23);
+    label("Tap to close", LV_ALIGN_BOTTOM_MID, 0, -3);
+    if (battery_indicator_) setup_qr_battery_index_ = battery_indicator_->BringToFront();
+
+    setup_qr_started_ms_ = lv_tick_get();
+    setup_qr_timer_ = lv_timer_create([](lv_timer_t* timer) {
+        auto* self = static_cast<StackChanAvatarDisplay*>(lv_timer_get_user_data(timer));
+        if (stackchan::low_battery::Active() || !self->setup_qr_overlay_ ||
+            lv_obj_get_parent(self->setup_qr_overlay_) != lv_screen_active() ||
+            lv_tick_elaps(self->setup_qr_started_ms_) >= 30000) {
+            self->HideSetupQr();
+        }
+    }, 100, this);
+    if (!setup_qr_timer_) { HideSetupQr(); Unlock(); return false; }
+    ESP_LOGI(TAG, "[SETUP_QR] displayed for 30 seconds or until tapped");
+    Unlock();
+    return true;
+}
+
 void StackChanAvatarDisplay::UpdateStatusBar(bool update_all)
 {
+    (void)update_all;
+    DisplayLockGuard lock(this);
+    if (stackchan::low_battery::Active()) HideSetupQr();
+    if (battery_indicator_) battery_indicator_->Update();
 }
 
 void StackChanAvatarDisplay::SetTheme(Theme* theme)
@@ -569,14 +1187,13 @@ void StackChanAvatarDisplay::SetTheme(Theme* theme)
 
 #include <hal/board/hal_bridge.h>
 static bool _is_xiaozhi_ready = false;
-static bool _is_xiaozhi_idle  = false;
 bool hal_bridge::is_xiaozhi_ready()
 {
     return _is_xiaozhi_ready;
 }
 bool hal_bridge::is_xiaozhi_idle()
 {
-    return _is_xiaozhi_idle;
+    return _is_xiaozhi_idle.load();
 }
 
 void StackChanAvatarDisplay::SetStatus(const char* status)
@@ -590,83 +1207,159 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
 
     auto& avatar = stackchan.avatar();
-    auto& motion = stackchan.motion();
 
     DisplayLockGuard lock(this);
-
-    bool is_idle      = false;
-    bool is_listening = false;
-
-    if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+    if (stackchan::low_battery::Active()) {
+        HideSetupQr();
+        // The shutdown scene owns the face, neck and fixed caption.
+        // Actual PCM still drives its mouth through the normal audio observer.
+        const bool speaking = strcmp(status, Lang::Strings::SPEAKING) == 0;
+        stackchan::speech_mouth::SetPlaying(speaking);
+        _is_xiaozhi_idle.store(strcmp(status, Lang::Strings::STANDBY) == 0);
+        if (_is_xiaozhi_idle.load()) _is_xiaozhi_ready = true;
+        ResetSubtitleQueue();
+        subtitle_speaking_ = false;
+        startup_hint_text_.clear();
+        wake_face_armed_.store(false);
+        wake_face_active_ = wake_face_waiting_neutral_ = false;
+        if (preview_image_) {
+            esp_timer_stop(preview_timer_);
+            lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+            preview_image_cached_.reset();
+        }
         if (speaking_modifier_id_ >= 0) {
             stackchan.removeModifier(speaking_modifier_id_);
-            avatar.mouth().setWeight(0);
             speaking_modifier_id_ = -1;
         }
+        speech_emotion_active_ = speech_emotion_explicit_ = false;
+        return;
+    }
 
-        GetHAL().setRgbColor(0, 0, 50, 0);
-        GetHAL().refreshRgb();
+    // Alert(ERROR) after a failed snore/sleep-talk connection is not user
+    // activity. Do not call OnStandby(false) or reset the nap scheduler.
+    // Normal conversation error handling remains unchanged outside NapSleep.
+    if (strcmp(status, Lang::Strings::ERROR) == 0 &&
+        stackchan::stage1::IsNapSleepActive()) {
+        ESP_LOGI(TAG, "[SLEEP_DIAG] ignored sleep audio error status");
+        return;
+    }
+
+    speech_conversation_running_ =
+        strcmp(status, Lang::Strings::LISTENING) == 0 ||
+        strcmp(status, Lang::Strings::SPEAKING) == 0;
+
+    // Xiaozhi's wake-word path enters CONNECTING before LISTENING. Capture
+    // either event while asleep; S3 wake visuals then finish independently
+    // of the existing audio connection/microphone processing.
+    const bool may_be_word = strcmp(status, Lang::Strings::CONNECTING) == 0 ||
+                             strcmp(status, Lang::Strings::LISTENING) == 0;
+    const bool standalone_speech = Application::GetInstance().IsAnnouncementActive();
+    // The initial smile belongs only to the pre-response wake conversation.
+    // Do not let a late camera result replace speech, errors or standby.
+    if (!may_be_word || standalone_speech) {
+        EndWakeFaceSmile();
+    } else {
+        wake_face_waiting_neutral_ = wake_face_armed_.load();
+    }
+    const bool wake_handoff = may_be_word && !standalone_speech &&
+                              stackchan::stage1::RequestWakeWord();
+    const bool wake_visual = wake_handoff || stackchan::stage1::IsWakeSequenceActive();
+    // CONNECTING is only a transport state for touch-wake speech: do not
+    // display a "connecting" bubble before audio-synced subtitles arrive.
+    const bool preserve_touch_caption =
+        strcmp(status, Lang::Strings::CONNECTING) == 0 &&
+        Application::GetInstance().IsAnnouncementActive() && wake_visual;
+    // The boot notice must not be interpreted as a wake-word event, nor
+    // reset an active night/nap scene just because its speech socket opens.
+    if (strcmp(status, Lang::Strings::STANDBY) != 0 && !wake_visual &&
+        !standalone_speech) {
+        if (strcmp(status, Lang::Strings::SPEAKING) == 0)
+            stackchan::stage1::PrepareSpeechExpression(stackchan, "display_status");
+        else
+            stackchan::stage1::CancelForExternalChange(stackchan, "display_status");
+    }
+    if (strcmp(status, Lang::Strings::STANDBY) != 0)
+        startup_hint_text_.clear();
+
+    // Bridge the existing Xiaozhi state transitions to the S3 avatar only.
+    // No new speech transport, microphone task or swipe gesture handler.
+    bool is_idle = false;
+
+    if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+        FinishSpeakingAnimation();
+        stackchan::stage1::BeginSpeechTurn(stackchan);
+
+        GetHAL().setConversationRgbColor(0, 50, 0);
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         _is_xiaozhi_ready = true;
 
-        if (speaking_modifier_id_ >= 0) {
-            // Stop speaking
-            stackchan.removeModifier(speaking_modifier_id_);
-            avatar.mouth().setWeight(0);
-            speaking_modifier_id_ = -1;
-        }
+        FinishSpeakingAnimation();
 
         is_idle = true;
 
-        GetHAL().setRgbColor(0, 0, 0, 0);
-        GetHAL().refreshRgb();
+        GetHAL().releaseConversationRgbColor();
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
+        if (subtitle_prestart_queued_) {
+            // The new response has already delivered text before SPEAKING.
+            // Reset PCM timing but keep those new captions for the first tick.
+            auto pending = std::move(subtitle_queue_);
+            ResetSubtitleQueue();
+            subtitle_queue_ = std::move(pending);
+            ESP_LOGI(TAG, "[SUBTITLE] preserved %u pre-start parts",
+                     static_cast<unsigned>(subtitle_queue_.size()));
+        } else {
+            // No new pre-start text: only the old response's unread captions
+            // can be present, so discard them on the new speech boundary.
+            if (!subtitle_queue_.empty() || subtitle_reviewing_) {
+                ESP_LOGI(TAG,
+                         "[SUBTITLE] discard stale captions on new speech (%u parts)",
+                         static_cast<unsigned>(subtitle_queue_.size()));
+            }
+            ResetSubtitleQueue();
+        }
+        subtitle_speaking_ = true;
+        stackchan::speech_mouth::SetPlaying(true);
         if (speaking_modifier_id_ < 0) {
-            speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
+            speaking_modifier_id_ = stackchan.addModifier(
+                std::make_unique<SpeakingModifier>(0, 180, false, true));
         }
 
-        GetHAL().setRgbColor(0, 0, 0, 50);
-        GetHAL().refreshRgb();
-    } else {
+        if (!wake_visual && !stackchan::stage1::IsSleepSceneActive() &&
+            (!standalone_speech || !stackchan::stage1::IsAutonomousSceneActive()))
+            stackchan::stage1::StartSpeechEffects(stackchan, speech_emotion_active_ ?
+                avatar.getEmotion() : Emotion::Neutral);
+        else
+            GetHAL().setConversationRgbColor(0, 0, 50);
+    } else if (!preserve_touch_caption &&
+               !(standalone_speech && strcmp(status, Lang::Strings::CONNECTING) == 0)) {
         avatar.setSpeech(status);
     }
 
+    // Stop mouth animation before capturing the listening pose or restoring
+    // the prior face. Otherwise an open lip-sync frame can be saved and
+    // restored as a stationary open mouth after speech ends.
+    if (strcmp(status, Lang::Strings::LISTENING) == 0 && !wake_visual)
+        stackchan::stage1::SetConversationPose(stackchan, stackchan::stage1::ConversationPose::Listening);
+    if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
+        strcmp(status, Lang::Strings::STANDBY) == 0)
+        avatar.mouth().setWeight(0);
+
     if (is_idle) {
-        // Start idle motion
-        ESP_LOGW(TAG, "Start idle motion");
-        if (idle_motion_modifier_id_ < 0) {
-            if (idle_motion_level_ > 0) {
-                CreateIdleMotionModifier();
-            }
-            idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
-        }
-
-        _is_xiaozhi_idle = true;
+        // STANDBY is the normal recovery point, even after an explicit
+        // sleepy expression removed both idle modifiers.
+        if (is_sleeping_) avatar.setSpeech("");
+        is_sleeping_ = false;
+        ReconcileIdleLifecycle(true);
     } else {
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
-        }
-
-        // if (!is_listening) {
-        //     // Return to default pose
-        //     motion.pitchServo().moveWithSpeed(200, 350);
-        //     motion.yawServo().moveWithSpeed(0, 350);
-        // }
-
-        _is_xiaozhi_idle = false;
+        ReconcileIdleLifecycle(false);
     }
 
-    // Clear sleep state
-    if (is_sleeping_) {
-        avatar.setSpeech("");
-    }
+    // Non-standby transitions still interrupt ordinary idle activity.
+    // Standby restoration is shared with the missed-STANDBY recovery above.
+    // Startup/standalone speech must not interrupt the sleep scheduler.
+    if (!standalone_speech && !is_idle) stackchan::stage1::OnStandby(false);
 }
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)

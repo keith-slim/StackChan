@@ -41,6 +41,12 @@ public:
     virtual void _update(Modifiable& stackchan)
     {
     }
+
+    // Called under the LVGL lock before a new scene/LLM owner captures face
+    // state. Only transient reactions override this; ordinary modifiers stay.
+    virtual void onFaceTakeover(Modifiable& stackchan)
+    {
+    }
 };
 
 }  // namespace stackchan

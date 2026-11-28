@@ -4,10 +4,13 @@
 #include "stackchan_display.h"
 #include "application.h"
 #include "config.h"
-#include "power_save_timer.h"
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "settings.h"
+#include "stackchan/config/charge_protection.h"
+#include "stackchan/config/low_battery.h"
+#include <atomic>
+#include <nvs.h>
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -19,12 +22,64 @@
 #include <algorithm>
 #include <mutex>
 #include "stackchan_camera.h"
+#include "stackchan_perception.h"
+#include "stackchan/storage/cores3_sd.h"
 #include "hal_bridge.h"
 #include <hal/hal.h>
 
 #define TAG "M5Stack-StackChan-Board"
 
 #define XPOWERS_AXP2101_ICC_CHG_SET (0x62)
+
+extern "C" void stackchan_nvs_commit_observer(void);
+namespace stackchan::charge {
+namespace {
+constexpr char kNamespace[] = "sc_charge";
+constexpr char kKey[] = "policy";
+std::atomic<int> desired{-1};
+std::atomic<int> applied{-1};
+}
+void Load() {
+    nvs_handle_t handle = 0;
+    int32_t stored = Pack(Settings{});
+    auto err = nvs_open(kNamespace, NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        err = nvs_get_i32(handle, kKey, &stored);
+        nvs_close(handle);
+    }
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        desired.store(Pack(Settings{}));
+    } else if (err == ESP_OK && ValidPacked(stored)) {
+        desired.store(stored);
+    } else {
+        ESP_LOGW(TAG, "Charge protection settings unavailable: %s; no automatic switching",
+                 esp_err_to_name(err));
+        desired.store(-1);
+    }
+}
+Settings Get() {
+    const int value = desired.load();
+    return ValidPacked(value) ? Unpack(value) : Settings{};
+}
+bool Loaded() { return desired.load() >= 0; }
+bool Save(Settings s) {
+    if (!Valid(s)) return false;
+    const int packed = Pack(s);
+    if (desired.load() == packed) return true;
+    nvs_handle_t handle = 0;
+    auto err = nvs_open(kNamespace, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return false;
+    err = nvs_set_i32(handle, kKey, packed);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) return false;
+    desired.store(packed);
+    stackchan_nvs_commit_observer();
+    return true;
+}
+int Applied() { return applied.load(); }
+void ReportApplied(int value) { applied.store(value); }
+} // namespace stackchan::charge
 
 namespace {
 
@@ -52,6 +107,20 @@ constexpr LcdInitCommand kIli9342eInitCommands[] = {
     {0x11, {}, 0, 120},
     {0x29, {}, 0, 120},
 };
+
+constexpr bool IsCameraDvpPin(gpio_num_t pin)
+{
+    return pin == CAMERA_PIN_D0 || pin == CAMERA_PIN_D1 || pin == CAMERA_PIN_D2 || pin == CAMERA_PIN_D3 ||
+           pin == CAMERA_PIN_D4 || pin == CAMERA_PIN_D5 || pin == CAMERA_PIN_D6 || pin == CAMERA_PIN_D7 ||
+           pin == CAMERA_PIN_VSYNC || pin == CAMERA_PIN_HREF || pin == CAMERA_PIN_PCLK;
+}
+
+// Do not copy the S3-stackchan SDMMC mapping here: its GPIO42 D0 conflicts
+// directly with the CoreS3 camera's GPIO42 D3.
+static_assert(!IsCameraDvpPin(SD_SPI_MOSI_GPIO));
+static_assert(!IsCameraDvpPin(SD_SPI_MISO_GPIO));
+static_assert(!IsCameraDvpPin(SD_SPI_CLK_GPIO));
+static_assert(!IsCameraDvpPin(SD_SPI_CS_GPIO));
 
 esp_err_t ApplyIli9342eInit(esp_lcd_panel_io_handle_t panel_io)
 {
@@ -161,23 +230,54 @@ public:
         return true;
     }
 
-    esp_err_t TryReadPowerStatus(bool& has_external_power, bool& charging, bool& discharging)
+    // AXP2101 status1: bit 5 VBUS good, bit 3 battery present.
+    // Reg 0x18 bit 1 controls ONLY the main battery charger.
+    esp_err_t ApplyChargeProtection(stackchan::charge::Settings settings, int level,
+                                    bool& enabled, bool& changed)
     {
-        uint8_t power_status = 0;
-        esp_err_t err        = TryReadRegs(0x01, &power_status, 1);
+        constexpr uint8_t reg = 0x18, mask = 1U << 1;
+        uint8_t status_reg = 0x00, status = 0, control = 0;
+        // This is called from the existing power polling timer. Bound new
+        // I2C operations and never reboot on a transient bus failure.
+        auto read = [this](uint8_t address, uint8_t& value) {
+            return i2c_master_transmit_receive(i2c_device_, &address, 1, &value, 1, 20);
+        };
+        auto err = read(status_reg, status);
+        if (err != ESP_OK) return err;
+        err = read(reg, control);
+        if (err != ESP_OK) return err;
+        const bool current = (control & mask) != 0;
+        enabled = stackchan::charge::Target(settings, current, true,
+                   (status & 0x08) != 0, (status & 0x20) != 0, level);
+        changed = enabled != current;
+        if (!changed) return ESP_OK;
+        const uint8_t data[] = {reg, static_cast<uint8_t>(enabled ? control | mask : control & ~mask)};
+        err = i2c_master_transmit(i2c_device_, data, sizeof(data), 20);
+        if (err != ESP_OK) return err;
+        uint8_t confirmed = 0;
+        err = read(reg, confirmed);
+        if (err != ESP_OK) return err;
+        return ((confirmed & mask) != 0) == enabled ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+    }
+
+    esp_err_t TryReadPowerStatus(bool& has_external_power, bool& charging, bool& discharging, bool& present)
+    {
+        uint8_t status[2]{};
+        esp_err_t err        = TryReadRegs(0x00, status, sizeof(status));
         if (err != ESP_OK) {
             return err;
         }
 
+        const uint8_t power_status = status[1];
         const uint8_t current_direction = (power_status & 0b01100000) >> 5;
         if (current_direction == 3) {
             return ESP_ERR_INVALID_RESPONSE;
         }
-        const bool is_charging_done = (power_status & 0b00000111) == 0b00000100;
-
-        // Treat any non-discharging state as externally powered so a plugged-in cable
-        // still counts even after the battery is full.
-        has_external_power = current_direction != 2 || is_charging_done;
+        // VBUS_GOOD is a hardware indication of accepted external power.
+        // Charging is a second conservative veto. A merely idle battery
+        // current or old charge-done flag is not proof of USB presence.
+        present = (status[0] & 0x08) != 0;
+        has_external_power = (status[0] & 0x20) != 0 || current_direction == 1;
         charging           = current_direction == 1;
         discharging        = current_direction == 2;
         return ESP_OK;
@@ -196,6 +296,26 @@ public:
 
         level = battery_level;
         return ESP_OK;
+    }
+
+    bool TryLowBatteryPowerOff()
+    {
+        uint8_t control = 0;
+        if (TryReadRegs(0x10, &control, 1) != ESP_OK) return false;
+        // Re-read the hardware status immediately before the irreversible
+        // write. Invalid or externally-powered samples can NEVER shut down.
+        bool external = false, charging = false, discharging = false, present = false;
+        int level = -1;
+        if (TryReadBatteryLevel(level) != ESP_OK ||
+            TryReadPowerStatus(external, charging, discharging, present) != ESP_OK ||
+            !stackchan::low_battery::CanPowerOff({level, true, present, external, charging, discharging}) ||
+            !stackchan::low_battery::Ready()) return false;
+        const uint8_t data[] = {0x10, static_cast<uint8_t>((control & ~0x02U) | 0x01U)};
+        ESP_LOGW(TAG, "[LOW_BATTERY] phase=power_off level=%d", level);
+        const auto err = i2c_master_transmit(i2c_device_, data, sizeof(data), 20);
+        if (err != ESP_OK)
+            ESP_LOGW(TAG, "[LOW_BATTERY] phase=power_off_command_failed error=%s", esp_err_to_name(err));
+        return err == ESP_OK;
     }
 };
 
@@ -236,6 +356,28 @@ public:
         vTaskDelay(pdMS_TO_TICKS(10));
         WriteReg(0x02, 0b00000111);
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    bool SetSdPower(bool enabled)
+    {
+        // CoreS3: AW9523 P0.4 is SD_EN. Never alter unrelated expander bits.
+        constexpr uint8_t bit = 1U << 4;
+        uint8_t state = 0, direction = 0;
+        if (TryReadRegs(0x02, &state, 1) != ESP_OK ||
+            TryReadRegs(0x04, &direction, 1) != ESP_OK) return false;
+        const auto write = [this](uint8_t reg, uint8_t value) {
+            const uint8_t data[] = {reg, value};
+            return i2c_master_transmit(i2c_device_, data, sizeof(data), 100) == ESP_OK;
+        };
+        // ALDO4 is already configured to 3.3 V by Pmic. SD_EN is
+        // active-high. Drive both states; leaving the disable pin floating
+        // does not guarantee that the card has actually powered down.
+        const uint8_t next_state = enabled ? (state | bit) : (state & ~bit);
+        if (!write(0x02, next_state) || !write(0x04, direction & ~bit)) return false;
+        uint8_t actual_state = 0, actual_direction = 0;
+        if (TryReadRegs(0x02, &actual_state, 1) != ESP_OK ||
+            TryReadRegs(0x04, &actual_direction, 1) != ESP_OK) return false;
+        return !(actual_direction & bit) && ((actual_state & bit) == (next_state & bit));
     }
 
     void ResetIli9342()
@@ -339,7 +481,6 @@ private:
 
 class M5StackCoreS3Board : public WifiBoard {
 private:
-    static constexpr int kPowerSaveSleepDelaySeconds  = 300;
     static constexpr int kPowerStatePollIntervalMs    = 1000;
     static constexpr int kPowerReadErrorLogIntervalMs = 10000;
 
@@ -358,33 +499,44 @@ private:
     Ft6336* ft6336_;
     LvglDisplay* display_;
     StackChanCamera* camera_;
+    StackChanPerception* perception_ = nullptr;
     esp_timer_handle_t touchpad_timer_;
-    PowerSaveTimer* power_save_timer_;
-    hal_bridge::XiaozhiConfig_t xiaozhi_config_;
     std::mutex power_state_mutex_;
+    std::mutex camera_storage_mutex_;
     PowerState power_state_;
-    bool last_power_save_enabled_             = false;
     int64_t last_power_state_check_ms_        = 0;
     int64_t last_power_error_log_ms_          = 0;
     uint32_t consecutive_power_read_failures_ = 0;
+    stackchan::low_battery::Detector low_battery_detector_;
+    int64_t last_charge_check_ms_ = -30000;
+    int last_charge_policy_ = -1;
+    bool last_charge_error_ = false;
 
-    bool ShouldEnablePowerSave(bool has_external_power, bool is_discharging) const
+    void PollChargeProtection(int level)
     {
-        return is_discharging || (has_external_power && xiaozhi_config_.allowShutdownWhenCharging);
-    }
-
-    void UpdatePowerSaveEnabled(bool has_external_power, bool is_discharging)
-    {
-        const bool should_enable_power_save = ShouldEnablePowerSave(has_external_power, is_discharging);
-        if (should_enable_power_save == last_power_save_enabled_) {
+        namespace charge = stackchan::charge;
+        if (!charge::Loaded()) return;
+        const auto settings = charge::Get();
+        const int packed = charge::Pack(settings);
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        if (packed == last_charge_policy_ && now_ms - last_charge_check_ms_ < 30000) return;
+        last_charge_policy_ = packed;
+        last_charge_check_ms_ = now_ms;
+        bool enabled = false, changed = false;
+        const auto err = pmic_->ApplyChargeProtection(settings, level, enabled, changed);
+        if (err != ESP_OK) {
+            charge::ReportApplied(-1);
+            if (!last_charge_error_)
+                ESP_LOGW(TAG, "Charge protection I2C failed: %s; retry on next check", esp_err_to_name(err));
+            last_charge_error_ = true;
             return;
         }
-
-        ESP_LOGI(TAG, "Power save timer %s: external_power=%d, discharging=%d, allowShutdownWhenCharging=%d",
-                 should_enable_power_save ? "enabled" : "disabled", has_external_power, is_discharging,
-                 xiaozhi_config_.allowShutdownWhenCharging);
-        power_save_timer_->SetEnabled(should_enable_power_save);
-        last_power_save_enabled_ = should_enable_power_save;
+        const int previous = charge::Applied();
+        charge::ReportApplied(enabled ? 1 : 0);
+        if (changed || previous != (enabled ? 1 : 0) || last_charge_error_)
+            ESP_LOGI(TAG, "[CHARGE_PROTECTION] charger=%s level=%d low=%d high=%d protection=%d",
+                     enabled ? "enabled" : "disabled", level, settings.low, settings.high, settings.enabled);
+        last_charge_error_ = false;
     }
 
     void RefreshPowerState()
@@ -393,8 +545,18 @@ private:
         bool charging           = false;
         bool discharging        = false;
         int battery_level       = 0;
-        esp_err_t status_err    = pmic_->TryReadPowerStatus(has_external_power, charging, discharging);
+        bool battery_present    = false;
+        esp_err_t status_err    = pmic_->TryReadPowerStatus(has_external_power, charging, discharging, battery_present);
         esp_err_t level_err     = pmic_->TryReadBatteryLevel(battery_level);
+        namespace low = stackchan::low_battery;
+        const low::Sample sample{battery_level, status_err == ESP_OK && level_err == ESP_OK,
+                                 battery_present, has_external_power, charging, discharging};
+        const bool previous = low_battery_detector_.active;
+        const bool shutdown = low_battery_detector_.Observe(sample);
+        low::Publish(sample, shutdown);
+        if (shutdown != previous)
+            ESP_LOGI(TAG, "[LOW_BATTERY] phase=%s level=%d external=%d",
+                     shutdown ? "detected" : "canceled", battery_level, has_external_power);
 
         {
             std::lock_guard<std::mutex> lock(power_state_mutex_);
@@ -408,10 +570,6 @@ private:
                 power_state_.battery_level       = battery_level;
                 power_state_.battery_level_valid = true;
             }
-        }
-
-        if (status_err == ESP_OK) {
-            UpdatePowerSaveEnabled(has_external_power, discharging);
         }
 
         if (status_err != ESP_OK || level_err != ESP_OK) {
@@ -432,42 +590,23 @@ private:
             consecutive_power_read_failures_ = 0;
             last_power_error_log_ms_         = 0;
         }
+        PollChargeProtection(battery_level);
+        if (low::Ready() && low::CanPowerOff(sample)) {
+            // Existing SD transaction mutex covers FAT close and unmount.
+            // Never block the power timer on an active card operation.
+            stackchan::sd::TryWhenIdle([](void* ctx) {
+                return static_cast<Pmic*>(ctx)->TryLowBatteryPowerOff();
+            }, pmic_);
+        }
     }
 
-    void PollPowerSaveState()
+    void PollPowerState()
     {
         const int64_t now_ms = esp_timer_get_time() / 1000;
         if (last_power_state_check_ms_ != 0 && (now_ms - last_power_state_check_ms_) < kPowerStatePollIntervalMs) {
             return;
         }
         last_power_state_check_ms_ = now_ms;
-        RefreshPowerState();
-    }
-
-    void InitializePowerSaveTimer()
-    {
-        xiaozhi_config_ = hal_bridge::get_xiaozhi_config();
-
-        const int seconds_to_shutdown = xiaozhi_config_.idleShutdownTimeSeconds > 0
-                                            ? static_cast<int>(xiaozhi_config_.idleShutdownTimeSeconds)
-                                            : -1;
-        const int seconds_to_sleep    = seconds_to_shutdown == -1
-                                            ? kPowerSaveSleepDelaySeconds
-                                            : std::min(kPowerSaveSleepDelaySeconds, seconds_to_shutdown);
-
-        ESP_LOGI(TAG, "Init power save timer: sleep=%d s, shutdown=%d s, allow_shutdown_when_charging=%d",
-                 seconds_to_sleep, seconds_to_shutdown, xiaozhi_config_.allowShutdownWhenCharging);
-
-        power_save_timer_ = new PowerSaveTimer(-1, seconds_to_sleep, seconds_to_shutdown);
-        power_save_timer_->OnEnterSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(true);
-            // GetBacklight()->SetBrightness(10);
-        });
-        power_save_timer_->OnExitSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(false);
-            GetBacklight()->RestoreBrightness();
-        });
-        power_save_timer_->OnShutdownRequest([this]() { pmic_->PowerOff(); });
         RefreshPowerState();
     }
 
@@ -550,7 +689,7 @@ private:
                 [](void* arg) {
                     M5StackCoreS3Board* board = (M5StackCoreS3Board*)arg;
                     board->PollTouchpad();
-                    board->PollPowerSaveState();
+                    board->PollPowerState();
                 },
             .arg                   = this,
             .dispatch_method       = ESP_TIMER_TASK,
@@ -565,9 +704,9 @@ private:
     void InitializeSpi()
     {
         spi_bus_config_t buscfg = {};
-        buscfg.mosi_io_num      = GPIO_NUM_37;
-        buscfg.miso_io_num      = GPIO_NUM_NC;
-        buscfg.sclk_io_num      = GPIO_NUM_36;
+        buscfg.mosi_io_num      = SD_SPI_MOSI_GPIO;
+        buscfg.miso_io_num      = SD_SPI_MISO_GPIO;  // LCD DC is switched by CoreS3 SD library
+        buscfg.sclk_io_num      = SD_SPI_CLK_GPIO;
         buscfg.quadwp_io_num    = GPIO_NUM_NC;
         buscfg.quadhd_io_num    = GPIO_NUM_NC;
         buscfg.max_transfer_sz  = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t);
@@ -584,7 +723,7 @@ private:
         ESP_LOGD(TAG, "Install panel IO");
         esp_lcd_panel_io_spi_config_t io_config = {};
         io_config.cs_gpio_num                   = GPIO_NUM_3;
-        io_config.dc_gpio_num                   = GPIO_NUM_35;
+        io_config.dc_gpio_num                   = SD_SPI_MISO_GPIO;
         io_config.spi_mode                      = 2;
         io_config.pclk_hz                       = 40 * 1000 * 1000;
         io_config.trans_queue_depth             = 10;
@@ -671,6 +810,7 @@ private:
         };
 
         camera_ = new StackChanCamera(video_config);
+        camera_->SetStorageMutex(&camera_storage_mutex_);
         camera_->SetHMirror(false);
     }
 
@@ -679,22 +819,34 @@ public:
     {
         InitializeI2c();
         InitializeAxp2101();
-        InitializePowerSaveTimer();
         InitializeAw9523();
         I2cDetect();
         InitializeFt6336();
         InitializeSpi();
         InitializeIli9342Display();
+        // Register only: SD is never mounted during board initialization.
+        stackchan::sd::Configure({
+            .display_io = static_cast<StackChanAvatarDisplay*>(display_)->GetPanelIOForSd(),
+            .camera_mutex = &camera_storage_mutex_,
+            .power_context = aw9523_,
+            .set_power = [](void* ctx, bool on) {
+                return static_cast<Aw9523*>(ctx)->SetSdPower(on);
+            },
+        });
         InitializeCamera();
+#if CONFIG_STACKCHAN_PERCEPTION_ENABLED
+        perception_ = new StackChanPerception(camera_, static_cast<StackChanAvatarDisplay*>(display_));
+#endif
+        stackchan::charge::Load();
         StartTouchpadTimer();
         GetBacklight()->RestoreBrightness();
     }
 
-    // All fallback paths (no saved SSID, timeout, explicit reconfiguration) use
-    // the same BLE App setup flow. Never start the upstream configuration AP.
+    // Return to the launcher-owned local configuration AP without running
+    // the AI application or creating another Wi-Fi manager.
     void StartWifiConfigMode() override
     {
-        ESP_LOGW(TAG, "WiFi setup required; opening StackChan App setup");
+        ESP_LOGW(TAG, "WiFi setup required; opening local configuration AP");
         GetHAL().requestAppSetup();
     }
 
@@ -717,6 +869,21 @@ public:
         return camera_;
     }
 
+    void OnAudioInputFrame(const int16_t* samples, size_t frames, size_t channels, size_t microphone_channels) override
+    {
+        if (perception_) perception_->OnAudioInputFrame(samples, frames, channels, microphone_channels);
+    }
+
+    void OnWakeWordDetected() override
+    {
+        if (perception_) perception_->OnWakeWordDetected();
+    }
+
+    void OnConversationEnded() override
+    {
+        if (perception_) perception_->OnConversationEnded();
+    }
+
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override
     {
         std::lock_guard<std::mutex> lock(power_state_mutex_);
@@ -728,14 +895,6 @@ public:
         charging    = power_state_.charging;
         discharging = power_state_.discharging;
         return true;
-    }
-
-    virtual void SetPowerSaveLevel(PowerSaveLevel level) override
-    {
-        if (level != PowerSaveLevel::LOW_POWER) {
-            power_save_timer_->WakeUp();
-        }
-        WifiBoard::SetPowerSaveLevel(level);
     }
 
     virtual Backlight* GetBacklight() override

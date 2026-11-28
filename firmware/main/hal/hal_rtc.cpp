@@ -21,6 +21,12 @@ void Hal::rtc_init()
 {
     mclog::tagInfo(_tag, "init");
 
+    // Apply the saved timezone even when the external RTC is unavailable.
+    std::string tz = getTimezone();
+    setenv("TZ", tz.c_str(), 1);
+    tzset();
+    mclog::tagInfo(_tag, "load timezone from nvs: {}", tz);
+
     auto i2c_bus = hal_bridge::board_get_i2c_bus();
 
     _pcf8563 = std::make_unique<m5::PCF8563_Class>(i2c_bus);
@@ -30,12 +36,6 @@ void Hal::rtc_init()
         return;
     }
     mclog::tagInfo(_tag, "PCF8563 init ok");
-
-    // Load timezone from settings
-    std::string tz = getTimezone();
-    setenv("TZ", tz.c_str(), 1);
-    tzset();
-    mclog::tagInfo(_tag, "load timezone from nvs: {}", tz);
 
     syncRtcTimeToSystem();
 }
@@ -123,5 +123,5 @@ void Hal::setTimezone(std::string_view tz)
 std::string Hal::getTimezone()
 {
     Settings settings("system", false);
-    return settings.GetString("tz", "GMT0");
+    return settings.GetString("tz", "JST-9");
 }

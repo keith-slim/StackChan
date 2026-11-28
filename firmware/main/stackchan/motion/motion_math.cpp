@@ -34,6 +34,11 @@ int radiansToTenthsOfDegrees(float radians)
 
 }  // namespace
 
+int clampRelativeAngle(int origin, int delta, int minimum, int maximum)
+{
+    return std::clamp(origin + delta, minimum, maximum);
+}
+
 int mapNormalizedValueToAngle(float value, int minimum, int maximum)
 {
     return static_cast<int>(mapRange(clampNormalized(value), -1.0f, 1.0f, static_cast<float>(minimum), static_cast<float>(maximum)));

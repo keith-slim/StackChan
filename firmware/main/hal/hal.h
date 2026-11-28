@@ -54,14 +54,7 @@ enum class ImuMotionEvent {
  * @brief
  *
  */
-enum class AppConfigEvent {
-    None = 0,
-    AppConnected,
-    AppDisconnected,
-    TryWifiConnect,
-    WifiConnectFailed,
-    WifiConnected,
-};
+
 
 /**
  * @brief
@@ -105,18 +98,13 @@ enum class WifiStatus {
  * @brief
  *
  */
-struct UserAccountInfo_t {
-    std::string username;
-    std::string deviceName;
-};
+
 
 /**
  * @brief
  *
  */
 struct XiaozhiConfig_t {
-    uint32_t idleShutdownTimeSeconds = 600;
-    bool allowShutdownWhenCharging   = false;
     uint8_t idleRandomMovementLevel  = 2;
     bool startAiAgentOnBoot          = false;
 };
@@ -220,13 +208,10 @@ public:
     uitk::Signal<const char*> onBleAvatarData;
     uitk::Signal<const char*> onBleConfigData;
     uitk::Signal<const char*> onBleRgbData;
-    uitk::Signal<AppConfigEvent> onAppConfigEvent;
 
     void startBleServer();
     bool isBleConnected();
-    void startAppConfigServer();
-    bool isAppConfiged();
-    void resetAppConfiged();
+    bool hasSavedWifi();
 
     /* --------------------------------- HeadPet -------------------------------- */
     uitk::Signal<HeadPetGesture> onHeadPetGesture;
@@ -235,6 +220,14 @@ public:
     void setRgbColor(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
     void showRgbColor(uint8_t r, uint8_t g, uint8_t b);
     void refreshRgb();
+    // Conversation LEDs and sleep blackout are layers of the shared RGB controller.
+    void setConversationRgbColor(uint8_t r, uint8_t g, uint8_t b);
+    void releaseConversationRgbColor();
+    void setConversationRandomRgb();
+    bool startRandomRgbTest();
+    void cancelRandomRgb();
+    void updateRandomRgb(bool test_allowed, bool shutdown);
+    void setSleepRgbBlackout(bool enabled);
 
     /* ---------------------------------- Power --------------------------------- */
     void setServoPowerEnabled(bool enabled);
@@ -287,14 +280,6 @@ public:
     /* --------------------------------- EzData --------------------------------- */
     void startEzDataService(std::function<void(std::string_view)> onStartLog);
     uitk::Signal<std::string_view> onEzdataPairCode;
-
-    /* ------------------------------- User Acount ------------------------------ */
-    UserAccountInfo_t getUserAccountInfo();
-    bool updateAccountInfo(std::function<void(std::string_view)> onLog);
-    bool unbindAccount(std::function<void(std::string_view)> onLog);
-
-    /* ----------------------------------- OTA ---------------------------------- */
-    bool updateFirmware(std::function<void(std::string_view)> onLog);
 
     /* ---------------------------------- Audio --------------------------------- */
     void setSpeakerVolume(uint8_t volume, bool permanent = false);

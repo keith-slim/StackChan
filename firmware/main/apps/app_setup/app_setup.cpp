@@ -83,12 +83,6 @@ void AppSetup::onOpen()
                   _destroy_menu    = true;
                   _need_warm_reset = true;
                   _worker          = std::make_unique<XiaozhiGeneralWorker>();
-              }},
-             {"Power Saving",
-              [&]() {
-                  _destroy_menu    = true;
-                  _need_warm_reset = true;
-                  _worker          = std::make_unique<XiaozhiPowerSavingWorker>();
               }}},
         },
         {
@@ -110,12 +104,11 @@ void AppSetup::onOpen()
               }}},
         },
         {
-            "Account",
-            {{"Unbind & Reset",
+            "System",
+            {{"Factory Reset",
               [&]() {
-                  _destroy_menu    = true;
-                  _need_warm_reset = true;
-                  _worker          = std::make_unique<AccountWorker>();
+                  _destroy_menu = true;
+                  _worker = std::make_unique<FactoryResetWorker>();
               }}},
         },
         {
@@ -130,17 +123,6 @@ void AppSetup::onOpen()
                          _worker       = std::make_unique<FwVersionWorker>();
                      }
                  }},
-                {"Check for Updates",
-                 [&]() {
-                     _destroy_menu    = true;
-                     _need_warm_reset = true;
-                     _worker          = std::make_unique<SystemUpdateWorker>();
-                 }},
-                //  {"Factory Reset",
-                //   [&]() {
-                //       _destroy_menu = true;
-                //       _worker       = std::make_unique<FactoryResetWorker>();
-                //   }}
             },
         },
         {

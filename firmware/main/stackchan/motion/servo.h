@@ -7,6 +7,9 @@
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
 #include <cstdint>
+#include <atomic>
+#include <mutex>
+#include "timed_servo_move.h"
 
 namespace stackchan::motion {
 
@@ -53,6 +56,24 @@ public:
      * @param speed (0-1000)
      */
     void moveWithSpeed(int angle, int speed);
+    // Rate-limited spring; speed is in tenths of a degree per second.
+    uint32_t trackWithSpeed(int angle, int speed, const int* measured_start = nullptr);
+    bool isTrackingCommandActive() const;
+    bool startHardwareSweep(int angle, int rate, uint32_t& revision, bool retarget = false);
+    void requestHardwareStop(const char* reason);
+    void setSweepCancelFlag(const std::atomic<bool>* flag) { _sweep_cancel_flag.store(flag); }
+    void servicePriorityStop();
+    bool stopHardwareSweep(uint32_t revision);
+    // Hardware feedback must be distinguished from the interpolated fallback.
+    virtual bool tryGetCurrentAngle(int& angle) { angle = getCurrentAngle(); return true; }
+    void stopTrackingIfOwned(uint32_t revision, const int* measured_stop = nullptr);
+
+    // One physical position sync at entry, then direct timed setpoints.
+    void moveWithDuration(int angle, uint32_t duration_ms, uint32_t now);
+    void cancelTimedMove();
+    // An expression may restore only a target it still owns. This revision
+    // changes on external commands, cancellation and stall protection.
+    uint32_t getCommandRevision() const { return _command_revision.load(std::memory_order_relaxed); }
 
     /**
      * @brief Rotate servo with given velocity
@@ -77,6 +98,7 @@ public:
      */
     virtual uitk::Vector2i getAngleLimit() const
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         return _angle_limit;
     }
 
@@ -95,6 +117,8 @@ public:
      */
     virtual void setTorqueEnabled(bool enabled)
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
+        _torque_commanded_enabled = enabled;
     }
     virtual bool getTorqueEnabled()
     {
@@ -108,6 +132,7 @@ public:
      */
     void setAutoTorqueReleaseEnabled(bool enabled)
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         _auto_torque_release_enabled = enabled;
     }
 
@@ -125,6 +150,7 @@ public:
      */
     void setAutoAngleSyncEnabled(bool enabled)
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         _auto_angle_sync_enabled = enabled;
     }
 
@@ -151,6 +177,7 @@ protected:
 
     void set_angle_limit(uitk::Vector2i angleLimit)
     {
+        std::lock_guard<std::recursive_mutex> lock(_state_mutex);
         _angle_limit = angleLimit;
     }
 
@@ -160,21 +187,60 @@ protected:
      * @param angle
      */
     virtual void set_angle_impl(int angle) = 0;
+    virtual void set_tracking_angle_impl(int angle, int rate) { set_angle_impl(angle); }
+    virtual void reanchor_tracking_impl(int measured) { (void)measured; }
+    virtual bool write_hardware_sweep(int angle, int rate, int measured) { return false; }
+    virtual bool hold_hardware_sweep(int& measured) { return false; }
+    virtual bool supports_hardware_sweep() const { return false; }
+    virtual void service_hardware_sweep() {}
     virtual bool is_moving_impl()
     {
         return false;
     }
 
 protected:
+    // Always acquire this before the shared hardware bus mutex.
+    mutable std::recursive_mutex _state_mutex;
     uitk::Vector2i _angle_limit;
     uitk::AnimateValue _angle_anim;
+    TimedServoMove _timed_move;
+    std::atomic<uint32_t> _command_revision{0};
 
     uint32_t _last_tick               = 0;
     uint32_t _last_torque_check_tick  = 0;
-    bool _snap_to_target_on_rest      = false;
+    enum class Profile { Idle, Spring, Timed, Tracking, HardwareSweep };
+    Profile _profile = Profile::Idle;
+    int _goal = 0;
+    std::atomic<const std::atomic<bool>*> _sweep_cancel_flag{nullptr};
+    bool sweep_cancelled() const { auto* flag = _sweep_cancel_flag.load(); return flag && flag->load(); }
+    std::atomic<bool> _hardware_stop_requested{false};
+    std::atomic<uint32_t> _hardware_stop_revision{0};
+    std::atomic<const char*> _hardware_stop_reason{"unspecified"};
+    uint32_t _hardware_stop_attempt_tick = 0;
+    bool _hardware_stop_attempted = false;
+    float _tracking_position = 0.0f;
+    float _tracking_velocity = 0.0f;
+    int _tracking_rate = 0;
+    float _tracking_stiffness = 0.0f;
+    float _tracking_damping = 0.0f;
+    uint32_t _tracking_tick = 0;
+    uint32_t _tracking_replan_tick = 0;
+    bool _tracking_replan_pending = false;
     bool _auto_torque_release_enabled = true;
     bool _auto_angle_sync_enabled     = true;
+    // Track commands instead of polling the servo while idle with torque off.
+    bool _torque_commanded_enabled    = false;
 
+    // Ordinary motion history only; no additional actuator reads or writes.
+    virtual int normal_log_id() const { return -1; }
+    void begin_normal_log(const char* profile, int target);
+    void finish_normal_log(const char* cleanup, const char* result = nullptr);
+    bool _normal_log_active = false;
+    int _normal_log_goal = 0;
+    const char* _normal_log_profile = nullptr;
+    const char* _normal_log_result = "completed";
+
+    void cancel_profile(bool preserve_spring = false);
     void apply_default_spring_options();
     void update_angle_anim_target(int angle);
     void stop_motion_at_angle(int angle);

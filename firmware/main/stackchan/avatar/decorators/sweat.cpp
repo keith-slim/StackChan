@@ -25,6 +25,8 @@ SweatDecorator::SweatDecorator(lv_obj_t* parent, uint32_t destroyAfterMs, uint32
     _sweat->setSrc(&decorator_sweat);
     _sweat->setAlign(LV_ALIGN_CENTER);
     _sweat->setPos(_sweat_default_position.x, _sweat_default_position.y);
+    _animation_origin_x = _sweat_default_position.x;
+    _animation_origin_y = _sweat_default_position.y;
 
     _sweat->setTransformPivot(_sweat->getWidth() / 2, _sweat->getHeight() / 2);
     _sweat->setImageRecolorOpa(LV_OPA_COVER);
@@ -68,7 +70,10 @@ void SweatDecorator::_update()
         } else {
             // 普通帧：移动位置并显示
             setVisible(true);
-            _sweat->setPos(_sweat_default_position.x, current_y_frame);
+            // 指定された目元を原点にし、既存フレームの落下量だけを加える。
+            // 固定座標へ戻すと、涙が左上の天気バッジから出て見えてしまう。
+            const int offset_y = current_y_frame - _sweat_pos_y_frames.front();
+            _sweat->setPos(_animation_origin_x, _animation_origin_y + offset_y);
         }
 
         // 步进索引
@@ -78,6 +83,9 @@ void SweatDecorator::_update()
 
 void SweatDecorator::setPosition(int x, int y)
 {
+    // 更新後も左右それぞれの目元から流れるよう、アニメーション原点も更新する。
+    _animation_origin_x = x;
+    _animation_origin_y = y;
     // 注意：这里的 setPosition 会覆盖动画中的 x 坐标
     if (_sweat) {
         _sweat->setPos(x, y);

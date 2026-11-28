@@ -283,7 +283,7 @@ void NetworkDiagnostics::run(const std::shared_ptr<State>& state)
         if (state->cancelled) return;
         if (WifiProvisioningActive) {
             std::lock_guard<std::mutex> results_lock(state->mutex);
-            state->results.wifi = "App Wi-Fi setup is active. Exit Settings to restart, then test again.";
+            state->results.wifi = "Local Wi-Fi setup is active. Close the AP, then test again.";
             state->results.xiaozhi =
                 state->results.m5stack = {Status::Failed, "Finish Change Wi-Fi before testing servers."};
             return;
@@ -294,6 +294,8 @@ void NetworkDiagnostics::run(const std::shared_ptr<State>& state)
             WifiManagerConfig config;
             config.ssid_prefix = "Xiaozhi";
             config.language    = Lang::CODE;
+            config.show_ota_config = false;
+            config.show_sleep_config = false;
             if (!wifi.IsInitialized() && !wifi.Initialize(config)) {
                 std::lock_guard<std::mutex> results_lock(state->mutex);
                 state->results.wifi = "Wi-Fi initialization failed. Restart the device and try again.";

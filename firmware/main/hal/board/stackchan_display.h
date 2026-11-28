@@ -12,30 +12,81 @@
 #include <deque>
 #include <string>
 #include <cstdint>
+#include <atomic>
+#include <stackchan/avatar/avatar/elements/emotion.h>
+#include <hal/utils/psram_allocator.h>
+#include <apps/common/status_bar/battery_indicator.h>
 
 class StackChanAvatarDisplay : public LvglDisplay {
 private:
+    std::unique_ptr<view::BatteryIndicator> battery_indicator_;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_       = nullptr;
     int speaking_modifier_id_           = -1;
     int idle_motion_modifier_id_        = -1;
     int idle_expression_modifier_id_    = -1;
     int blink_modifier_id_              = -1;
+    lv_timer_t* idle_recovery_timer_       = nullptr;
     bool is_sleeping_                   = false;
+    using SubtitleText = std::basic_string<char, std::char_traits<char>,
+                                           stackchan::memory::PsramAllocator<char>>;
+    // Only the local fallback hint is tracked, so its five-second timeout
+    // cannot remove a newer live subtitle.
+    SubtitleText startup_hint_text_;
     uint8_t idle_motion_level_          = 2;
 
-    // 字幕キュー
-    std::deque<std::string> subtitle_queue_;
+    // Both deque nodes and subtitle text storage live in PSRAM.
+    std::deque<SubtitleText, stackchan::memory::PsramAllocator<SubtitleText>> subtitle_queue_;
+    bool subtitle_memory_sampled_ = false; // One allocation snapshot per response.
     lv_timer_t* subtitle_timer_ = nullptr;
     uint32_t subtitle_until_ms_ = 0;
     bool subtitle_displaying_ = false;
+    bool subtitle_speaking_ = false;
+    bool subtitle_preview_shown_ = false;
+    bool subtitle_reviewing_ = false;
+    uint32_t subtitle_review_wait_until_ms_ = 0;
+    uint32_t subtitle_next_playback_ms_ = 0;
+    uint32_t subtitle_latest_playback_ms_ = 0;
+    bool subtitle_pcm_started_ = false;
+    // Assistant text received before speaking belongs to the upcoming response,
+    // not to the completed response's unread review queue.
+    bool subtitle_prestart_queued_ = false;
+    bool subtitle_playback_started_ = false;
+    bool subtitle_playback_synced_ = false;
 
+    // S3 speech-expression lifetime. An explicit llm.emotion outranks the
+    // Japanese-text fallback; restore the preceding face after the reply.
+    uint32_t idle_non_neutral_since_ = 0;
+    bool idle_non_neutral_pending_ = false;
+    bool speech_emotion_explicit_ = false;
+    bool speech_emotion_active_ = false;
+    bool speech_conversation_running_ = false; // LISTENING/SPEAKING, not actual sleep.
+    stackchan::avatar::Emotion speech_emotion_before_ = stackchan::avatar::Emotion::Neutral;
+
+    // Wake face discovery is independent of LLM speech emotions.
+    // Arming is lock-free on the wake-word path; visual state uses the display lock.
+    std::atomic_bool wake_face_armed_{false};
+    bool wake_face_active_ = false;
+    bool wake_face_waiting_neutral_ = false;
+    stackchan::avatar::Emotion wake_face_before_ = stackchan::avatar::Emotion::Neutral;
+    void EndWakeFaceSmile(bool resume_listening = false);
+    void FinishSpeakingAnimation();
+    void ReconcileIdleLifecycle(bool device_idle);
     void AdvanceSubtitle();
+    void AdvanceLiveSubtitle(uint32_t played_ms, bool at_phrase_boundary);
+    void BeginSubtitleReview();
+    void PauseSubtitleReview();
     void ResetSubtitleQueue();
 
     lv_obj_t* preview_image_                         = nullptr;
     esp_timer_handle_t preview_timer_                = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
+
+    lv_obj_t* setup_qr_overlay_ = nullptr;
+    lv_timer_t* setup_qr_timer_ = nullptr;
+    uint32_t setup_qr_started_ms_ = 0;
+    int32_t setup_qr_battery_index_ = -1;
+    void HideSetupQr(); // caller owns the LVGL lock (or is the LVGL timer/event)
 
     void CreateIdleMotionModifier();
 
@@ -53,6 +104,8 @@ public:
     // Override Display methods to control Robot
     virtual bool SetEmotion(const char* emotion) override;
     virtual void SetChatMessage(const char* role, const char* content) override;
+    virtual void RemoveChatMessage(const char* role, const char* content) override;
+    bool SupportsStartupSpeech() const override { return true; }
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void UpdateStatusBar(bool update_all = false) override;
@@ -61,7 +114,12 @@ public:
     virtual void SetStatus(const char* status) override;
     virtual void ShowNotification(const char* notification, int duration_ms = 3000) override;
 
+    bool ShowSetupQr(const std::string& url);
+
+    void ArmWakeFaceSmile() { wake_face_armed_.store(true); }
+    bool ShowWakeFaceSmile();
     void LvglLock();
     void LvglUnlock();
+    esp_lcd_panel_io_handle_t GetPanelIOForSd() const { return panel_io_; }
     lv_disp_t* GetLvglDisplay();
 };

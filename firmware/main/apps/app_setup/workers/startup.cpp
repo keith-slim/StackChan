@@ -80,13 +80,18 @@ void StartupWorker::update()
             _worker_wifi = std::make_unique<WifiSetupWorker>();
         }
     }
-    // App setup
+    // Local Wi-Fi setup
     else if (_worker_wifi) {
         _worker_wifi->update();
         if (_worker_wifi->isDone()) {
             _worker_wifi.reset();
-            mclog::tagInfo(_tag, "startup back");
-            _page_startup = std::make_unique<PageStartup>();
+            if (GetHAL().hasSavedWifi()) {
+                mclog::tagInfo(_tag, "local Wi-Fi configuration available");
+                _is_done = true;
+            } else {
+                mclog::tagInfo(_tag, "startup back");
+                _page_startup = std::make_unique<PageStartup>();
+            }
         }
     }
 }

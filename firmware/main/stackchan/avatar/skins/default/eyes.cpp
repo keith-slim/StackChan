@@ -72,7 +72,9 @@ void DefaultEyes::setWeight(int weight)
 {
     Feature::setWeight(weight);
 
-    _eyelid_offset_y = -map_range(_weight, 0, 100, 0, (int)_eyelid->getHeight());
+    const int opening = map_range(_weight, 0, 100, 0, static_cast<int>(_eyelid->getHeight()));
+    // S3 smile: a rounded lower eyelid forms a symmetric upward arch.
+    _eyelid_offset_y = _smiling ? opening / 3 : -opening;
 
     _eyelid->setY(_eyelid_offset_y);
 }
@@ -81,7 +83,7 @@ void DefaultEyes::setRotation(int rotation)
 {
     Element::setRotation(rotation);
 
-    _container->setRotation(rotation);
+    _container->setRotation(getRotation());
 }
 
 void DefaultEyes::setEmotion(const Emotion& emotion)
@@ -89,6 +91,9 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
     if (getIgnoreEmotion()) {
         return;
     }
+
+    _smiling = emotion == Emotion::Happy || emotion == Emotion::Fun;
+    _eyelid->setRadius(_smiling ? LV_RADIUS_CIRCLE : 0);
 
     auto apply_style = [this](int weight, int rotation) {
         setWeight(weight);
@@ -99,12 +104,18 @@ void DefaultEyes::setEmotion(const Emotion& emotion)
         }
     };
 
+    // Reset the extra size only when leaving the new surprise expression.
+    const bool was_surprise = _size == 60;
+    if (emotion == Emotion::Surprise) setSize(60);
+    else if (was_surprise) setSize(0);
     switch (emotion) {
+        case Emotion::Surprise:
         case Emotion::Neutral:
             apply_style(100, 0);
             break;
         case Emotion::Happy:
-            apply_style(72, 1550);
+        case Emotion::Fun:
+            apply_style(72, 0);
             break;
         case Emotion::Angry:
             apply_style(70, 450);

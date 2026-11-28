@@ -16,6 +16,7 @@
 #include <vector>
 #include <lvgl.h>
 #include <src/draw/lv_image_dsc.h>
+#include "battery_indicator.h"
 
 using namespace smooth_ui_toolkit;
 using namespace smooth_ui_toolkit::lvgl_cpp;
@@ -131,102 +132,16 @@ private:
     std::unique_ptr<Label> _label;
 };
 
-class BatteryIcon {
-public:
-    BatteryIcon(lv_obj_t* parent, uint32_t colorSecondary, uint32_t colorPrimary)
-    {
-        _color_primary = colorPrimary;
-
-        _bat_top = std::make_unique<uitk::lvgl_cpp::Container>(parent);
-        _bat_top->setBgColor(lv_color_hex(colorSecondary));
-        _bat_top->setScrollbarMode(LV_SCROLLBAR_MODE_OFF);
-        _bat_top->setBorderWidth(0);
-        _bat_top->setSize(4, 4);
-        _bat_top->setRadius(4);
-        _bat_top->setOutlineWidth(1);
-        _bat_top->setOutlineColor(lv_color_hex(colorPrimary));
-
-        _bar = std::make_unique<uitk::lvgl_cpp::Bar>(parent);
-        _bar->setSize(30, 12);
-        _bar->setRadius(4);
-        _bar->setRadius(0, LV_PART_INDICATOR);
-        _bar->setBgColor(lv_color_hex(colorSecondary));
-        _bar->setBgColor(lv_color_hex(colorPrimary), LV_PART_INDICATOR);
-        _bar->setBgOpa(LV_OPA_COVER);
-        _bar->setRange(0, 100);
-        _bar->setValue(0);
-        _bar->setPadding(1, 1, 1, 1);
-        _bar->setOutlineWidth(1);
-        _bar->setOutlineColor(lv_color_hex(colorPrimary));
-        _bar->setRadius(3, LV_PART_INDICATOR);
-
-        _lightning_icon     = std::make_unique<uitk::lvgl_cpp::Image>(parent);
-        _icon_bat_lightning = assets::get_image("icon_bat_lightning.bin");
-        _lightning_icon->setSrc(&_icon_bat_lightning);
-        _lightning_icon->setImageRecolor(lv_color_hex(colorPrimary));
-        _lightning_icon->setImageRecolorOpa(LV_OPA_COVER);
-        _lightning_icon->setHidden(true);
-    }
-
-    void align(lv_align_t align, int32_t x_ofs, int32_t y_ofs)
-    {
-        _bar->align(align, x_ofs, y_ofs);
-        lv_obj_align_to(_bat_top->get(), _bar->get(), LV_ALIGN_CENTER, 15, 0);
-        lv_obj_align_to(_lightning_icon->get(), _bar->get(), LV_ALIGN_CENTER, 0, 0);
-    }
-
-    void setLevel(uint8_t level)
-    {
-        _bar->setValue(level);
-    }
-
-    void setCharging(bool charging)
-    {
-        if (charging) {
-            _bar->setBgColor(lv_color_hex(0x19C25F), LV_PART_INDICATOR);
-            _lightning_icon->setHidden(false);
-        } else {
-            _bar->setBgColor(lv_color_hex(_color_primary), LV_PART_INDICATOR);
-            _lightning_icon->setHidden(true);
-        }
-    }
-
-private:
-    std::unique_ptr<Bar> _bar;
-    std::unique_ptr<Container> _bat_top;
-    std::unique_ptr<Image> _lightning_icon;
-    lv_image_dsc_t _icon_bat_lightning;
-
-    uint32_t _color_primary = 0;
-};
-
 class Battery : public Widget {
 public:
     Battery(lv_obj_t* parent, uint32_t colorSecondary, uint32_t colorPrimary)
-    {
-        _label_level = std::make_unique<Label>(parent);
-        _label_level->setText("");
-        _label_level->setTextColor(lv_color_hex(colorPrimary));
-        _label_level->setTextFont(&lv_font_montserrat_16);
-        _label_level->align(LV_ALIGN_RIGHT_MID, -41, 0);
-
-        _battery_icon = std::make_unique<BatteryIcon>(parent, colorSecondary, colorPrimary);
-        _battery_icon->align(LV_ALIGN_RIGHT_MID, -7, 0);
-
-        update();
+        : indicator_(parent, colorPrimary) {
+        (void)colorSecondary;
+        indicator_.Align(LV_ALIGN_RIGHT_MID, -3, 0);
     }
-
-    void update() override
-    {
-        auto level = GetHAL().getBatteryLevel();
-        _label_level->setText(fmt::format("{}%", level));
-        _battery_icon->setLevel(level);
-        _battery_icon->setCharging(GetHAL().isBatteryCharging());
-    }
-
+    void update() override { indicator_.Update(); }
 private:
-    std::unique_ptr<Label> _label_level;
-    std::unique_ptr<BatteryIcon> _battery_icon;
+    view::BatteryIndicator indicator_;
 };
 
 class Wifi : public Widget {

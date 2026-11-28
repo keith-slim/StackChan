@@ -5,6 +5,7 @@
  */
 #include "workers.h"
 #include <stackchan/stackchan.h>
+#include <stackchan/addons/neon_light/rgb_test.h>
 #include <apps/common/toast/toast.h>
 #include <mooncake_log.h>
 #include <assets/assets.h>
@@ -456,18 +457,6 @@ void ServoTestWorker::update()
     }
 }
 
-struct RgbColorEntry {
-    std::string name;
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-};
-
-static const std::vector<RgbColorEntry> _rgb_colors = {
-    {"Red", 255, 0, 0},    {"Green", 0, 255, 0},     {"Blue", 0, 0, 255},      {"Yellow", 255, 255, 0},
-    {"Cyan", 0, 255, 255}, {"Magenta", 255, 0, 255}, {"White", 255, 255, 255}, {"Off", 0, 0, 0},
-};
-
 RgbTestWorker::RgbTestWorker()
 {
     _panel = std::make_unique<Container>(lv_screen_active());
@@ -481,18 +470,14 @@ RgbTestWorker::RgbTestWorker()
     _panel->setPadding(20, 20, 20, 20);
     _panel->setPadRow(15);
 
-    for (const auto& color : _rgb_colors) {
+    for (const auto& color : stackchan::rgb_test::kColors) {
         auto btn = std::make_unique<Button>(*_panel);
         apply_button_common_style(*btn);
         btn->setSize(200, 50);
         btn->label().setText(color.name);
 
-        uint8_t r = color.r;
-        uint8_t g = color.g;
-        uint8_t b = color.b;
-        btn->onClick().connect([r, g, b]() {
-            GetStackChan().leftNeonLight().setColor(r, g, b);
-            GetStackChan().rightNeonLight().setColor(r, g, b);
+        btn->onClick().connect([color]() {
+            stackchan::rgb_test::Apply(color);
         });
 
         _buttons.push_back(std::move(btn));
@@ -508,6 +493,5 @@ RgbTestWorker::RgbTestWorker()
 
 RgbTestWorker::~RgbTestWorker()
 {
-    GetStackChan().leftNeonLight().setColor(0, 0, 0);
-    GetStackChan().rightNeonLight().setColor(0, 0, 0);
+    stackchan::rgb_test::Apply(stackchan::rgb_test::kColors.back());
 }

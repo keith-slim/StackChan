@@ -20,14 +20,14 @@ SCSCL::SCSCL(u8 End, u8 Level):SCSerial(End, Level)
 {
 }
 
-int SCSCL::WritePos(u8 ID, u16 Position, u16 Time, u16 Speed)
+int SCSCL::WritePos(u8 ID, u16 Position, u16 Time, u16 Speed, u16 ackTimeoutUs)
 {
 	u8 bBuf[6];
 	Host2SCS(bBuf+0, bBuf+1, Position);
 	Host2SCS(bBuf+2, bBuf+3, Time);
 	Host2SCS(bBuf+4, bBuf+5, Speed);
 	
-	return genWrite(ID, SCSCL_GOAL_POSITION_L, bBuf, 6);
+	return genWrite(ID, SCSCL_GOAL_POSITION_L, bBuf, 6, ackTimeoutUs);
 }
 
 int SCSCL::RegWritePos(u8 ID, u16 Position, u16 Time, u16 Speed)

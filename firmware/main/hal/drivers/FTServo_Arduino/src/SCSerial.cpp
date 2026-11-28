@@ -6,9 +6,12 @@
  */
 
 #include "SCSerial.h"
+#include "servo_reply_parser.h"
+#include <cstring>
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 
 static const char *TAG = "FT_SCSerial";
 
@@ -44,7 +47,13 @@ bool SCSerial::begin(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin
 		.source_clk = UART_SCLK_DEFAULT,
 	};
 
-	esp_err_t ret = uart_driver_install(uart_num, buf_size, buf_size, 0, NULL, 0);
+	esp_err_t ret = uart_driver_install(uart_num, buf_size, buf_size, kEventDepth, &_events, 0);
+	if (ret == ESP_ERR_NO_MEM) {
+		// Diagnostics must not prevent the original bus from starting.
+		_events = nullptr;
+		ret = uart_driver_install(uart_num, buf_size, buf_size, 0, NULL, 0);
+		if (ret == ESP_OK) ESP_LOGW(TAG, "UART event diagnostics unavailable");
+	}
 	if (ret != ESP_OK) {
 		ESP_LOGE(TAG, "Failed to install UART driver: %s", esp_err_to_name(ret));
 		return false;
@@ -54,6 +63,7 @@ bool SCSerial::begin(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin
 	if (ret != ESP_OK) {
 		ESP_LOGE(TAG, "Failed to configure UART: %s", esp_err_to_name(ret));
 		uart_driver_delete(uart_num);
+		_events = nullptr;
 		this->uart_num = UART_NUM_MAX;
 		return false;
 	}
@@ -62,10 +72,19 @@ bool SCSerial::begin(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin
 	if (ret != ESP_OK) {
 		ESP_LOGE(TAG, "Failed to set UART pins: %s", esp_err_to_name(ret));
 		uart_driver_delete(uart_num);
+		_events = nullptr;
 		this->uart_num = UART_NUM_MAX;
 		return false;
 	}
 
+	// Short servo replies (6-21 bytes) must reach the driver promptly.
+	// Keep the existing baud rate and protocol; avoid per-byte interrupts.
+	const esp_err_t fifo_result = uart_set_rx_full_threshold(uart_num, 16);
+	const esp_err_t timeout_result = uart_set_rx_timeout(uart_num, 3);
+	if (fifo_result != ESP_OK || timeout_result != ESP_OK) {
+		ESP_LOGW(TAG, "servo RX tuning failed: fifo=%s timeout=%s",
+		         esp_err_to_name(fifo_result), esp_err_to_name(timeout_result));
+	}
 	return true;
 }
 
@@ -73,103 +92,86 @@ void SCSerial::end()
 {
 	if (uart_num < UART_NUM_MAX) {
 		uart_driver_delete(uart_num);
+		_events = nullptr;
 		uart_num = UART_NUM_MAX;
 	}
 }
 
-int SCSerial::readSCS(unsigned char *nDat, int nLen, unsigned long TimeOut)
+int SCSerial::readBytes(unsigned char *nDat, int nLen, unsigned long timeout, bool interByteTimeout)
 {
-	if (uart_num >= UART_NUM_MAX) {
-		return 0;
-	}
+	if (uart_num >= UART_NUM_MAX || nLen <= 0 || !_tx_ok) return 0;
 
 	int size = 0;
-	int64_t t_begin = esp_timer_get_time() / 1000;
-
-	while (1) {
-		size_t available = 0;
-		uart_get_buffered_data_len(uart_num, &available);
-
-		if (available > 0) {
-			unsigned char byte;
-			int len = uart_read_bytes(uart_num, &byte, 1, 0);
-			if (len > 0) {
-				if (nDat) {
-					nDat[size] = byte;
-				}
-				size++;
-			}
-		}
-
-		if (size >= nLen) {
-			break;
-		}
-
-		if ((esp_timer_get_time() / 1000) - t_begin > static_cast<int64_t>(TimeOut)) {
-			break;
-		}
-
-		vTaskDelay(pdMS_TO_TICKS(1));
+	const int64_t call_started = esp_timer_get_time();
+	const int64_t deadline = interByteTimeout ? _reply_deadline_us :
+	    call_started + static_cast<int64_t>(timeout) * 1000;
+	unsigned char discard[32];
+	while (size < nLen) {
+		const int64_t remaining = deadline - esp_timer_get_time();
+		if (remaining <= 0) break;
+		size_t count = static_cast<size_t>(nLen - size);
+		if (!nDat && count > sizeof(discard)) count = sizeof(discard);
+		// Wake as soon as the UART driver publishes data rather than
+		// sleeping for a full tick after every empty buffer check.
+		const int64_t tick_us = static_cast<int64_t>(portTICK_PERIOD_MS) * 1000;
+		const TickType_t ticks = static_cast<TickType_t>((remaining + tick_us - 1) / tick_us);
+		const int len = uart_read_bytes(uart_num, nDat ? nDat + size : discard, count, ticks);
+		if (len < 0) break;
+		if (len == 0) continue; // A tick-aligned timeout may end before the absolute deadline.
+		// A task preempted beyond its transaction deadline must not
+		// accept late bytes as feedback from the current command.
+		if (esp_timer_get_time() >= deadline) break;
+		size += len;
 	}
-
+	const uint32_t elapsed = esp_timer_get_time() - call_started;
+	++_rx_calls;
+	if (size != nLen) ++_rx_short;
+	if (elapsed > _rx_max_us) _rx_max_us = elapsed;
 	return size;
+}
+
+int SCSerial::readSCS(unsigned char *nDat, int nLen, unsigned long TimeOut)
+{
+	return readBytes(nDat, nLen, TimeOut, false);
 }
 
 int SCSerial::readSCS(unsigned char *nDat, int nLen)
 {
-	if (uart_num >= UART_NUM_MAX) {
-		return 0;
+	return readBytes(nDat, nLen, IOTimeOut, true);
+}
+
+void SCSerial::rememberTx(const u8* data, int count)
+{
+	if (!_tx_frame_complete || count < 0 || count > static_cast<int>(sizeof(_tx_frame)) - _tx_frame_size) {
+		_tx_frame_complete = false;
+		return;
 	}
-
-	int size = 0;
-	int64_t t_begin = esp_timer_get_time() / 1000;
-
-	while (1) {
-		size_t available = 0;
-		uart_get_buffered_data_len(uart_num, &available);
-
-		if (available > 0) {
-			unsigned char byte;
-			int len = uart_read_bytes(uart_num, &byte, 1, 0);
-			if (len > 0) {
-				if (nDat) {
-					nDat[size] = byte;
-				}
-				size++;
-				t_begin = esp_timer_get_time() / 1000;
-			}
-		}
-
-		if (size >= nLen) {
-			break;
-		}
-
-		if ((esp_timer_get_time() / 1000) - t_begin > static_cast<int64_t>(IOTimeOut)) {
-			break;
-		}
-
-		vTaskDelay(pdMS_TO_TICKS(1));
-	}
-
-	return size;
+	std::memcpy(_tx_frame + _tx_frame_size, data, count);
+	_tx_frame_size += count;
 }
 
 int SCSerial::writeSCS(unsigned char *nDat, int nLen)
 {
-	if (uart_num >= UART_NUM_MAX || nDat == NULL) {
+	if (uart_num >= UART_NUM_MAX || nDat == NULL || !_tx_ok) {
 		return 0;
 	}
 
-	return uart_write_bytes(uart_num, reinterpret_cast<const char *>(nDat), nLen);
+	const int sent = uart_write_bytes(uart_num, reinterpret_cast<const char *>(nDat), nLen);
+	if (sent != nLen) _tx_ok = false;
+	else rememberTx(nDat, nLen);
+	return sent;
 }
 
 int SCSerial::writeSCS(unsigned char bDat)
 {
-	if (uart_num >= UART_NUM_MAX) {
+	if (uart_num >= UART_NUM_MAX || !_tx_ok) {
 		return 0;
 	}
 
-	return uart_write_bytes(uart_num, reinterpret_cast<const char *>(&bDat), 1);
+	const int sent = uart_write_bytes(uart_num, reinterpret_cast<const char *>(&bDat), 1);
+	if (sent != 1) _tx_ok = false;
+	else rememberTx(&bDat, 1);
+	return sent;
 }
 
 void SCSerial::rFlushSCS()
@@ -178,6 +180,13 @@ void SCSerial::rFlushSCS()
 		return;
 	}
 
+	_reply_deadline_us = 0;
+	// After a failed TX, do not append another frame to undrained bytes.
+	if (!_tx_ok && uart_wait_tx_done(uart_num, 0) != ESP_OK) return;
+	_tx_ok = true;
+	_tx_frame_size = 0;
+	_tx_frame_complete = true;
+	drainEvents();
 	uart_flush_input(uart_num);
 }
 
@@ -187,5 +196,102 @@ void SCSerial::wFlushSCS()
 		return;
 	}
 
-	uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100));
+	const int64_t started = esp_timer_get_time();
+	const esp_err_t result = _tx_ok ? uart_wait_tx_done(uart_num, pdMS_TO_TICKS(20)) : ESP_FAIL;
+	const uint32_t elapsed = esp_timer_get_time() - started;
+	if (elapsed > _tx_max_us) _tx_max_us = elapsed;
+	_tx_ok = result == ESP_OK;
+	_reply_deadline_us = _tx_ok ? esp_timer_get_time() + static_cast<int64_t>(IOTimeOut) * 1000 : 0;
+	if (result != ESP_OK) {
+		++_tx_fail;
+		ESP_LOGW(TAG, "servo TX completion failed: %s", esp_err_to_name(result));
+	}
+}
+
+// Optional write replies: bounded microsecond polling, independent of RTOS tick.
+// Do not impose a full read timeout when a servo does not return an ACK.
+int SCSerial::readOptionalAck(u8 id, u8* data, int count, u16 timeoutUs)
+{
+	if (uart_num >= UART_NUM_MAX || !data || count != 6 || !_tx_ok) return 0;
+	const int64_t started = esp_timer_get_time();
+	const int64_t deadline = started + timeoutUs;
+	ftservo::ReplyParser parser(id, 0, 0, false, _tx_frame_complete ? _tx_frame : nullptr,
+	                            _tx_frame_complete ? _tx_frame_size : 0);
+	int seen = 0;
+	int echo_bytes = 0;
+	constexpr int kMaxBytes = 64;
+	u8 bytes[16];
+	while (seen < kMaxBytes && esp_timer_get_time() < deadline) {
+		// Process short replies in batches to reduce UART driver lock traffic.
+		const int remaining = kMaxBytes - seen;
+		const int capacity = static_cast<int>(sizeof(bytes));
+		const int len = uart_read_bytes(uart_num, bytes, remaining < capacity ? remaining : capacity, 0);
+		if (len < 0) break;
+		if (len == 0) {
+			esp_rom_delay_us(20);
+			continue;
+		}
+		const int64_t received_at = esp_timer_get_time();
+		if (received_at >= deadline) {
+			seen += len;
+			break;
+		}
+		for (int i = 0; i < len; ++i) {
+			++seen;
+			const auto event = parser.Feed(bytes[i]);
+			if (event == ftservo::ReplyParser::Event::Match) {
+				parser.CopyFrame(data);
+				if (seen != count) ++_ack_resync;
+				if (received_at - started >= kDefaultAckTimeoutUs) ++_ack_after_1ms;
+				const uint32_t elapsed = esp_timer_get_time() - started;
+				if (elapsed > _ack_max_us) _ack_max_us = elapsed;
+				return count;
+			}
+			if (event == ftservo::ReplyParser::Event::Echo) {
+				++_ack_echo;
+				echo_bytes += _tx_frame_size;
+			}
+		}
+	}
+	const uint32_t elapsed = esp_timer_get_time() - started;
+	if (elapsed > _ack_max_us) _ack_max_us = elapsed;
+	if (echo_bytes > 0 && seen == echo_bytes) ++_ack_echo_only;
+	// A verified copy of our own TX is still an absent reply.
+	return seen > echo_bytes ? 1 : 0;
+}
+
+void SCSerial::drainEvents()
+{
+	if (!_events) return;
+	if (uxQueueMessagesWaiting(_events) >= kEventDepth) ++_event_full;
+	uart_event_t event;
+	// Bound diagnostic work even if new events arrive continuously.
+	for (int i = 0; i < kEventDepth && xQueueReceive(_events, &event, 0) == pdTRUE; ++i) {
+		switch (event.type) {
+			case UART_FIFO_OVF: ++_fifo_overflow; break;
+			case UART_BUFFER_FULL: ++_buffer_full; break;
+			case UART_FRAME_ERR: ++_frame_error; break;
+			case UART_PARITY_ERR: ++_parity_error; break;
+			case UART_BREAK: ++_breaks; break;
+			default: break;
+		}
+	}
+}
+
+void SCSerial::reportDiagnostics()
+{
+	const int64_t now = esp_timer_get_time();
+	if (now - _report_us < 10000000) return;
+	_report_us = now;
+	drainEvents();
+	ESP_LOGI(TAG, "[SERVO_UART] events=%d fifo_ovf=%lu buffer_full=%lu frame=%lu parity=%lu break=%lu queue_full=%lu",
+	         _events != nullptr, (unsigned long)_fifo_overflow, (unsigned long)_buffer_full,
+	         (unsigned long)_frame_error, (unsigned long)_parity_error, (unsigned long)_breaks, (unsigned long)_event_full);
+	ESP_LOGI(TAG, "[SERVO_IO] rx_calls=%lu rx_short=%lu rx_max_us=%lu ack_max_us=%lu tx_max_us=%lu tx_fail=%lu",
+	         (unsigned long)_rx_calls, (unsigned long)_rx_short, (unsigned long)_rx_max_us,
+	         (unsigned long)_ack_max_us, (unsigned long)_tx_max_us, (unsigned long)_tx_fail);
+	ESP_LOGI(TAG, "[SERVO_RX_RESYNC] ack_echo=%lu ack_resync=%lu ack_echo_only=%lu ack_after_1ms=%lu",
+	         (unsigned long)_ack_echo, (unsigned long)_ack_resync,
+	         (unsigned long)_ack_echo_only, (unsigned long)_ack_after_1ms);
+	_rx_max_us = _ack_max_us = _tx_max_us = 0;
 }

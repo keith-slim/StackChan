@@ -116,6 +116,9 @@ private:
     bool _has_lifetime              = false;
 
     int _animation_index = 0;
+    // setPosition() で指定された目元を、落下アニメーションの原点として保持する。
+    int _animation_origin_x = 0;
+    int _animation_origin_y = 0;
 };
 
 /**

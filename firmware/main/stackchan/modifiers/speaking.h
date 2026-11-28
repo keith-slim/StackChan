@@ -8,6 +8,7 @@
 #include "../utils/random.h"
 #include <smooth_ui_toolkit.hpp>
 #include <hal/hal.h>
+#include "../speech_mouth.h"
 #include <cstdint>
 
 namespace stackchan {
@@ -19,8 +20,8 @@ public:
      * @param mouthIntervalMs 嘴巴开合频率（默认 180ms）
      * @param enableMotion 是否在说话时伴随头部微动
      */
-    SpeakingModifier(uint32_t destroyAfterMs = 0, uint32_t mouthIntervalMs = 180, bool enableMotion = true)
-        : _mouth_interval_ms(mouthIntervalMs), _enable_motion(enableMotion)
+    SpeakingModifier(uint32_t destroyAfterMs = 0, uint32_t mouthIntervalMs = 180, bool enableMotion = true, bool followPcm = false)
+        : _mouth_interval_ms(mouthIntervalMs), _enable_motion(enableMotion), _follow_pcm(followPcm)
     {
         uint32_t now = GetHAL().millis();
 
@@ -56,8 +57,11 @@ public:
             return;
         }
 
-        // 嘴巴开合动画
-        if (now >= _next_mouth_tick) {
+        // Reuse the existing mouth feature; actual speaker PCM controls
+        // StackChan speech, while legacy callers retain timed animation.
+        if (_follow_pcm) {
+            stackchan.avatar().mouth().setWeight(speech_mouth::Opening(now));
+        } else if (now >= _next_mouth_tick) {
             _next_mouth_tick = now + _mouth_interval_ms;
             animate_mouth(stackchan.avatar());
         }
@@ -138,6 +142,7 @@ private:
 
     bool _has_lifetime         = false;
     bool _enable_motion        = false;
+    bool _follow_pcm            = false;
     bool _is_mouth_open        = false;
     bool _need_get_prev_angles = true;
 
