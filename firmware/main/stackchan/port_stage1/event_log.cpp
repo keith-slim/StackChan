@@ -49,8 +49,6 @@ constexpr Rule kRules[] = {
     {"[IDLE_RECOVERY] ", Group::Events, Category::Conversation},
     {"[SLEEP_DIAG] ", Group::Events, Category::Sleep},
     {"[QUIET] ", Group::Events, Category::Sleep},
-    {"[AUDIO_TIMING] ", Group::Events, Category::Audio},
-    {"free sram:", Group::Events, Category::Memory},
     {"[WS_MEM_DIAG] ", Group::Events, Category::Memory},
     {"WebSocket handshake done,", Group::Events, Category::Network},
     {"Websocket disconnected", Group::Events, Category::Network},

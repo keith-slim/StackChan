@@ -45,6 +45,11 @@ bool Valid(const Header& header) {
            header.entry_size == sizeof(Record) && header.crc == Checksum(&header, offsetof(Header, crc));
 }
 
+bool IsRoutineSample(const char* message) {
+    return std::strncmp(message, "[AUDIO_TIMING]", sizeof("[AUDIO_TIMING]") - 1) == 0 ||
+           std::strncmp(message, "free sram:", sizeof("free sram:") - 1) == 0;
+}
+
 bool LoadHeader(FILE* file, Header& header, unsigned& slot) {
     Header slots[2]{};
     const auto count = std::fread(slots, sizeof(Header), 2, file);
@@ -135,7 +140,8 @@ bool Read(const char* root, Group group, Snapshot& snapshot) {
         ok = ok && std::fread(&record, sizeof(record), 1, file) == 1;
         // 書き込み中に電源が切れた場合、古いヘッダーが指す上書き済みの位置を読み飛ばす。
         if (ok && record.position == index && record.crc == Checksum(&record, offsetof(Record, crc)) &&
-            std::memchr(record.entry.message, '\0', sizeof(record.entry.message))) {
+            std::memchr(record.entry.message, '\0', sizeof(record.entry.message)) &&
+            (group != Group::Events || !IsRoutineSample(record.entry.message))) {
             snapshot.entries.get()[snapshot.count++] = record.entry;
         }
     }
