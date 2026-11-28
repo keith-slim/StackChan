@@ -86,6 +86,7 @@ button:hover{background:#204bb4}button:disabled{opacity:.45;cursor:default}
 .log-table summary{cursor:pointer;font-weight:600}.log-line{padding:4px 0;margin-left:1em;color:#465976}
 .log-line+.log-line{border-top:1px solid #e6eaf0}.log-line time{color:#68758a}
 .log-phase{margin:10px 0 3px 1em;color:#314765;font-weight:600}
+.log-parent+details{margin:3px 0 0 1em}
 @media(max-width:740px){
  .app{display:block}.sidebar{position:static;height:auto;padding:10px 12px}
  .brand{display:inline-block;font-size:16px;padding:3px 10px 8px}
@@ -984,27 +985,37 @@ function logGroupRow(event,label='',kind=''){
 }
 function groupNormalLogs(events){
  const groups=[],finishedSpeech=new Map();
- let active=null,theatre=null,scheduled=null,boot=null;
+ let active=null,theatre=null,scheduled=null,boot=null,tail=null;
  const push=(event,label,kind)=>{const group=logGroupRow(event,label,kind);groups.push(group);return group;};
  const merge=(from,into)=>{into.events.unshift(...from.events);from.merged=true;};
- const finish=result=>{
+ const closeAt=(group,eventTime)=>{group.closedAt=eventTime;tail=group;};
+ const follows=(event,group)=>group?.closedAt!==undefined && event.uptime_ms>=group.closedAt &&
+  event.uptime_ms-group.closedAt<=3000;
+ const finish=(result,eventTime)=>{
   if(!active)return;
   active.result=active.result||result;
-  if(active.kind!=='conversation')finishedSpeech.set(active.kind,active);
+  closeAt(active,eventTime);
+  if(active.kind!=='conversation'&&active.kind!=='boot')finishedSpeech.set(active.kind,active);
   active=null;
  };
  for(const event of events){
-  if(active?.endedAt!==undefined&&event.uptime_ms-active.endedAt>3000)finish('終了');
+  if(active?.endedAt!==undefined&&event.uptime_ms-active.endedAt>3000)finish('終了',active.endedAt);
   const text=event.message;
+  if(event.category==='起動'){
+   finish('終了',event.uptime_ms);
+   boot=active=push(event,'起動','boot');
+   continue;
+  }
   const skit=text.match(/^\[THEATRE\] phase=(started|ended) name=(.*)$/);
   if(skit){
+   if(skit[1]==='started')finish('終了記録なし',event.uptime_ms);
    if(skit[1]==='ended'&&theatre&&theatre.label===skit[2]){
-    theatre.events.push(event);theatre.result='終了';theatre=null;
+    theatre.events.push(event);theatre.result='終了';closeAt(theatre,event.uptime_ms);theatre=null;
    }else{
     if(theatre)theatre.result='終了';
     const scene=push(event,skit[2],'theatre');
     if(skit[1]==='started')theatre=scene;
-    else{scene.result='終了';theatre=null;}
+    else{scene.result='終了';closeAt(scene,event.uptime_ms);theatre=null;}
    }
    continue;
   }
@@ -1025,11 +1036,11 @@ function groupNormalLogs(events){
     active.events.push(event);continue;
    }
    const previous=finishedSpeech.get(kind);
-   if(phase==='server_stream_completed'&&active?.kind!==kind&&previous&&event.uptime_ms-previous.events.at(-1).uptime_ms<=3000){
+   if(phase==='server_stream_completed'&&active?.kind!==kind&&follows(event,previous)){
     previous.events.push(event);continue;
    }
    if(active?.kind!==kind||(phase==='queued'&&(active.queued||active.result))){
-    finish('中断');active=push(event,label,kind);
+    finish(active?.kind==='boot'?'完了':'中断',event.uptime_ms);active=push(event,label,kind);
     if(kind==='startup'&&boot){merge(boot,active);boot=null;}
    }else active.events.push(event);
    if(phase==='queued')active.queued=true;
@@ -1043,24 +1054,29 @@ function groupNormalLogs(events){
   }
   if(text.startsWith('Wake word detected:')){
    if(active?.kind==='conversation')active.events.push(event);
-   else{finish('中断');active=push(event,'会話','conversation');}
+   else{finish(active?.kind==='boot'?'完了':'中断',event.uptime_ms);active=push(event,'会話','conversation');}
    continue;
   }
   const transition=text.match(/^State: (\w+) -> (\w+)/);
   if(transition){
    const [,from,to]=transition;
    if(!active&&liveStates.has(to)&&(from==='idle'||liveStates.has(from))){
-    active=push(event,'会話','conversation');
+    active=push(event,from==='idle'?'会話':'会話（表示分）','conversation');
    }else if(active)active.events.push(event);
-   else{push(event);continue;}
+   else if(follows(event,tail))tail.events.push(event);
+   else if(to==='starting'||to==='activating')boot=active=push(event,'起動（表示分）','boot');
+   else continue;
+   if(!active)continue;
    if(active.kind==='conversation'&&to==='speaking')++active.turns;
-   if(to==='idle'||to==='wifi_configuring')finish('終了');
+   if(to==='idle'||to==='wifi_configuring')finish(active.kind==='boot'?'完了':'終了',event.uptime_ms);
    continue;
   }
-  if(active&&sessionCategories.has(event.category))active.events.push(event);
-  else{
-   const entry=push(event);
-   if(event.category==='起動')boot=entry;
+  if(sessionCategories.has(event.category)){
+   // 状態復帰や通信の診断は、進行中か直前に終わったイベントの詳細にする。
+   const owner=active||theatre||(follows(event,tail)?tail:null);
+   if(owner)owner.events.push(event);
+  }else{
+   push(event);
   }
  }
  return groups.filter(group=>!group.merged);
@@ -1104,12 +1120,12 @@ function renderLogEntries(events,group){
  const anchorTop=anchor?.getBoundingClientRect().top;
  const groups=group==='servo'?groupServoLogs(events):groupNormalLogs(events);
  const rows=document.createDocumentFragment();
- groups.sort((a,b)=>b.events.at(-1).sequence-a.events.at(-1).sequence);
+ groups.sort((a,b)=>b.events[0].sequence-a.events[0].sequence);
  for(const item of groups){
   const first=item.events[0];
   const row=document.createElement('tr'),content=document.createElement('td');
   row.dataset.key=String(first.sequence);
-  const category=item.kind==='theatre'?'小芝居':item.label||first.category;
+  const category=item.kind==='theatre'?'小芝居':item.kind==='startup'?'起動':item.label||first.category;
   for(const value of [logTime(first),category]){
    const cell=document.createElement('td');cell.textContent=value;row.append(cell);
   }
@@ -1117,7 +1133,12 @@ function renderLogEntries(events,group){
    const details=document.createElement('details'),summary=document.createElement('summary');
    details.dataset.key=row.dataset.key;details.open=open.get(details.dataset.key)??!item.result;
    const next=first.message.match(/phase=scheduled delay_minutes=(\d+)/)?.[1];
-   summary.textContent=[item.label,next?'予定 '+next+'分後':'',item.turns?item.turns+'ターン':'',
+   const dream=item.kind==='sleep_talk'&&item.events.map(entry=>entry.message.match(/\bdream=([^ ]+)/)?.[1]).find(Boolean);
+   const parentText=next?'次回は'+next+'分後':dream?'夢：'+dream:first.category==='起動'?first.message:'';
+   if(parentText){
+    const parent=document.createElement('div');parent.className='log-parent';parent.textContent=parentText;content.append(parent);
+   }
+   summary.textContent=[next?'独り言':item.label,item.turns?item.turns+'ターン':'',
     item.result||'進行中',item.events.length+'件'].filter(Boolean).join(' ／ ');
    details.append(summary);
    if(item.sections){
