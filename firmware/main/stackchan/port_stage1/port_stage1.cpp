@@ -365,8 +365,11 @@ struct Runtime {
     uint32_t eye_contact_since = 0, last_averted_at = 0;
     OwnedTracking gaze_yaw;
     std::unique_ptr<avatar::ShyDecorator> gaze_blush;
-    int gaze_origin = 0;
-    bool gaze_listening = false, averted_this_listen = false, gaze_returning = false;
+    enum class GlancePhase : uint8_t { Turning, Holding, Returning };
+    GlancePhase gaze_phase = GlancePhase::Turning;
+    uint32_t gaze_phase_at = 0;
+    int gaze_origin = 0, gaze_target = 0;
+    bool gaze_listening = false, averted_this_listen = false;
     std::unique_ptr<AvatarThinkingFace> thinking_face;
     Clock schedule;
     Phase phase = Phase::Boot;
@@ -542,8 +545,8 @@ struct Runtime {
         ESP_LOGI(LOG_TAG, "[GAZE] phase=ended result=%s", result);
     }
     bool TickListeningGlance(StackChan& sc, uint32_t now, bool available) {
-        constexpr int kGlanceAngle = 80; // 8 degrees in servo angle units
-        constexpr uint32_t kTurnBackMs = 500, kGlanceMinMs = 1000, kGlanceTimeoutMs = 1500;
+        constexpr int kGlanceAngle = 150; // 15 degrees in servo angle units
+        constexpr uint32_t kGlanceHoldMs = 1000, kGlanceArrivalTimeoutMs = 2000;
         auto& motion = sc.motion();
         auto& yaw = motion.yawServo();
         if (!available || !gaze_listening) {
@@ -552,29 +555,49 @@ struct Runtime {
             return false;
         }
         if (gaze_yaw.commanded) {
-            const auto elapsed = now - last_averted_at;
             if (gaze_yaw.Superseded(yaw)) {
                 StopListeningGlance(yaw);
                 return false;
             }
-            if (gaze_returning && elapsed >= kGlanceMinMs && now - gaze_yaw.last_poll >= 200) {
-                // 実測角が既存の到達許容差に収まったら復帰完了とする。
+            const auto elapsed = now - gaze_phase_at;
+            if (gaze_phase == GlancePhase::Holding) {
+                if (elapsed >= kGlanceHoldMs) {
+                    gaze_yaw.Issue(yaw, gaze_origin, now, kFaceTrackingRate);
+                    gaze_phase = GlancePhase::Returning;
+                    gaze_phase_at = now;
+                    ESP_LOGI(LOG_TAG, "[SERVO_GAZE] phase=return axis=yaw target=%d rate=%d",
+                             gaze_origin, kFaceTrackingRate);
+                }
+                return true;
+            }
+            const bool returning = gaze_phase == GlancePhase::Returning;
+            if (now - gaze_yaw.last_poll >= 200) {
                 gaze_yaw.last_poll = now;
                 int actual = 0;
-                if (yaw.tryGetCurrentAngle(actual) && search_arrived(actual, gaze_origin, kYawArrivalTolerance)) {
-                    StopListeningGlance(yaw, "completed", &actual);
-                    return false;
+                if (yaw.tryGetCurrentAngle(actual)) {
+                    const bool settled = gaze_yaw.sampled && std::abs(actual - gaze_yaw.last_angle) <= 5;
+                    gaze_yaw.last_angle = actual;
+                    gaze_yaw.sampled = true;
+                    if (search_arrived(actual, returning ? gaze_origin : gaze_target, kYawArrivalTolerance)) {
+                        if (returning) {
+                            StopListeningGlance(yaw, "completed", &actual);
+                            return false;
+                        }
+                        if (settled) {
+                            gaze_phase = GlancePhase::Holding;
+                            gaze_phase_at = GetHAL().millis();
+                            ESP_LOGI(LOG_TAG, "[SERVO_GAZE] phase=hold axis=yaw actual=%d target=%d",
+                                     actual, gaze_target);
+                            return true;
+                        }
+                    }
+                } else {
+                    gaze_yaw.sampled = false;
                 }
             }
-            if (elapsed >= kGlanceTimeoutMs) {
+            if (elapsed >= kGlanceArrivalTimeoutMs) {
                 StopListeningGlance(yaw, "timeout");
                 return false;
-            }
-            if (!gaze_returning && elapsed >= kTurnBackMs) {
-                gaze_yaw.Issue(yaw, gaze_origin, now, kFaceTrackingRate);
-                gaze_returning = true;
-                ESP_LOGI(LOG_TAG, "[SERVO_GAZE] phase=return axis=yaw target=%d rate=%d",
-                         gaze_origin, kFaceTrackingRate);
             }
             return true;
         }
@@ -600,22 +623,23 @@ struct Runtime {
             return false;
         }
         const bool turn_right = can_turn_right && (!can_turn_left || (esp_random() & 1));
-        const int target = gaze_origin + (turn_right ? kGlanceAngle : -kGlanceAngle);
+        gaze_target = gaze_origin + (turn_right ? kGlanceAngle : -kGlanceAngle);
         // 顔追従の指示を破棄し、首が戻るまで上下左右の追従を保留する。
         perception_looks.Invalidate();
         perception_yaw.Stop(yaw, &gaze_origin);
         perception_pitch.Stop(motion.pitchServo());
-        gaze_yaw.Issue(yaw, target, now, kFaceTrackingRate, &gaze_origin);
+        gaze_yaw.Issue(yaw, gaze_target, now, kFaceTrackingRate, &gaze_origin);
         averted_this_listen = true;
         last_averted_at = now;
-        gaze_returning = false;
+        gaze_phase = GlancePhase::Turning;
+        gaze_phase_at = now;
         const bool blush = (esp_random() & 1) != 0;
         if (blush && sc.avatar().getEmotion() != avatar::Emotion::Happy) {
             auto& avatar = static_cast<avatar::DefaultAvatar&>(sc.avatar());
             gaze_blush = std::make_unique<avatar::ShyDecorator>(avatar.getPanel()->get());
         }
         ESP_LOGI(LOG_TAG, "[SERVO_GAZE] phase=start axis=yaw from=%d target=%d rate=%d",
-                 gaze_origin, target, kFaceTrackingRate);
+                 gaze_origin, gaze_target, kFaceTrackingRate);
         ESP_LOGI(LOG_TAG, "[GAZE] phase=started blush=%d", blush);
         return true;
     }

@@ -1128,7 +1128,7 @@ function groupServoLogs(events){
  }
  for(const event of events){
   const text=event.message;
-  const gazePhase=text.match(/^\[SERVO_GAZE\] phase=(start|return|end)\b/)?.[1];
+  const gazePhase=text.match(/^\[SERVO_GAZE\] phase=(start|hold|return|end)\b/)?.[1];
   if(gazePhase){
    if(gazePhase==='start'||!gaze){
     if(gaze)gaze.result='終了記録なし';
