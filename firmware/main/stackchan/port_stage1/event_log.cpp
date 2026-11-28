@@ -50,6 +50,8 @@ constexpr Rule kRules[] = {
     {"[NAP] phase=", Group::Events, Category::Sleep},
     {"[SLEEP_DIAG] ", Group::Events, Category::Sleep},
     {"[QUIET] ", Group::Events, Category::Sleep},
+    {"[TTS_DIAG] ", Group::Events, Category::Audio},
+    {"[TTS_PCM_DIAG] ", Group::Events, Category::Audio},
     {"[WS_MEM_DIAG] ", Group::Events, Category::Memory},
     {"WebSocket handshake done,", Group::Events, Category::Network},
     {"Websocket disconnected", Group::Events, Category::Network},
